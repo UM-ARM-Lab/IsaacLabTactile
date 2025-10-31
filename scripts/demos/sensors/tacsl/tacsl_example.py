@@ -26,7 +26,7 @@ import cv2
 
 from isaaclab.app import AppLauncher
 from isaaclab.utils.timer import Timer
-from force_tool.visualization.plot_utils import save_numpy_video, get_img_from_fig
+# from force_tool.visualization.plot_utils import save_numpy_video, get_img_from_fig
 
 # Add argparse arguments
 parser = argparse.ArgumentParser(description="TacSL tactile sensor example.")
@@ -51,7 +51,7 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 # Parse the arguments
 args_cli = parser.parse_args()
-
+args_cli.enable_cameras = True
 # Launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -343,7 +343,7 @@ def create_episode_video(episode_frames, output_dir, episode_num):
     
     # Create video using save_numpy_video
     video_path = os.path.join(output_dir, f"episode_{episode_num:03d}")
-    save_numpy_video(video_array, video_path, fps=20, format='mp4', draw_idx=True)
+    # save_numpy_video(video_array, video_path, fps=20, format='mp4', draw_idx=True)
     print(f"[INFO]: Saved episode video: {video_path}.mp4")
 
 
