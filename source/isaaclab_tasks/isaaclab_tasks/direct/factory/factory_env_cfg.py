@@ -21,7 +21,7 @@ from isaaclab.sensors import TiledCameraCfg, VisuoTactileSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.utils import configclass
 
-from .factory_tasks_cfg import ASSET_DIR, FactoryTask, GearMesh, NutThread, PegInsert
+from .factory_tasks_cfg import ASSET_DIR, FactoryTask, GearMesh, NutThread, PegInsert, TestTask
 from omegaconf import OmegaConf
 
 OBS_DIM_CFG = {
@@ -31,6 +31,8 @@ OBS_DIM_CFG = {
     "held_pos": 3,
     "ee_linvel": 3,
     "ee_angvel": 3,
+    "gripper_pos": 2,
+    "gripper_vel": 2,
     "scales": 1,
     "held_pos_rel_fixed": 3,
     "held_quat": 4,
@@ -324,6 +326,12 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.task.held_asset_rot_noise = OmegaConf.to_container(task.held_asset_rot_noise, resolve=True)
         if task.get("hand_init_pos", None) is not None:
             self.task.hand_init_pos = OmegaConf.to_container(task.hand_init_pos, resolve=True)
+        if task.get("hand_init_pos_noise", None) is not None:
+            self.task.hand_init_pos_noise = OmegaConf.to_container(task.hand_init_pos_noise, resolve=True)
+        if task.get("hand_init_orn", None) is not None:
+            self.task.hand_init_orn = OmegaConf.to_container(task.hand_init_orn, resolve=True)
+        if task.get("hand_init_orn_noise", None) is not None:
+            self.task.hand_init_orn_noise = OmegaConf.to_container(task.hand_init_orn_noise, resolve=True)
         ctrl = env.get("ctrl", OmegaConf.create({}))
         if ctrl.get("ema_factor", None) is not None:
             self.ctrl.ema_factor = ctrl.ema_factor
@@ -371,3 +379,41 @@ class FactoryTaskNutThreadCfg(FactoryEnvCfg):
     task_name = "nut_thread"
     task = NutThread()
     episode_length_s = 30.0
+
+
+@configclass
+class FactoryTaskTestCfg(FactoryEnvCfg):
+    """Configuration for test environment with operational space control (end-effector control)."""
+    task_name = "test"
+    task = TestTask()
+    episode_length_s = 10.0
+    
+    # Operational space control: 6 DOF end-effector control (3 pos + 3 rot) + 1 DOF gripper
+    action_space = 7
+    
+    # Observations for test environment (end-effector pose and velocities)
+    # Note: These values will be computed automatically from obs_order and state_order in __init__
+    observation_space = 20  # Placeholder; auto-computed in TestEnv.__init__
+    state_space = 27  # Placeholder: 3 pos + 4 quat + 3 linvel + 3 angvel + 7 joint_pos + 7 prev_actions = 27
+    
+    obs_order: list = ["fingertip_pos", "fingertip_quat", "ee_linvel", "ee_angvel", "gripper_pos"]
+    state_order: list = ["fingertip_pos", "fingertip_quat", "ee_linvel", "ee_angvel", "joint_pos"]
+    
+    def __post_init__(self):
+        """Post initialization - override viewer to track robot instead of fixed_asset."""
+        super().__post_init__()
+        
+        # Keep torque control (stiffness=0) since we use operational space control
+        # No need to override actuators - use default torque control from FactoryEnvCfg
+        
+        # Lower gripper stiffness for more compliant gripper control
+        self.robot.actuators["panda_hand"].stiffness = 50.0  # Reduced from 7500.0
+        self.robot.actuators["panda_hand"].damping = 5.0  # Reduced from 173.0 (proportional to stiffness reduction)
+
+        # Double the position action threshold only for the test environment
+        self.ctrl.pos_action_threshold = [v * 2 for v in self.ctrl.pos_action_threshold]
+        
+        # Override viewer to track robot since test environment has no fixed_asset
+        self.viewer.asset_name = "robot"
+        self.viewer.eye = (1.0, 1.0, 1.3)
+        self.viewer.lookat = (0.55, 0.0, 0.3)

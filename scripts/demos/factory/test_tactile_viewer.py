@@ -1,31 +1,33 @@
 #!/usr/bin/env python
 # Copyright (c) 2025
 # SPDX-License-Identifier: BSD-3-Clause
-# noqa: SLF001
 
 """
-Viewer demo for Factory Peg Insertion with TacSL visuo-tactile sensing.
+Viewer demo for Factory Test environment with operational space control and tactile sensing.
 
 This script:
- - Instantiates the Isaac-Factory-PegInsert-Direct-v0 task
- - Enables the tactile sensor and reading of tactile images
- - Steps the environment with zero actions
+ - Instantiates the Isaac-Factory-Test-Direct-v0 task
+ - Enables the tactile sensor and reading of tactile images (optional)
+ - Steps the environment with zero actions (robot stays in place)
  - Visualizes the scene via the Isaac Sim viewer
  - Optionally saves tactile images from each episode to video files
 
 Usage:
-    python scripts/demos/factory/peg_insert_tactile_viewer.py \
-        --num_envs 16 --enable_cameras --print_tactile
+    # Basic viewer with tactile sensor
+    python scripts/demos/factory/test_tactile_viewer.py \\
+        --num_envs 4 --enable_cameras
     
     # Save tactile videos for each episode:
-    python scripts/demos/factory/peg_insert_tactile_viewer.py \
-        --num_envs 16 --enable_cameras --save_video ./output_videos --video_fps 20
+    python scripts/demos/factory/test_tactile_viewer.py \\
+        --num_envs 4 --enable_cameras --save_video ./test_videos --video_fps 20
 
 Notes:
  - AppLauncher must be called first to set up Omniverse environment
  - Use --enable_cameras to render the scene
  - Tactile images are exposed via env.unwrapped._tactile_cam.data.taxim_tactile when enabled
  - Videos are saved per episode as tactile_episode_XXXX.mp4 in the specified directory
+- Action space is 7 DOF: end-effector control (3D position + 3D rotation as axis-angle) + gripper control
+- Control method: Operational Space Control (OSC) using torque-based control
 """
 
 import argparse
@@ -38,13 +40,13 @@ import cv2
 from isaaclab.app import AppLauncher
 
 # Add argparse arguments
-parser = argparse.ArgumentParser(description="Factory Peg Insertion viewer with tactile sensor")
-parser.add_argument("--num_envs", type=int, default=16, help="Number of parallel environments")
-parser.add_argument("--steps", type=int, default=0, help="Number of steps to run (0 = run forever)")
+parser = argparse.ArgumentParser(description="Factory Test environment viewer with tactile sensor")
+parser.add_argument("--num_envs", type=int, default=2, help="Number of parallel environments")
+parser.add_argument("--steps", type=int, default=149, help="Number of steps to run (0 = run forever)")
 parser.add_argument("--print_tactile", action="store_true", help="Print basic tactile stats each step")
 parser.add_argument("--save_video", type=str, default=None, help="Directory to save tactile videos (one per episode)")
+# parser.add_argument("--save_video", type=str, default="./test_videos", help="Directory to save tactile videos (one per episode)")
 parser.add_argument("--video_fps", type=int, default=20, help="FPS for saved videos")
-# parser.add_argument("--device", type=str, default="cuda:0", help="Simulation device")
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -63,15 +65,14 @@ import gymnasium as gym
 import isaaclab_tasks as _isaaclab_tasks  # noqa: F401
 
 from isaaclab.utils.timer import Timer
-from isaaclab_tasks.direct.factory.factory_env import FactoryEnv
-from isaaclab_tasks.direct.factory.factory_env_cfg import FactoryTaskPegInsertCfg
+from isaaclab_tasks.direct.factory.test_env import TestEnv
+from isaaclab_tasks.direct.factory.factory_env_cfg import FactoryTaskTestCfg
 from omegaconf import OmegaConf
 
 
 def main():
     # Create a modified config that enables tactile sensing
-    # Pass a minimal params to avoid None access inside __post_init__
-    env_cfg = FactoryTaskPegInsertCfg(params=OmegaConf.create({"env": {}}))
+    env_cfg = FactoryTaskTestCfg(params=OmegaConf.create({"env": {}}))
     env_cfg.enable_tactile_sensor = True
     env_cfg.read_tactile_sensor = True
     env_cfg.enable_obs_camera = False
@@ -86,12 +87,14 @@ def main():
         env_cfg.sim.device = args_cli.device
 
     # Create environment via gymnasium registry
-    print("[INFO] Creating Factory Peg Insert environment with tactile sensor...")
-    env: FactoryEnv = gym.make(
-        "Isaac-Factory-PegInsert-Direct-v0",
+    print("[INFO] Creating Factory Test environment with tactile sensor...")
+    env: TestEnv = gym.make(
+        "Isaac-Factory-Test-Direct-v0",
         cfg=env_cfg,
     )
     print("[INFO] Environment created successfully.")
+    print(f"[INFO] Action space: {env.action_space}")
+    print(f"[INFO] Observation space: {env.observation_space}")
 
     # Setup video recording if enabled
     video_output_dir = None
@@ -111,16 +114,26 @@ def main():
     video_height = None
     video_width = None
 
-    # Zero action loop
-    action_dim = env.unwrapped.action_size if hasattr(env.unwrapped, "action_size") else 6
-    # zero_actions = np.zeros((args_cli.num_envs, action_dim), dtype=np.float32)
-    zero_actions = torch.zeros((args_cli.num_envs, action_dim), dtype=torch.float32)
+    # Zero action loop (7 DOF: end-effector control via operational space control + gripper)
+    down_actions = torch.zeros((args_cli.num_envs, 7), dtype=torch.float32)
+    # down_actions[:, 2] = -0.3  # Small downward position offset
+    down_actions[:, 6] = 0.0  # Keep gripper open (1.0 maps to 0.04, fully open)
 
+    close_actions = down_actions.clone()
+    close_actions[:, 6] = -1.0  # Keep gripper closed (-1.0 maps to -0.04, fully closed)
+    close_actions[:, 2] = 0.0
+
+    down_actions[:, 3:6] = torch.randn((args_cli.num_envs, 3), dtype=torch.float32) * 1
+    
     print("[INFO] Starting viewer loop. Press Ctrl+C or close viewer to exit.")
+    print("[INFO] Robot will remain statifonary with zero actions (operational space control).")
+    print("[INFO] Action space: 7 DOF (3D position + 3D rotation as axis-angle + gripper)")
 
     timer = Timer()
     timer.start()
     steps = 0
+
+    close_step = 50
 
     def save_episode_video():
         """Save collected frames for current episode to video file."""
@@ -149,10 +162,10 @@ def main():
     def collect_tactile_frame():
         """Collect a tactile frame from the current state."""
         nonlocal video_height, video_width
-        unwrapped_env: FactoryEnv = env.unwrapped  # type: ignore[assignment]
-        tactile_cam = cast(any, getattr(unwrapped_env, "_tactile_cam", None))  # noqa: SLF001
+        unwrapped_env: TestEnv = env.unwrapped  # type: ignore[assignment]
+        tactile_cam = cast(any, getattr(unwrapped_env, "_tactile_cam", None))
         if hasattr(unwrapped_env, "_tactile_cam") and tactile_cam is not None:
-            data = tactile_cam.data  # noqa: SLF001
+            data = tactile_cam.data
             if hasattr(data, "taxim_tactile") and data.taxim_tactile is not None:
                 taxim = data.taxim_tactile
                 try:
@@ -192,10 +205,12 @@ def main():
     try:
         while simulation_app.is_running():
             # Step environment with zero actions
-            _, _, terminateds, truncateds, _ = env.step(zero_actions)
+            if steps < close_step:
+                _, _, terminateds, truncateds, _ = env.step(down_actions)
+            else:
+                _, _, terminateds, truncateds, _ = env.step(close_actions)
             
             # Check for episode resets (when environment 0 is done)
-            # Track episode based on first environment for consistency
             env_done = bool((terminateds | truncateds)[0])
             if env_done and video_output_dir:
                 # Episode ended for environment 0
@@ -211,8 +226,22 @@ def main():
                 if tactile_frame is not None:
                     episode_frames.append(tactile_frame)
 
+            # Print tactile info if requested
+            if args_cli.print_tactile and steps % 100 == 0:
+                unwrapped_env = env.unwrapped
+                if hasattr(unwrapped_env, "_tactile_cam") and unwrapped_env._tactile_cam is not None:
+                    data = unwrapped_env._tactile_cam.data
+                    if hasattr(data, "taxim_tactile") and data.taxim_tactile is not None:
+                        print(f"[TACTILE] Step {steps}: Shape={data.taxim_tactile.shape}, "
+                              f"Range=[{data.taxim_tactile.min():.3f}, {data.taxim_tactile.max():.3f}]")
+
             # FPS logging
             steps += 1
+            if steps % 100 == 0:
+                elapsed = timer.time_elapsed
+                fps = steps / elapsed
+                print(f"[INFO] Step {steps}, FPS: {fps:.2f}")
+            
             if args_cli.steps > 0 and steps >= args_cli.steps:
                 break
     finally:
@@ -226,5 +255,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

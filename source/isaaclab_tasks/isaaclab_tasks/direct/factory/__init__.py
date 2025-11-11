@@ -7,7 +7,8 @@ import gymnasium as gym
 
 from . import agents
 from .factory_env import FactoryEnv
-from .factory_env_cfg import FactoryTaskGearMeshCfg, FactoryTaskNutThreadCfg, FactoryTaskPegInsertCfg
+from .factory_env_cfg import FactoryTaskGearMeshCfg, FactoryTaskNutThreadCfg, FactoryTaskPegInsertCfg, FactoryTaskTestCfg
+from .test_env import TestEnv
 
 ##
 # Register Gym environments.
@@ -39,6 +40,16 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": FactoryTaskNutThreadCfg,
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Factory-Test-Direct-v0",
+    entry_point="isaaclab_tasks.direct.factory:TestEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": FactoryTaskTestCfg,
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
     },
 )

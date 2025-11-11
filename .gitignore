@@ -42,7 +42,7 @@ docker/.container.cfg
 **/.neptune/*
 docker/artifacts/
 *.tmp
-
+*.mp4 
 # Doc Outputs
 **/docs/_build/*
 **/generated/*

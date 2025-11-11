@@ -22,6 +22,7 @@ Notes:
 
 import argparse
 import numpy as np
+import torch
 
 from isaaclab.app import AppLauncher
 
@@ -82,33 +83,26 @@ def main():
 
     # Zero action loop
     action_dim = env.unwrapped.action_size if hasattr(env.unwrapped, "action_size") else 6
-    zero_actions = np.zeros((args_cli.num_envs, action_dim), dtype=np.float32)
-
+    # zero_actions = np.zeros((args_cli.num_envs, action_dim), dtype=np.float32)
+    zero_actions = torch.zeros((args_cli.num_envs, action_dim), dtype=torch.float32)
     print("[INFO] Starting viewer loop. Press Ctrl+C or close viewer to exit.")
 
     timer = Timer()
     timer.start()
     steps = 0
 
-    try:
-        while simulation_app.is_running():
-            # Step environment with zero actions
-            _ = env.step(zero_actions)
+    while simulation_app.is_running():
+        # Step environment with zero actions
+        _ = env.step(zero_actions)
+        print(steps)
+        # FPS logging
+        steps += 1
 
-            # FPS logging
-            steps += 1
-            if steps % 120 == 0:
-                fps = timer.average_fps
-                print(f"[INFO] Average FPS: {fps:.1f} (steps: {steps})")
+        if args_cli.steps > 0 and steps >= args_cli.steps:
+            break
 
-            if args_cli.steps > 0 and steps >= args_cli.steps:
-                break
-
-    except KeyboardInterrupt:
-        print("[INFO] Exiting on user interrupt")
-    finally:
-        env.close()
-        simulation_app.close()
+    env.close()
+    simulation_app.close()
 
 
 if __name__ == "__main__":

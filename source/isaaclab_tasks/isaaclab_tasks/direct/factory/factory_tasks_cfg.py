@@ -6,7 +6,6 @@
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 from pathlib import Path
 
 # ASSET_DIR = f"{ISAACLAB_NUCLEUS_DIR}/Factory"
@@ -457,3 +456,31 @@ class NutThread(FactoryTask):
         ),
         actuators={},
     )
+
+
+@configclass
+class TestTask(FactoryTask):
+    """Simple test environment with just a Franka robot and no objects."""
+    name = "test"
+    duration_s = 5.0
+    
+    # No assets needed for test environment
+    fixed_asset_cfg = FixedAssetCfg()
+    held_asset_cfg = HeldAssetCfg()
+    
+    # Robot initial end-effector pose (in world coordinates, relative to robot base at origin)
+    # If hand_init_pos is [0, 0, 0], default joint positions will be used instead of IK
+    # Default: position above table center (0.55, 0.0, 0.3) with gripper pointing down
+    hand_init_pos: list = [0.5, 0.0, 0.06]  # World coordinates (x, y, z) in meters
+    hand_init_pos_noise: list = [0.0, 0.0, 0.0]  # Optional noise for randomization
+    hand_init_orn: list = [3.1416, 0.0, 0.0]  # Euler angles (roll, pitch, yaw) in radians
+    hand_init_orn_noise: list = [0.0, 0.0, 0.0]  # Optional noise for randomization
+    
+    # No randomization needed
+    fixed_asset_init_pos_noise: list = [0.0, 0.0, 0.0]
+    fixed_asset_init_orn_deg: float = 0.0
+    fixed_asset_init_orn_range_deg: float = 0.0
+    
+    held_asset_pos_noise: list = [0.0, 0.0, 0.0]
+    held_asset_rot_noise: list = [0.0, 0.0, 0.0]
+    held_asset_rot_init: float = 0.0
