@@ -12,10 +12,16 @@ from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
 
+from isaaclab.sensors import TiledCameraCfg
+
+from omegaconf import OmegaConf, ListConfig
+
 from .factory_tasks_cfg import ASSET_DIR, FactoryTask, GearMesh, NutThread, PegInsert
 
 OBS_DIM_CFG = {
-    "fingertip_pos": 3,
+    "held_pos_rel_fixed": 3,
+    "held_quat": 4,
+    # "fingertip_pos": 3,
     "fingertip_pos_rel_fixed": 3,
     "fingertip_quat": 4,
     "ee_linvel": 3,
@@ -43,7 +49,8 @@ STATE_DIM_CFG = {
 
 @configclass
 class ObsRandCfg:
-    fixed_asset_pos = [0.001, 0.001, 0.001]
+    # fixed_asset_pos = [0.001, 0.001, 0.001]
+    fixed_asset_pos = [0.00, 0.00, 0.00]
 
 
 @configclass
@@ -186,6 +193,73 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             ),
         },
     )
+
+    # Observation camera configuration (V3 from old config)
+    obs_camera_cfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/DepthCamera",
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.8, 0.2, 0.15),
+            rot=[0.18913, -0.25231, -0.70188, 0.6387],
+            convention="ros",
+        ),
+        data_types=["distance_to_image_plane"],
+        spawn=sim_utils.PinholeCameraCfg(clipping_range=(0.0001, 0.5)),
+        width=224,
+        height=224,
+    )
+
+    # Camera usage flags
+    use_obs_camera: bool = False
+
+    # Scale for fixed asset (tuple of 3 floats: x, y, z)
+    scale_fixed_asset: tuple = None
+
+    # To enable experiments with cfg dicts
+    params = OmegaConf.create()
+
+    def update_env_params(self):
+        """Set default environment parameters."""
+        # Initialize params structure
+        params = self.params
+
+        # Sim
+        params_sim = params.get("sim", OmegaConf.create())
+        self.sim.dt = params_sim.get("dt", self.sim.dt)
+
+        # --- Observation Randomization Config ---
+        params_obs = params.get("observations", OmegaConf.create())
+        fixed_asset_pos_noise = params_obs.get("fixed_asset_pos_noise", None)
+        if fixed_asset_pos_noise is not None:
+            self.obs_rand.fixed_asset_pos = tuple(fixed_asset_pos_noise)
+
+        # Update observation camera usage
+        self.use_obs_camera = params_obs.get("use_obs_camera", False)
+        obs_camera_type = params_obs.get("obs_camera_type", ["distance_to_image_plane"])
+        self.obs_camera_cfg.data_types = obs_camera_type
+
+        # Task-specific config
+        params_taskcfg = params.get("taskcfg", {})
+
+        # Parse scale_fixed_asset (will be implemented in next feature)
+        scale_fixed_asset = params_taskcfg.get("scale_fixed_asset", None)
+        if scale_fixed_asset is not None:
+            if isinstance(scale_fixed_asset, ListConfig):
+                scale_fixed_asset = OmegaConf.to_container(scale_fixed_asset, resolve=True)
+            assert len(scale_fixed_asset) == 3, "scale_fixed_asset must have 3 elements"
+            self.scale_fixed_asset = tuple(scale_fixed_asset)
+
+    def __post_init__(self):
+        """Post initialization."""
+        # Call parameter parsing first
+        self.update_env_params()
+
+        # Then apply standard post-init
+        self.sim.render_interval = self.decimation
+        self.viewer.origin_type = "asset_root"
+        self.viewer.asset_name = "fixed_asset"
+        self.viewer.eye = (0.37, 0.1, 0.12)
+        self.viewer.lookat = (0.0, 0.0, 0.03)
+        self.viewer.resolution = (720, 720)
 
 
 @configclass

@@ -16,6 +16,8 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import axis_angle_from_quat
 
+from isaaclab.sensors import TiledCamera
+
 from . import factory_control, factory_utils
 from .factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, FactoryEnvCfg
 
@@ -92,6 +94,10 @@ class FactoryEnv(DirectRLEnv):
             "/World/envs/env_.*/Table", cfg, translation=(0.55, 0.0, 0.0), orientation=(0.70711, 0.0, 0.0, 0.70711)
         )
 
+        # Apply scale to fixed asset if specified
+        if hasattr(self.cfg, "scale_fixed_asset") and self.cfg.scale_fixed_asset is not None:
+            self.cfg_task.fixed_asset.spawn.scale = self.cfg.scale_fixed_asset
+
         self._robot = Articulation(self.cfg.robot)
         self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
         self._held_asset = Articulation(self.cfg_task.held_asset)
@@ -114,6 +120,11 @@ class FactoryEnv(DirectRLEnv):
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+        # Add observation camera
+        if self.cfg.use_obs_camera:
+            self._obs_camera = TiledCamera(self.cfg.obs_camera_cfg)
+            self.scene.sensors["obs_camera"] = self._obs_camera
 
     def _compute_intermediate_values(self, dt):
         """Get values computed from raw tensors. This includes adding noise."""
@@ -157,14 +168,40 @@ class FactoryEnv(DirectRLEnv):
 
         self.last_update_timestamp = self._robot._data._sim_timestamp
 
+        ## ADD Held Asset State
+        self.held_state = self._held_asset.data.root_state_w.clone()
+        self.held_state[:, :3] = self.held_state[:, :3] - self.scene.env_origins
+
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
 
         prev_actions = self.actions.clone()
 
+        # obs_dict = {
+        #     "fingertip_pos": self.fingertip_midpoint_pos,
+        #     "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - noisy_fixed_pos,
+        #     "fingertip_quat": self.fingertip_midpoint_quat,
+        #     "ee_linvel": self.ee_linvel_fd,
+        #     "ee_angvel": self.ee_angvel_fd,
+        #     "prev_actions": prev_actions,
+        # }
+
         obs_dict = {
-            "fingertip_pos": self.fingertip_midpoint_pos,
+            "held_pos_rel_fixed": self.held_pos - self.fixed_pos_obs_frame,
+            "held_quat": self.held_quat,
+            # "fingertip_pos": self.fingertip_midpoint_pos,
+            "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - noisy_fixed_pos,
+            "fingertip_quat": self.fingertip_midpoint_quat,
+            "ee_linvel": self.ee_linvel_fd,
+            "ee_angvel": self.ee_angvel_fd,
+            "prev_actions": prev_actions,
+        }
+
+        # Collection dict for data collection
+        collect_dict = {
+            "held_pos_rel_fixed": self.held_pos - self.fixed_pos_obs_frame,
+            "held_quat": self.held_quat,
             "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - noisy_fixed_pos,
             "fingertip_quat": self.fingertip_midpoint_quat,
             "ee_linvel": self.ee_linvel_fd,
@@ -189,14 +226,18 @@ class FactoryEnv(DirectRLEnv):
             "rot_threshold": self.rot_threshold,
             "prev_actions": prev_actions,
         }
-        return obs_dict, state_dict
+        return obs_dict, state_dict, collect_dict
 
     def _get_observations(self):
         """Get actor/critic inputs using asymmetric critic."""
-        obs_dict, state_dict = self._get_factory_obs_state_dict()
+        obs_dict, state_dict, collect_dict = self._get_factory_obs_state_dict()
 
         obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
+
+        # Store collection observations for data collection
+        self.collect_obs = torch.cat([collect_dict[key] for key in collect_dict.keys()], dim=-1)
+
         return {"policy": obs_tensors, "critic": state_tensors}
 
     def _reset_buffers(self, env_ids):
