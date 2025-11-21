@@ -213,7 +213,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
 
     # Scale for fixed asset (tuple of 3 floats: x, y, z)
     # Override via Hydra: env.scale_fixed_asset="[1.0, 1.0, 1.0]"
-    scale_fixed_asset: tuple = None
+    scale_fixed_asset: tuple = (1.0,1.0,1.0)
 
     def __post_init__(self):
         """Post initialization."""

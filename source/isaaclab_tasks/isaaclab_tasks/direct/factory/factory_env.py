@@ -95,8 +95,7 @@ class FactoryEnv(DirectRLEnv):
         )
 
         # Apply scale to fixed asset if specified
-        if hasattr(self.cfg, "scale_fixed_asset") and self.cfg.scale_fixed_asset is not None:
-            self.cfg_task.fixed_asset.spawn.scale = self.cfg.scale_fixed_asset
+        self.cfg_task.fixed_asset.spawn.scale = self.cfg.scale_fixed_asset
 
         self._robot = Articulation(self.cfg.robot)
         self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
