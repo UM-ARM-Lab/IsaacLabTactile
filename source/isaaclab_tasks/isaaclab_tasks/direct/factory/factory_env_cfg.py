@@ -212,48 +212,12 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     use_obs_camera: bool = False
 
     # Scale for fixed asset (tuple of 3 floats: x, y, z)
+    # Override via Hydra: env.scale_fixed_asset="[1.0, 1.0, 1.0]"
     scale_fixed_asset: tuple = None
-
-    # To enable experiments with cfg dicts
-    params = OmegaConf.create()
-
-    def update_env_params(self):
-        """Set default environment parameters."""
-        # Initialize params structure
-        params = self.params
-
-        # Sim
-        params_sim = params.get("sim", OmegaConf.create())
-        self.sim.dt = params_sim.get("dt", self.sim.dt)
-
-        # --- Observation Randomization Config ---
-        params_obs = params.get("observations", OmegaConf.create())
-        fixed_asset_pos_noise = params_obs.get("fixed_asset_pos_noise", None)
-        if fixed_asset_pos_noise is not None:
-            self.obs_rand.fixed_asset_pos = tuple(fixed_asset_pos_noise)
-
-        # Update observation camera usage
-        self.use_obs_camera = params_obs.get("use_obs_camera", False)
-        obs_camera_type = params_obs.get("obs_camera_type", ["distance_to_image_plane"])
-        self.obs_camera_cfg.data_types = obs_camera_type
-
-        # Task-specific config
-        params_taskcfg = params.get("taskcfg", {})
-
-        # Parse scale_fixed_asset (will be implemented in next feature)
-        scale_fixed_asset = params_taskcfg.get("scale_fixed_asset", None)
-        if scale_fixed_asset is not None:
-            if isinstance(scale_fixed_asset, ListConfig):
-                scale_fixed_asset = OmegaConf.to_container(scale_fixed_asset, resolve=True)
-            assert len(scale_fixed_asset) == 3, "scale_fixed_asset must have 3 elements"
-            self.scale_fixed_asset = tuple(scale_fixed_asset)
 
     def __post_init__(self):
         """Post initialization."""
-        # Call parameter parsing first
-        self.update_env_params()
-
-        # Then apply standard post-init
+        # Apply standard post-init
         self.sim.render_interval = self.decimation
         self.viewer.origin_type = "asset_root"
         self.viewer.asset_name = "fixed_asset"

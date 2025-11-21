@@ -42,9 +42,10 @@ PYTORCH_INDEX_URL = ["https://download.pytorch.org/whl/cu128"]
 EXTRAS_REQUIRE = {
     "sb3": ["stable-baselines3>=2.6", "tqdm", "rich"],  # tqdm/rich for progress bar
     "skrl": ["skrl>=1.4.3"],
+    # Allow upstream rl-games source to be overridden (e.g. local editable checkout)
     "rl-games": [
-        "rl-games @ git+https://github.com/isaac-sim/rl_games.git@python3.11",
-        "gym",
+        "rl-games",     # @ git+https://github.com/isaac-sim/rl_games.git@python3.11",
+        "gym",      
     ],  # rl-games still needs gym :(
     "rsl-rl": ["rsl-rl-lib==3.0.1"],
 }
