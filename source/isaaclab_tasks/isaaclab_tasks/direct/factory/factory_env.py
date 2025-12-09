@@ -16,7 +16,7 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import axis_angle_from_quat
 
-from isaaclab.sensors import TiledCamera
+from isaaclab.sensors import TiledCamera, ContactSensor
 
 from . import factory_control, factory_utils
 from .factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, FactoryEnvCfg
@@ -125,6 +125,10 @@ class FactoryEnv(DirectRLEnv):
             self._obs_camera = TiledCamera(self.cfg.obs_camera_cfg)
             self.scene.sensors["obs_camera"] = self._obs_camera
 
+        # Add contact sensor
+        self._contact_sensor = ContactSensor(self.cfg.contact_sensor_cfg)
+        self.scene.sensors["contact_sensor"] = self._contact_sensor
+
     def _compute_intermediate_values(self, dt):
         """Get values computed from raw tensors. This includes adding noise."""
         # TODO: A lot of these can probably only be set once?
@@ -170,6 +174,16 @@ class FactoryEnv(DirectRLEnv):
         ## ADD Held Asset State
         self.held_state = self._held_asset.data.root_state_w.clone()
         self.held_state[:, :3] = self.held_state[:, :3] - self.scene.env_origins
+
+        ## ADD contact sensor reading
+        self.contact_force = self.scene["contact_sensor"].data.net_forces_w.squeeze(1).clone()
+
+        ## ADD Finger Wrench Reading at panda_link7
+        self.cfg.wrench_joint_cfg.resolve(self.scene)
+        wrench_joint_id = self.cfg.wrench_joint_cfg.body_ids[0]
+        link_incoming_forces = self._robot.root_physx_view.get_link_incoming_joint_force()
+        link_incoming_forces = link_incoming_forces[:, wrench_joint_id]
+        self.finger_wrench = link_incoming_forces.view(self.num_envs, -1).clone()
 
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
@@ -255,7 +269,6 @@ class FactoryEnv(DirectRLEnv):
     def close_gripper_in_place(self):
         """Keep gripper in current position as gripper closes."""
         actions = torch.zeros((self.num_envs, 6), device=self.device)
-
         # Interpret actions as target pos displacements and set pos target
         pos_actions = actions[:, 0:3] * self.pos_threshold
         ctrl_target_fingertip_midpoint_pos = self.fingertip_midpoint_pos + pos_actions
