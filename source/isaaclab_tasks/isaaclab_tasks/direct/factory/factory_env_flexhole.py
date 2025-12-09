@@ -17,6 +17,7 @@ from isaaclab.sensors import TiledCamera
 
 from .factory_env import FactoryEnv
 from .factory_env_cfg import FactoryTaskPegInsertFlexHoleCfg
+from . import factory_utils
 
 
 class FactoryFlexHoleEnv(FactoryEnv):
@@ -43,7 +44,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
     def _init_tensors(self):
-        """Initialize tensors including hole scale multipliers."""
+        """Initialize tensors including hole scale multipliers and tolerances."""
         super()._init_tensors()
 
         # Create scale multiplier tensor: [large, large, ..., reg, reg, ...]
@@ -51,6 +52,14 @@ class FactoryFlexHoleEnv(FactoryEnv):
         large_scales = torch.full((self.num_large_envs,), self._large_hole_size, device=self.device)
         reg_scales = torch.ones(self.num_reg_envs, device=self.device)
         self.hole_scale_multipliers = torch.cat([large_scales, reg_scales])
+
+        # Compute per-environment XY success tolerance using affine formula:
+        # xy_tolerance = base_tolerance + (hole_diameter * (scale - 1)) / 2
+        # At scale=1.0: tolerance = 0.0025 (unchanged from original)
+        # At scale>1.0: tolerance grows to accommodate larger hole
+        base_xy_tolerance = 0.0025  # Original hardcoded tolerance
+        hole_diameter = self.cfg_task.fixed_asset_cfg.diameter
+        self.xy_success_tolerance = base_xy_tolerance + (hole_diameter * (self.hole_scale_multipliers - 1.0)) / 2
 
     def _setup_scene(self):
         """Initialize simulation scene with mixed hole sizes using MultiAssetSpawnerCfg."""
@@ -151,3 +160,58 @@ class FactoryFlexHoleEnv(FactoryEnv):
         obs["policy_reg"] = policy_obs[self.num_large_envs:]
 
         return obs
+
+    def _get_curr_successes(self, success_threshold, check_rot=False):
+        """Get success mask with per-environment XY tolerance based on hole scale.
+
+        Uses affine tolerance: xy_tol = base_tol + (hole_diameter * (scale - 1)) / 2
+        This ensures:
+        - At scale=1.0: Same tolerance as original (0.0025m)
+        - At scale>1.0: Tolerance grows so peg anywhere in hole counts as success
+        """
+        curr_successes = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+
+        held_base_pos, held_base_quat = factory_utils.get_held_base_pose(
+            self.held_pos, self.held_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
+        )
+        target_held_base_pos, target_held_base_quat = factory_utils.get_target_held_base_pose(
+            self.fixed_pos,
+            self.fixed_quat,
+            self.cfg_task.name,
+            self.cfg_task.fixed_asset_cfg,
+            self.num_envs,
+            self.device,
+        )
+
+        xy_dist = torch.linalg.vector_norm(target_held_base_pos[:, 0:2] - held_base_pos[:, 0:2], dim=1)
+        z_disp = held_base_pos[:, 2] - target_held_base_pos[:, 2]
+
+        # Use per-environment XY tolerance instead of fixed 0.0025
+        is_centered = torch.where(
+            xy_dist < self.xy_success_tolerance,
+            torch.ones_like(curr_successes),
+            torch.zeros_like(curr_successes)
+        )
+
+        # Height threshold (same as parent - not scaled since hole height is unchanged)
+        fixed_cfg = self.cfg_task.fixed_asset_cfg
+        if self.cfg_task.name == "peg_insert" or self.cfg_task.name == "gear_mesh":
+            height_threshold = fixed_cfg.height * success_threshold
+        elif self.cfg_task.name == "nut_thread":
+            height_threshold = fixed_cfg.thread_pitch * success_threshold
+        else:
+            raise NotImplementedError("Task not implemented")
+
+        is_close_or_below = torch.where(
+            z_disp < height_threshold, torch.ones_like(curr_successes), torch.zeros_like(curr_successes)
+        )
+        curr_successes = torch.logical_and(is_centered, is_close_or_below)
+
+        if check_rot:
+            import isaacsim.core.utils.torch as torch_utils
+            _, _, curr_yaw = torch_utils.get_euler_xyz(self.fingertip_midpoint_quat)
+            curr_yaw = factory_utils.wrap_yaw(curr_yaw)
+            is_rotated = curr_yaw < self.cfg_task.ee_success_yaw
+            curr_successes = torch.logical_and(curr_successes, is_rotated)
+
+        return curr_successes
