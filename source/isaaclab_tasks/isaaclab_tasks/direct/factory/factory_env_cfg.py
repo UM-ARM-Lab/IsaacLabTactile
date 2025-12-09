@@ -12,7 +12,8 @@ from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
 
-from isaaclab.sensors import TiledCameraCfg
+from isaaclab.sensors import TiledCameraCfg, ContactSensorCfg
+from isaaclab.managers import SceneEntityCfg
 
 from omegaconf import OmegaConf, ListConfig
 
@@ -123,7 +124,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=2.0, clone_in_fabric=True)
+    # Note: clone_in_fabric=False is required when using TiledCamera, as sensors use USD stage traversal
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=2.0, clone_in_fabric=False)
 
     robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
@@ -211,6 +213,25 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     # Camera usage flags
     use_obs_camera: bool = False
 
+    # Contact sensor configuration
+    contact_filter_path = [
+        "/World/envs/env_.*/FixedAsset/forge_hole_8mm/forge_hole_8mm",
+        "/World/envs/env_.*/FixedAsset/factory_bolt_loose",
+        "/World/envs/env_.*/FixedAsset/factory_gear_base_loose",
+        "/World/envs/env_.*/LargeGearAsset/factory_gear_large",
+        "/World/envs/env_.*/SmallGearAsset/factory_gear_small",
+    ]
+
+    contact_sensor_cfg = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/HeldAsset/.*",
+        filter_prim_paths_expr=contact_filter_path,
+        history_length=6,
+        update_period=1/60.0,
+    )
+
+    # Wrench config for finger force sensing
+    wrench_joint_cfg = SceneEntityCfg("robot", body_names=["panda_link7"])
+
     # Scale for fixed asset (tuple of 3 floats: x, y, z)
     # Override via Hydra: env.scale_fixed_asset="[1.0, 1.0, 1.0]"
     scale_fixed_asset: tuple = (1.0,1.0,1.0)
@@ -245,3 +266,16 @@ class FactoryTaskNutThreadCfg(FactoryEnvCfg):
     task_name = "nut_thread"
     task = NutThread()
     episode_length_s = 30.0
+
+
+@configclass
+class FlexHoleCfg:
+    """Configuration for flexible hole sizes (mixed large/regular environments)."""
+    large_env_fraction: float = 0.5  # Fraction of environments with large holes (0.0-1.0)
+    large_hole_size: float = 2.0     # Scale multiplier for large holes (regular = 1.0)
+
+
+@configclass
+class FactoryTaskPegInsertFlexHoleCfg(FactoryTaskPegInsertCfg):
+    """PegInsert task with mixed large/regular hole sizes."""
+    flex_hole: FlexHoleCfg = FlexHoleCfg()
