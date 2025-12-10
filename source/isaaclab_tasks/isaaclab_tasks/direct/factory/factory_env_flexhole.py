@@ -13,7 +13,7 @@ from isaaclab.assets import Articulation
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from isaaclab.sensors import TiledCamera
+from isaaclab.sensors import TiledCamera, ContactSensor
 
 from .factory_env import FactoryEnv
 from .factory_env_cfg import FactoryTaskPegInsertFlexHoleCfg
@@ -108,6 +108,10 @@ class FactoryFlexHoleEnv(FactoryEnv):
         if self.cfg.use_obs_camera:
             self._obs_camera = TiledCamera(self.cfg.obs_camera_cfg)
             self.scene.sensors["obs_camera"] = self._obs_camera
+
+        # Add contact sensor
+        self._contact_sensor = ContactSensor(self.cfg.contact_sensor_cfg)
+        self.scene.sensors["contact_sensor"] = self._contact_sensor
 
     def _create_multi_scale_fixed_asset(self):
         """Create ArticulationCfg with MultiAssetSpawnerCfg for mixed hole sizes.
