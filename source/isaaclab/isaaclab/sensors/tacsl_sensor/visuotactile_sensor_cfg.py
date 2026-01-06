@@ -29,6 +29,9 @@ class VisuoTactileSensorCfg(SensorBaseCfg):
     sensor_type: str = "gelsight_r15"
     """Type of tactile sensor. Options: 'gelsight_r15', 'gs_mini'."""
 
+    calib_variant: str = "sim"
+    """Calibration variant to use. Options: 'sim' (uses polycalib.npz) or 'real' (uses polycalib_real.npz)."""
+
     enable_camera_tactile: bool = True
     """Whether to enable camera-based tactile sensing."""
 

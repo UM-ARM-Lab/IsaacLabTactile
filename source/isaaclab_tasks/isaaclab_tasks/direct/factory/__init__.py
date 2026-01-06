@@ -21,6 +21,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": FactoryTaskPegInsertCfg,
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rl_games_ppo_tactile_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_tactile_cfg.yaml",
     },
 )
 
@@ -31,6 +32,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": FactoryTaskGearMeshCfg,
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rl_games_ppo_tactile_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_tactile_cfg.yaml",
     },
 )
 
@@ -41,6 +43,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": FactoryTaskNutThreadCfg,
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rl_games_ppo_tactile_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_tactile_cfg.yaml",
     },
 )
 
@@ -51,5 +54,6 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": FactoryTaskTestCfg,
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rl_games_ppo_tactile_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_tactile_cfg.yaml",
     },
 )

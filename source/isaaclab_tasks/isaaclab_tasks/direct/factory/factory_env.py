@@ -41,6 +41,34 @@ class FactoryEnv(DirectRLEnv):
 
         super().__init__(cfg, render_mode, **kwargs)
 
+        # Update observation space to include tactile sensor if enabled
+        if self.cfg.enable_tactile_sensor and self.cfg.read_tactile_sensor:
+            import gymnasium as gym
+            # Store the original policy observation as "vector_obs"
+            # This matches what _get_observations() returns when tactile is enabled
+            self.single_observation_space["vector_obs"] = self.single_observation_space["policy"]
+            # Remove the old "policy" key since we're using "vector_obs" instead
+            # del self.single_observation_space["policy"]
+            
+            # Add tactile observation space
+            # The tactile images are converted from (B, H, W, C) to (B, C, H, W) in _get_observations
+            # So the shape is (C, H, W) where C=3 (RGB), H and W come from config
+            tactile_height = self.cfg.tactile_cam.camera_cfg.height
+            tactile_width = self.cfg.tactile_cam.camera_cfg.width
+            tactile_channels = 3  # RGB tactile images from taxim_tactile
+            tactile_shape = (tactile_channels, tactile_height, tactile_width)
+            self.single_observation_space["tactile"] = gym.spaces.Box(
+                low=-float('inf'), 
+                high=float('inf'), 
+                shape=tactile_shape,
+                dtype=float
+            )
+            
+            # Update batched observation space for vector_obs
+            # Note: The batched observation_space is for the "policy" key, but we're now using "vector_obs"
+            # However, RL-Games wrapper will handle the batching, so we don't need to update it here
+            # The wrapper uses single_observation_space to build its own spaces
+
         factory_utils.set_body_inertias(self._robot, self.scene.num_envs)
         self._init_tensors()
         self._set_default_dynamics_parameters()
@@ -274,10 +302,6 @@ class FactoryEnv(DirectRLEnv):
     def _get_observations(self):
         """Get actor/critic inputs using asymmetric critic."""
         obs_dict, state_dict = self._get_factory_obs_state_dict()
-        if self.cfg.enable_tactile_sensor and self.cfg.read_tactile_sensor:
-            tactile_data = self._tactile_cam.data
-            taxim_data = tactile_data.taxim_tactile.cpu().numpy()
-            obs_dict['tactile_taxim'] = taxim_data
         
         # Update observation history (includes both observations and actions)
         self._update_obs_history(obs_dict)
@@ -290,7 +314,35 @@ class FactoryEnv(DirectRLEnv):
             obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
         
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
-        return {"policy": obs_tensors, "critic": state_tensors}
+        
+        output_dict = {"policy": obs_tensors, "critic": state_tensors}
+
+        if self.cfg.enable_tactile_sensor and self.cfg.read_tactile_sensor:
+            tactile_data = self._tactile_cam.data
+            if tactile_data.taxim_tactile is not None:
+                # Convert from (B, H, W, C) to (B, C, H, W) for RL-Games CNN
+                tactile_imgs = tactile_data.taxim_tactile
+                if tactile_imgs.dim() == 4 and tactile_imgs.shape[-1] <= 4:
+                    tactile_imgs = tactile_imgs.permute(0, 3, 1, 2)
+                
+                # Convert to float and normalize from [0, 255] to [-1, 1]
+                # Standard normalization for CNNs: zero-centered inputs work better with batch norm
+                tactile_imgs = tactile_imgs.float() / 255.0  # [0, 1]
+                tactile_imgs = tactile_imgs * 2.0 - 1.0  # [-1, 1]
+                
+                # Safety check: Replace NaN and Inf with zeros
+                if torch.isnan(tactile_imgs).any() or torch.isinf(tactile_imgs).any():
+                    print(f"[WARNING] Tactile images contain NaN or Inf values")
+                tactile_imgs = torch.where(torch.isfinite(tactile_imgs), tactile_imgs, torch.zeros_like(tactile_imgs))
+                
+                # Clamp to ensure values are in [-1, 1] range
+                tactile_imgs = torch.clamp(tactile_imgs, -1.0, 1.0)
+                # Add to output - images are now normalized float32 in [0, 1] range
+                output_dict["tactile"] = tactile_imgs
+                # Alias for compatibility with configs expecting "vector_obs"
+                output_dict["vector_obs"] = obs_tensors
+
+        return output_dict
 
     def _reset_buffers(self, env_ids):
         """Reset buffers."""
@@ -431,12 +483,27 @@ class FactoryEnv(DirectRLEnv):
 
     def _get_dones(self):
         """Check which environments are terminated.
-
-        For Factory reset logic, it is important that all environments
-        stay in sync (i.e., _get_dones should return all true or all false).
+        
+        Environments terminate when:
+        - Task succeeds (terminated=True): early termination on success
+        - Episode times out (truncated=True): maximum episode length reached
+        
+        Note: Individual environments can terminate at different times.
         """
         self._compute_intermediate_values(dt=self.physics_dt)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        
+        # Check for success termination
+        # check_rot = self.cfg_task.name == "nut_thread"
+        # curr_successes = self._get_curr_successes(
+        #     success_threshold=self.cfg_task.success_threshold, check_rot=check_rot
+        # )
+        
+        # # Terminated when task succeeds, truncated when timeout occurs (but not if already terminated)
+        # terminated = curr_successes
+        # truncated = time_out & ~terminated  # Only truncate if not already terminated
+        
+        # return terminated, truncated
         return time_out, time_out
 
     def _get_curr_successes(self, success_threshold, check_rot=False):
@@ -755,7 +822,7 @@ class FactoryEnv(DirectRLEnv):
         fixed_asset_pos_noise = torch.randn((len(env_ids), 3), dtype=torch.float32, device=self.device)
         fixed_asset_pos_rand = torch.tensor(self.cfg.obs_rand.fixed_asset_pos, dtype=torch.float32, device=self.device)
         fixed_asset_pos_noise = fixed_asset_pos_noise @ torch.diag(fixed_asset_pos_rand)
-        self.init_fixed_pos_obs_noise[:] = fixed_asset_pos_noise
+        self.init_fixed_pos_obs_noise[env_ids] = fixed_asset_pos_noise
 
         self.step_sim_no_action()
 

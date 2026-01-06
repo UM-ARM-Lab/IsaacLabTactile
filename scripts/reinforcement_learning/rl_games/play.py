@@ -38,6 +38,12 @@ parser.add_argument(
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to run for evaluation.")
+parser.add_argument(
+    "--use_real_calib",
+    action="store_true",
+    default=False,
+    help="Use real calibration file (polycalib_real.npz) instead of simulated calibration (polycalib.npz).",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -97,6 +103,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
+    # override tactile sensor calibration if requested
+    if args_cli.use_real_calib and hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
+        env_cfg.tactile_cam.calib_variant = "real"
+
     if args_cli.device is not None:
         agent_cfg["params"]["config"]["device"] = args_cli.device
     # randomly sample a seed if seed = -1
@@ -142,6 +152,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     clip_actions = agent_cfg["params"]["env"].get("clip_actions", math.inf)
     obs_groups = agent_cfg["params"]["env"].get("obs_groups")
     concate_obs_groups = agent_cfg["params"]["env"].get("concate_obs_groups", True)
+    concate_state_groups = agent_cfg["params"]["env"].get("concate_state_groups", None)
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -163,7 +174,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
     # wrap around environment for rl-games
-    env = RlGamesVecEnvWrapper(env, rl_device, clip_obs, clip_actions, obs_groups, concate_obs_groups)
+    env = RlGamesVecEnvWrapper(env, rl_device, clip_obs, clip_actions, obs_groups, concate_obs_groups, concate_state_groups)
 
     # register the environment to rl-games registry
     # note: in agents configuration: environment name must be "rlgpu"

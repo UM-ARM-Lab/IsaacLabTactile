@@ -91,6 +91,7 @@ class RlGamesVecEnvWrapper(IVecEnv):
         clip_actions: float,
         obs_groups: dict[str, list[str]] | None = None,
         concate_obs_group: bool = True,
+        concate_state_group: bool | None = None,
     ):
         """Initializes the wrapper instance.
 
@@ -102,6 +103,8 @@ class RlGamesVecEnvWrapper(IVecEnv):
             obs_groups: The remapping from isaaclab observation to rl-games, default to None for backward compatible.
             concate_obs_group: The boolean value indicates if input to rl-games network is dict or tensor. Default to
                 True for backward compatible.
+            concate_state_group: The boolean value indicates if state input to rl-games network is dict or tensor.
+                If None, it defaults to concate_obs_group.
 
         Raises:
             ValueError: The environment is not inherited from :class:`ManagerBasedRLEnv` or :class:`DirectRLEnv`.
@@ -123,6 +126,7 @@ class RlGamesVecEnvWrapper(IVecEnv):
 
         # resolve the observation group
         self._concate_obs_groups = concate_obs_group
+        self._concate_state_groups = concate_state_group if concate_state_group is not None else concate_obs_group
         self._obs_groups = obs_groups
         if obs_groups is None:
             self._obs_groups = {"obs": ["policy"], "states": []}
@@ -131,25 +135,13 @@ class RlGamesVecEnvWrapper(IVecEnv):
             if self.unwrapped.single_observation_space.get("critic"):
                 self._obs_groups["states"] = ["critic"]
 
-        if (
-            self._concate_obs_groups
-            and isinstance(self.state_space, gym.spaces.Box)
-            and isinstance(self.observation_space, gym.spaces.Box)
-        ):
+        if isinstance(self.state_space, gym.spaces.Box):
             self.rlg_num_states = self.state_space.shape[0]
-        elif (
-            not self._concate_obs_groups
-            and isinstance(self.state_space, gym.spaces.Dict)
-            and isinstance(self.observation_space, gym.spaces.Dict)
-        ):
+        elif isinstance(self.state_space, gym.spaces.Dict):
             space = [space.shape[0] for space in self.state_space.values()]
             self.rlg_num_states = sum(space)
         else:
-            raise TypeError(
-                "only valid combination for state space is gym.space.Box when concate_obs_groups is True,             "
-                "   and gym.space.Dict when concate_obs_groups is False. You have concate_obs_groups:                "
-                f" {self._concate_obs_groups}, and state_space: {self.state_space.__class__}"
-            )
+            self.rlg_num_states = 0
 
     def __str__(self):
         """Returns the wrapper name and the :attr:`env` representation string."""
@@ -237,7 +229,7 @@ class RlGamesVecEnvWrapper(IVecEnv):
         # # note: rl-games only wants single observation space
         space = self.unwrapped.single_observation_space
         clip = self._clip_obs
-        if not self._concate_obs_groups:
+        if not self._concate_state_groups:
             state_space = {grp: gym.spaces.Box(-clip, clip, space.get(grp).shape) for grp in self._obs_groups["states"]}
             return gym.spaces.Dict(state_space)
         else:
@@ -320,7 +312,11 @@ class RlGamesVecEnvWrapper(IVecEnv):
             - ``"states"`` (optional): same structure as above when state groups are configured; omitted otherwise.
         """
         # clip the observations
+        # Note: Skip clamping for uint8 tensors (images) to preserve dtype - RL-Games will normalize them
         for key, obs in obs_dict.items():
+            if obs.dtype == torch.uint8:
+                # Preserve uint8 dtype for images - RL-Games will normalize them in _preproc_obs()
+                continue
             obs_dict[key] = torch.clamp(obs, -self._clip_obs, self._clip_obs)
 
         # process input obs dict
@@ -330,8 +326,9 @@ class RlGamesVecEnvWrapper(IVecEnv):
 
         if self._concate_obs_groups:
             rl_games_obs["obs"] = self._obs_concat_fn(list(rl_games_obs["obs"].values()))
-            if "states" in rl_games_obs:
-                rl_games_obs["states"] = self._states_concat_fn(list(rl_games_obs["states"].values()))
+        
+        if self._concate_state_groups and "states" in rl_games_obs:
+            rl_games_obs["states"] = self._states_concat_fn(list(rl_games_obs["states"].values()))
 
         return rl_games_obs
 

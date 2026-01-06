@@ -44,6 +44,8 @@ parser.add_argument("--steps", type=int, default=0, help="Number of steps to run
 parser.add_argument("--print_tactile", action="store_true", help="Print basic tactile stats each step")
 parser.add_argument("--save_video", type=str, default=None, help="Directory to save tactile videos (one per episode)")
 parser.add_argument("--video_fps", type=int, default=20, help="FPS for saved videos")
+parser.add_argument("--compliance_stiffness", type=float, default=350.0, help="Compliance stiffness for tactile sensor")
+
 # parser.add_argument("--device", type=str, default="cuda:0", help="Simulation device")
 
 # Append AppLauncher cli args
@@ -78,6 +80,7 @@ def main():
     env_cfg.use_compliant_gripper = True
     env_cfg.use_gelsight_finger = True
     env_cfg.scene.num_envs = args_cli.num_envs
+    env_cfg.tactile_cam.compliance_stiffness = args_cli.compliance_stiffness
 
     # Update simulation device
     if args_cli.device == "cpu":
@@ -192,7 +195,7 @@ def main():
     try:
         while simulation_app.is_running():
             # Step environment with zero actions
-            _, _, terminateds, truncateds, _ = env.step(zero_actions)
+            obs_next, rewards, terminateds, truncateds, extras = env.step(zero_actions)
             
             # Check for episode resets (when environment 0 is done)
             # Track episode based on first environment for consistency

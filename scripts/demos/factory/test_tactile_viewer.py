@@ -47,7 +47,7 @@ parser.add_argument("--print_tactile", action="store_true", help="Print basic ta
 parser.add_argument("--save_video", type=str, default=None, help="Directory to save tactile videos (one per episode)")
 # parser.add_argument("--save_video", type=str, default="./test_videos", help="Directory to save tactile videos (one per episode)")
 parser.add_argument("--video_fps", type=int, default=20, help="FPS for saved videos")
-
+parser.add_argument("--compliance_stiffness", type=float, default=350.0, help="Compliance stiffness for tactile sensor")
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # Parse the arguments
@@ -79,6 +79,8 @@ def main():
     env_cfg.use_compliant_gripper = True
     env_cfg.use_gelsight_finger = True
     env_cfg.scene.num_envs = args_cli.num_envs
+    env_cfg.tactile_cam.compliance_stiffness = args_cli.compliance_stiffness
+
 
     # Update simulation device
     if args_cli.device == "cpu":

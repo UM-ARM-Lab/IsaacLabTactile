@@ -296,8 +296,14 @@ class VisuoTactileSensor(SensorBase):
             omni.log.warn("Camera configuration is None. Disabling camera-based tactile sensing.")
             return
 
-        # gelsightRender
-        self.taxim_gelsight = gelsightRender(self.cfg.sensor_type, device=self.device)
+        # gelsightRender - pass camera dimensions to match resolution
+        self.taxim_gelsight = gelsightRender(
+            self.cfg.sensor_type, 
+            device=self.device,
+            height=self.cfg.camera_cfg.height,
+            width=self.cfg.camera_cfg.width,
+            calib_variant=self.cfg.calib_variant
+        )
 
         # Create camera sensor
         self._camera_sensor = TiledCamera(self.cfg.camera_cfg)

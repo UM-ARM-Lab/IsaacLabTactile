@@ -4,9 +4,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
 Example command to run with tactile sensor enabled:
-python scripts/reinforcement_learning/rl_games/train.py --task Isaac-Factory-NutThread-Direct-v0 --enable_cameras env.enable_tactile_sensor=true
+python scripts/reinforcement_learning/rl_games/train.py --task Isaac-Factory-NutThread-Direct-v0 --enable_cameras env.enable_tactile_sensor=true env.read_tactile_sensor=true
 
-python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 scripts/reinforcement_learning/rl_games/train.py --task Isaac-Factory-NutThread-Direct-v0 --enable_cameras env.enable_tactile_sensor=true --num_envs 256 --distributed --headless
+python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 scripts/reinforcement_learning/rl_games/train.py --task Isaac-Factory-NutThread-Direct-v0 --enable_cameras env.enable_tactile_sensor=true env.read_tactile_sensor=true --num_envs 256 --distributed --headless
+
+Note: Hydra requires lowercase boolean values (true/false), not Python's True/False.
 
 """
 
@@ -214,8 +216,10 @@ class FactoryEnvCfg(DirectRLEnvCfg):
                 joint_names_expr=["panda_finger_joint[1-2]"],
                 effort_limit_sim=40.0,
                 velocity_limit_sim=0.04,
-                stiffness=7500.0,
-                damping=173.0,
+                # stiffness=7500.0,
+                # damping=173.0,
+                stiffness=100.0,
+                damping=10.0,
                 friction=0.1,
                 armature=0.0,
             ),
@@ -268,10 +272,10 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         camera_cfg=TiledCameraCfg(
             prim_path="/World/envs/env_.*/Robot/panda_leftfinger/elastomer_tip/cam",
             update_period=1 / 60,  # 60 Hz
-            height=320,
-            width=240,
-            # height=80,
-            # width=60,
+            # height=320,
+            # width=240,
+            height=80,
+            width=60,
             data_types=["distance_to_image_plane"],
             spawn=None,  # the camera is already spawned in the scene, properties are set in the gelsight_r15_finger.usd file
         ),
@@ -293,7 +297,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
 
     # My parameters
     enable_tactile_sensor: bool = False
-    read_tactile_sensor: bool = False
+    read_tactile_sensor: bool = False # this is actually not taking effect, unless we change obs_order to include tactile_taxim
     enable_obs_camera: bool = False
     use_compliant_gripper: bool = True
     use_gelsight_finger: bool = True

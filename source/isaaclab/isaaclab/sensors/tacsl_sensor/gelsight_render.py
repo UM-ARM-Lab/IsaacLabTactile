@@ -16,6 +16,7 @@ conf_r15 = {
     "data_dir": "gelsight_r15_data",
     "background_path": "bg.jpg",
     "calib_path": "polycalib.npz",
+    # "calib_path": "polycalib_real.npz",
     "real_bg": "real_bg.npy",
     "h": 320,
     "w": 240,
@@ -26,6 +27,7 @@ conf_gs_mini = {
     "data_dir": "gs_mini_data",
     "background_path": "bg.jpg",
     "calib_path": "polycalib.npz",
+    # "calib_path": "polycalib_real.npz",
     "real_bg": "real_bg.npy",
     "h": 240,
     "w": 320,
@@ -156,13 +158,16 @@ class gelsightRender:
         Ref: https://arxiv.org/abs/2109.04027
     """
 
-    def __init__(self, sensor_name, device):
+    def __init__(self, sensor_name, device, height=None, width=None, calib_variant="sim"):
         """
         Initialize the GelSight renderer.
 
         Parameters:
         sensor_name (str): Name of the sensor.
         device (str): Device to use ('cpu' or 'cuda').
+        height (int, optional): Height of the output image. If None, uses config default.
+        width (int, optional): Width of the output image. If None, uses config default.
+        calib_variant (str, optional): Calibration variant. Options: 'sim' (polycalib.npz) or 'real' (polycalib_real.npz). Defaults to 'sim'.
         """
 
         self.sensor_name = sensor_name
@@ -170,12 +175,27 @@ class gelsightRender:
         self.conf = conf_options[self.sensor_name]
 
         bg_path = get_gs_render_data(self.conf["data_dir"], self.conf["background_path"])
-        calib_path = get_gs_render_data(self.conf["data_dir"], self.conf["calib_path"])
+        
+        # Override calibration file based on calib_variant
+        if calib_variant == "real":
+            calib_name = "polycalib_real.npz"
+        else:
+            calib_name = self.conf["calib_path"]
+        
+        calib_path = get_gs_render_data(self.conf["data_dir"], calib_name)
 
         self.background = cv2.cvtColor(cv2.imread(bg_path), cv2.COLOR_BGR2RGB)
 
         self.calib_data = CalibData(calib_path)
-        h, w = self.conf["h"], self.conf["w"]
+        
+        # Use provided dimensions or fall back to config defaults
+        h = height if height is not None else self.conf["h"]
+        w = width if width is not None else self.conf["w"]
+        
+        # Resize background if dimensions don't match
+        if self.background.shape[:2] != (h, w):
+            self.background = cv2.resize(self.background, (w, h), interpolation=cv2.INTER_LINEAR)
+        
         bins = self.conf["numBins"]
         [xx, yy] = np.meshgrid(range(w), range(h))
         xf = xx.flatten()
@@ -195,7 +215,7 @@ class gelsightRender:
 
         self.A_tensor = torch.tensor(self.A.reshape(h, w, 6), device=self.device).unsqueeze(0)
         self.background_tensor = torch.tensor(self.background, device=self.device)
-        print("Gelsight initialization done!")
+        print(f"Gelsight initialization done! Resolution: {h}x{w}")
 
     def render_tensorized(self, heightMap):
         """
