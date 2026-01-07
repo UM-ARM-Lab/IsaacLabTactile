@@ -216,10 +216,12 @@ class FactoryEnvCfg(DirectRLEnvCfg):
                 joint_names_expr=["panda_finger_joint[1-2]"],
                 effort_limit_sim=40.0,
                 velocity_limit_sim=0.04,
-                # stiffness=7500.0,
+                # stiffness=7500.0, # og param
                 # damping=173.0,
-                stiffness=100.0,
-                damping=10.0,
+                # stiffness=100.0, # params worked for my initial visual transfer exp
+                # damping=10.0,
+                stiffness = 500.0,
+                damping = 40.0,
                 friction=0.1,
                 armature=0.0,
             ),
