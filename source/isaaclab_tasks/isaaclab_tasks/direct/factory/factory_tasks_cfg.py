@@ -87,6 +87,9 @@ class FactoryTask:
     success_threshold: float = 0.04
     engage_threshold: float = 0.9
 
+    # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
+    gripper_peg_friction: float | None = None
+
 
 @configclass
 class Peg8mm(HeldAssetCfg):

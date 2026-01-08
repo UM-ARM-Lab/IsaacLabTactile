@@ -87,9 +87,19 @@ class FactoryEnv(DirectRLEnv):
         )
 
         # Set masses and frictions.
-        factory_utils.set_friction(self._held_asset, self.cfg_task.held_asset_cfg.friction, self.scene.num_envs)
+        # If gripper_peg_friction is set in task config, use it for both held_asset and robot (gripper-peg friction).
+        # Otherwise, use individual config values.
+        factory_utils.set_friction(
+            self._held_asset,
+            self.cfg_task.gripper_peg_friction if self.cfg_task.gripper_peg_friction is not None else self.cfg_task.held_asset_cfg.friction,
+            self.scene.num_envs,
+        )
         factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
-        factory_utils.set_friction(self._robot, self.cfg_task.robot_cfg.friction, self.scene.num_envs)
+        factory_utils.set_friction(
+            self._robot,
+            self.cfg_task.gripper_peg_friction if self.cfg_task.gripper_peg_friction is not None else self.cfg_task.robot_cfg.friction,
+            self.scene.num_envs,
+        )
 
     def _init_tensors(self):
         """Initialize tensors once."""
