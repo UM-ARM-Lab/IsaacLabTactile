@@ -42,12 +42,6 @@ parser.add_argument(
     help="if toggled, this experiment will be tracked with Weights and Biases",
 )
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
-parser.add_argument(
-    "--use_real_calib",
-    action="store_true",
-    default=False,
-    help="Use real calibration file (polycalib_real.npz) instead of simulated calibration (polycalib.npz).",
-)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -102,9 +96,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     
-    # override tactile sensor calibration if requested
-    if args_cli.use_real_calib and hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
-        env_cfg.tactile_cam.calib_variant = "real"
+    # Apply task-specific overrides from agent config (e.g., Factory peg insertion specific parameters)
+    task_overrides = agent_cfg["params"].get("task_overrides", {})
+    if task_overrides:
+        # Override tactile sensor calibration if specified
+        if task_overrides.get("use_real_calib", False) and hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
+            env_cfg.tactile_cam.calib_variant = "real"
+        
+        # Override gripper-peg friction if specified
+        gripper_peg_friction = task_overrides.get("gripper_peg_friction", None)
+        if gripper_peg_friction is not None:
+            if hasattr(env_cfg, "task") and hasattr(env_cfg.task, "gripper_peg_friction"):
+                env_cfg.task.gripper_peg_friction = gripper_peg_friction
+                print(f"[INFO] Setting gripper-peg friction to {gripper_peg_friction}")
+            else:
+                print("[WARNING] gripper_peg_friction parameter not available in this task configuration")
     
     # update agent device configuration to match environment device
     if args_cli.device is not None:

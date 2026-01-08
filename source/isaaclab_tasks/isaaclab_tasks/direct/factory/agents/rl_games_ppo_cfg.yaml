@@ -49,6 +49,14 @@ params:
   load_checkpoint: False
   load_path: ""
 
+  # Task-specific overrides (e.g., Factory peg insertion specific parameters)
+  task_overrides:
+    # Use real calibration file (polycalib_real.npz) instead of simulated calibration (polycalib.npz)
+    use_real_calib: False
+    # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
+    # Set to null to use individual config values, or specify a float value (e.g., 1.0)
+    gripper_peg_friction: null
+
   config:
     name: Factory
     device: cuda:0
