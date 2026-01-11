@@ -272,6 +272,75 @@ class FactoryEnv(DirectRLEnv):
                 # Add new observation at the end (most recent)
                 self.obs_history_buffers[obs_name][:, -1] = obs_tensor
 
+    def _apply_observation_noise(self, obs_dict):
+        """Apply domain randomization noise to observations.
+        
+        Args:
+            obs_dict: Dictionary of observation tensors
+            
+        Returns:
+            Dictionary with noisy observations
+        """
+        if not self.cfg.obs_rand.enable_obs_noise:
+            return obs_dict
+        
+        noisy_obs_dict = {}
+        
+        for obs_name, obs_tensor in obs_dict.items():
+            # Get noise configuration for this observation
+            if hasattr(self.cfg.obs_rand, obs_name):
+                noise_std = torch.tensor(
+                    getattr(self.cfg.obs_rand, obs_name), 
+                    dtype=torch.float32, 
+                    device=self.device
+                )
+                
+                # Check if noise is enabled (non-zero)
+                if torch.any(noise_std > 0.0):
+                    # Handle different observation dimensions
+                    if obs_tensor.dim() == 2 and obs_tensor.shape[0] == self.num_envs:  # (num_envs, obs_dim)
+                        # Special handling for quaternions - add small angular noise
+                        if obs_name.endswith("_quat") and obs_tensor.shape[-1] == 4:
+                            # Convert quaternion noise to small axis-angle perturbations
+                            # This preserves quaternion normalization better
+                            angle_noise = torch.randn(
+                                (self.num_envs, 3), 
+                                dtype=torch.float32, 
+                                device=self.device
+                            ) * noise_std[:3].unsqueeze(0)
+                            # Limit to small angles to preserve quaternion validity
+                            angle_noise = torch.clamp(angle_noise, -0.1, 0.1)
+                            
+                            # Convert to quaternion delta
+                            angle = torch.norm(angle_noise, p=2, dim=-1, keepdim=True)
+                            axis = angle_noise / (angle + 1e-8)
+                            quat_delta = torch_utils.quat_from_angle_axis(
+                                angle.squeeze(-1), 
+                                axis
+                            )
+                            # Apply quaternion multiplication
+                            noisy_obs_dict[obs_name] = torch_utils.quat_mul(obs_tensor, quat_delta)
+                        else:
+                            # Add Gaussian noise for other observations
+                            # Ensure noise_std matches observation dimension
+                            if noise_std.shape[0] == obs_tensor.shape[-1]:
+                                noise = torch.randn_like(obs_tensor) * noise_std.unsqueeze(0)
+                                noisy_obs_dict[obs_name] = obs_tensor + noise
+                            else:
+                                # Dimension mismatch - skip noise for this observation
+                                noisy_obs_dict[obs_name] = obs_tensor
+                    else:
+                        # If shape doesn't match, skip noise for this observation
+                        noisy_obs_dict[obs_name] = obs_tensor
+                else:
+                    # Noise is zero - no modification needed
+                    noisy_obs_dict[obs_name] = obs_tensor
+            else:
+                # No noise configured for this observation
+                noisy_obs_dict[obs_name] = obs_tensor
+        
+        return noisy_obs_dict
+
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
@@ -307,6 +376,10 @@ class FactoryEnv(DirectRLEnv):
             "rot_threshold": self.rot_threshold,
             "prev_actions": prev_actions,
         }
+        
+        # Apply observation noise to policy observations (not critic states)
+        obs_dict = self._apply_observation_noise(obs_dict)
+        
         return obs_dict, state_dict
 
     def _get_observations(self):

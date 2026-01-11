@@ -88,6 +88,12 @@ params:
     # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
     # Set to null to use individual config values, or specify a float value (e.g., 1.0)
     gripper_peg_friction: null
+    
+    # Observation noise for domain randomization
+    # Set enable_obs_noise to true to enable observation noise
+    # Individual noise parameters are configured in factory_env_cfg.py (ObsRandCfg)
+    obs_noise:
+      enable_obs_noise: True  # Set to true to enable observation noise
 
   config:
     name: Factory_Tactile

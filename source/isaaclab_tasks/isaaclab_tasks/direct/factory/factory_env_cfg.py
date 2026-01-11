@@ -65,7 +65,27 @@ STATE_DIM_CFG = {
 @configclass
 class ObsRandCfg:
     fixed_asset_pos = [0.001, 0.001, 0.001]
-
+    
+    # Observation noise parameters for domain randomization
+    # Each parameter is a list of standard deviations for Gaussian noise
+    enable_obs_noise: bool = False
+    
+    # Position observations (3D: x, y, z) - noise in meters
+    # Default: 1-2mm noise for position observations
+    fingertip_pos = [0.001, 0.001, 0.001]
+    fingertip_pos_rel_fixed = [0.001, 0.001, 0.001]
+    held_pos = [0.001, 0.001, 0.001]
+    held_pos_rel_fixed = [0.001, 0.001, 0.001]
+    
+    # Quaternion observations - noise applied as small axis-angle perturbations (radians)
+    # Default: ~0.5-1 degree angular noise
+    fingertip_quat = [0.01, 0.01, 0.01]  # Only first 3 used for axis-angle noise
+    held_quat = [0.01, 0.01, 0.01]  # Only first 3 used for axis-angle noise
+    
+    # Velocity observations (3D) - noise in m/s or rad/s
+    # Default: small velocity noise
+    ee_linvel = [0.01, 0.01, 0.01]  # m/s
+    ee_angvel = [0.05, 0.05, 0.05]  # rad/s
 
 @configclass
 class ObsHistoryCfg:

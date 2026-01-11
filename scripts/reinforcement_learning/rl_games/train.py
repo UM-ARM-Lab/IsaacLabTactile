@@ -111,6 +111,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print(f"[INFO] Setting gripper-peg friction to {gripper_peg_friction}")
             else:
                 print("[WARNING] gripper_peg_friction parameter not available in this task configuration")
+        
+        # Override observation noise enable flag if specified
+        obs_noise = task_overrides.get("obs_noise", None)
+        if obs_noise is not None and hasattr(env_cfg, "obs_rand"):
+            if isinstance(obs_noise, dict) and "enable_obs_noise" in obs_noise:
+                env_cfg.obs_rand.enable_obs_noise = obs_noise["enable_obs_noise"]
+                print(f"[INFO] Setting enable_obs_noise to {obs_noise['enable_obs_noise']}")
+            else:
+                print("[WARNING] obs_noise must be a dictionary with 'enable_obs_noise' key")
     
     # update agent device configuration to match environment device
     if args_cli.device is not None:
