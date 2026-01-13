@@ -271,7 +271,7 @@ class FactoryTaskNutThreadCfg(FactoryEnvCfg):
 @configclass
 class FlexHoleCfg:
     """Configuration for flexible hole sizes (mixed large/regular environments)."""
-    large_env_fraction: float = 0.5  # Fraction of environments with large holes (0.0-1.0)
+    num_large_envs: int = 0          # Number of environments with large holes (0 to num_envs)
     large_hole_size: float = 2.0     # Scale multiplier for large holes (regular = 1.0)
 
 

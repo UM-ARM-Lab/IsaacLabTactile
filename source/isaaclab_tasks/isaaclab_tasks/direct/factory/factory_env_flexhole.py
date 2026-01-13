@@ -35,7 +35,12 @@ class FactoryFlexHoleEnv(FactoryEnv):
     def __init__(self, cfg: FactoryTaskPegInsertFlexHoleCfg, render_mode: str | None = None, **kwargs):
         # Compute environment counts BEFORE parent init (need num_envs from scene config)
         total_envs = cfg.scene.num_envs
-        self.num_large_envs = int(total_envs * cfg.flex_hole.large_env_fraction)
+        self.num_large_envs = cfg.flex_hole.num_large_envs
+        # Validate num_large_envs is within valid range
+        if not (0 <= self.num_large_envs <= total_envs):
+            raise ValueError(
+                f"num_large_envs ({self.num_large_envs}) must be between 0 and num_envs ({total_envs})"
+            )
         self.num_reg_envs = total_envs - self.num_large_envs
 
         # Store scale for later use
@@ -219,3 +224,10 @@ class FactoryFlexHoleEnv(FactoryEnv):
             curr_successes = torch.logical_and(curr_successes, is_rotated)
 
         return curr_successes
+
+    def _log_factory_metrics(self, rew_dict, curr_successes):
+        """Log factory metrics with separate success rates for large and regular holes."""
+        super()._log_factory_metrics(rew_dict, curr_successes)
+
+        self.extras["successes_large"] = torch.count_nonzero(curr_successes[:self.num_large_envs]) / max(self.num_large_envs, 1)
+        self.extras["successes_reg"] = torch.count_nonzero(curr_successes[self.num_large_envs:]) / max(self.num_reg_envs, 1)
