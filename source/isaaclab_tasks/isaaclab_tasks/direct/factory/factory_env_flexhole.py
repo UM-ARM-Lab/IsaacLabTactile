@@ -60,7 +60,26 @@ class FactoryFlexHoleEnv(FactoryEnv):
         # Store scale for later use
         self._large_hole_size = flex.large_hole_size
 
+        # Pre-adjust observation_space for 6D quaternion representation
+        # Each quaternion field (4D) becomes 6D, adding 2 dimensions per field
+        num_quat_fields_obs = sum(1 for obs in cfg.obs_order if obs.endswith("_quat"))
+        num_quat_fields_state = sum(1 for s in cfg.state_order if s.endswith("_quat"))
+        self._obs_quat_adjustment = num_quat_fields_obs * 2
+        self._state_quat_adjustment = num_quat_fields_state * 2
+
         super().__init__(cfg, render_mode, **kwargs)
+
+        # Adjust the computed observation_space and state_space for 6D quaternions
+        self.cfg.observation_space += self._obs_quat_adjustment
+        self.cfg.state_space += self._state_quat_adjustment
+
+        # Update the gym observation space Dict to match new dimensions
+        from gymnasium import spaces
+        import numpy as np
+        new_obs_dim = self.cfg.observation_space
+        new_state_dim = self.cfg.state_space
+        self.single_observation_space["policy"] = spaces.Box(low=-np.inf, high=np.inf, shape=(new_obs_dim,))
+        self.single_observation_space["critic"] = spaces.Box(low=-np.inf, high=np.inf, shape=(new_state_dim,))
 
     def _init_tensors(self):
         """Initialize tensors including hole scale multipliers and tolerances."""
@@ -179,25 +198,66 @@ class FactoryFlexHoleEnv(FactoryEnv):
         fixed_asset_cfg.spawn = multi_asset_spawn_cfg
         return fixed_asset_cfg
 
+    @staticmethod
+    def quat_to_6d(quat: torch.Tensor) -> torch.Tensor:
+        """
+        Convert quaternion (w,x,y,z) to 6D rotation representation.
+
+        The 6D representation uses the first two columns of the rotation matrix,
+        which is continuous and avoids gimbal lock issues.
+
+        Args:
+            quat: Quaternion tensor of shape (..., 4) in (w, x, y, z) order (IsaacLab convention)
+
+        Returns:
+            6D rotation tensor of shape (..., 6)
+        """
+        w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
+
+        # First column of rotation matrix
+        v1 = 1 - 2*y*y - 2*z*z
+        v2 = 2*x*y + 2*z*w
+        v3 = 2*x*z - 2*y*w
+
+        # Second column of rotation matrix
+        v4 = 2*x*y - 2*z*w
+        v5 = 1 - 2*x*x - 2*z*z
+        v6 = 2*y*z + 2*x*w
+
+        return torch.stack([v1, v2, v3, v4, v5, v6], dim=-1)
+
+
     def _get_observations(self):
-        """Get observations filtered to train envs only.
+        """Get observations with 6D quaternion representation.
+
+        All environments (train and val) contribute to training.
+        Success rates are logged separately for monitoring.
 
         Returns:
             dict with keys:
-                - "policy": Policy observations for train envs only
-                - "critic": Critic observations for train envs only
-                - "policy_large": Policy observations for train_large envs
-                - "policy_reg": Policy observations for train_reg envs
+                - "policy": Policy observations for all envs
+                - "critic": Critic observations for all envs
         """
-        obs = super()._get_observations()
+        obs_dict, state_dict, collect_dict = super()._get_factory_obs_state_dict()
+        # Replace keys with "quat" with 6D representation
+        for d in [obs_dict, state_dict, collect_dict]:
+            for key in d.keys():
+                if not key.endswith("_quat"):
+                    continue
+                quat_tensor = d[key]
+                d[key] = self.quat_to_6d(quat_tensor)
 
-        # Filter to train envs only (val envs run but their obs are not used for training)
-        obs["policy"] = obs["policy"][self.idx_train]
-        obs["critic"] = obs["critic"][self.idx_train]
+        obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
+        state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
 
-        # Split within train by hole type
-        obs["policy_large"] = obs["policy"][:self.num_train_large]
-        obs["policy_reg"] = obs["policy"][self.num_train_large:]
+        # Store collection observations for data collection
+        self.collect_obs = torch.cat([collect_dict[key] for key in collect_dict.keys()], dim=-1)
+
+        # Return observations for ALL environments (no filtering)
+        # Val envs contribute to training but have separate success rate logging
+        obs = {}
+        obs["policy"] = obs_tensors
+        obs["critic"] = state_tensors
 
         return obs
 
@@ -260,15 +320,17 @@ class FactoryFlexHoleEnv(FactoryEnv):
         """Log factory metrics with separate success rates for all 4 categories."""
         super()._log_factory_metrics(rew_dict, curr_successes)
 
-        # Log all 4 categories separately (always, regardless of mode)
-        self.extras["successes_train_large"] = torch.count_nonzero(curr_successes[self.idx_train_large]) / max(self.num_train_large, 1)
-        self.extras["successes_train_reg"] = torch.count_nonzero(curr_successes[self.idx_train_reg]) / max(self.num_train_reg, 1)
-        self.extras["successes_val_large"] = torch.count_nonzero(curr_successes[self.idx_val_large]) / max(self.num_val_large, 1)
-        self.extras["successes_val_reg"] = torch.count_nonzero(curr_successes[self.idx_val_reg]) / max(self.num_val_reg, 1)
+        # Log 4 categories only at episode boundaries (matching parent's behavior for smooth curves)
+        if torch.any(self.reset_buf):
+            self.extras["successes_train_large"] = torch.count_nonzero(curr_successes[self.idx_train_large]) / max(self.num_train_large, 1)
+            self.extras["successes_train_reg"] = torch.count_nonzero(curr_successes[self.idx_train_reg]) / max(self.num_train_reg, 1)
+            self.extras["successes_val_large"] = torch.count_nonzero(curr_successes[self.idx_val_large]) / max(self.num_val_large, 1)
+            self.extras["successes_val_reg"] = torch.count_nonzero(curr_successes[self.idx_val_reg]) / max(self.num_val_reg, 1)
 
     def _get_rewards(self):
-        """Get rewards filtered to train envs only."""
-        # Get full rewards from parent (computes for all envs)
-        full_rewards = super()._get_rewards()
-        # Return only train env rewards
-        return full_rewards[self.idx_train]
+        """Get rewards for all environments.
+
+        All envs (train and val) contribute to training.
+        Success rates are logged separately for monitoring.
+        """
+        return super()._get_rewards()
