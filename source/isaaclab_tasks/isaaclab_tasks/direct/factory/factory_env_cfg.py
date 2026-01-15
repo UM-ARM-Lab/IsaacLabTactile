@@ -270,8 +270,23 @@ class FactoryTaskNutThreadCfg(FactoryEnvCfg):
 
 @configclass
 class FlexHoleCfg:
-    """Configuration for flexible hole sizes (mixed large/regular environments)."""
-    num_large_envs: int = 0          # Number of environments with large holes (0 to num_envs)
+    """Configuration for flexible hole sizes with train/val split.
+
+    Index layout: [train_large][train_reg][val_large][val_reg]
+    - train_large: sim-train (scaled hole, easier)
+    - train_reg: real-train (regular hole, harder)
+    - val_large: sim-val (scaled hole, for monitoring)
+    - val_reg: real-val (regular hole, for monitoring)
+
+    Training uses only train envs. Val envs run for monitoring but don't contribute to PPO.
+    """
+    # Training environments
+    num_train_large: int = 0         # sim-train (scaled hole)
+    num_train_reg: int = 0           # real-train (regular hole)
+    # Validation environments
+    num_val_large: int = 0           # sim-val (scaled hole)
+    num_val_reg: int = 0             # real-val (regular hole)
+    # Hole scale
     large_hole_size: float = 2.0     # Scale multiplier for large holes (regular = 1.0)
 
 

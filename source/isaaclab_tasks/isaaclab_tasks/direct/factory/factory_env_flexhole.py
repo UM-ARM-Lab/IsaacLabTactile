@@ -21,30 +21,44 @@ from . import factory_utils
 
 
 class FactoryFlexHoleEnv(FactoryEnv):
-    """Factory environment with mixed large/regular hole sizes.
+    """Factory environment with train/val split and mixed hole sizes.
 
-    This environment creates a mix of environments with different fixed asset (hole) sizes:
-    - First `num_large_envs` environments have holes scaled by `large_hole_size`
-    - Remaining `num_reg_envs` environments have regular (scale=1.0) holes
+    Index layout: [train_large][train_reg][val_large][val_reg]
+    - train_large: sim-train (scaled hole, easier)
+    - train_reg: real-train (regular hole, harder)
+    - val_large: sim-val (scaled hole, for monitoring)
+    - val_reg: real-val (regular hole, for monitoring)
 
-    The observations are split into "policy_large" and "policy_reg" for separate processing.
+    Training uses only train envs (obs/rewards filtered). Val envs run for monitoring only.
+    All 4 success rates are always logged to wandb.
     """
 
     cfg: FactoryTaskPegInsertFlexHoleCfg
 
     def __init__(self, cfg: FactoryTaskPegInsertFlexHoleCfg, render_mode: str | None = None, **kwargs):
-        # Compute environment counts BEFORE parent init (need num_envs from scene config)
+        # Parse train/val counts from config
+        flex = cfg.flex_hole
+        self.num_train_large = flex.num_train_large
+        self.num_train_reg = flex.num_train_reg
+        self.num_val_large = flex.num_val_large
+        self.num_val_reg = flex.num_val_reg
+
+        # Computed counts
+        self.num_train = self.num_train_large + self.num_train_reg
+        self.num_val = self.num_val_large + self.num_val_reg
+        self.num_large_envs = self.num_train_large + self.num_val_large
+        self.num_reg_envs = self.num_train_reg + self.num_val_reg
+
+        # Validate total matches scene.num_envs
         total_envs = cfg.scene.num_envs
-        self.num_large_envs = cfg.flex_hole.num_large_envs
-        # Validate num_large_envs is within valid range
-        if not (0 <= self.num_large_envs <= total_envs):
+        expected_total = self.num_train + self.num_val
+        if expected_total != total_envs:
             raise ValueError(
-                f"num_large_envs ({self.num_large_envs}) must be between 0 and num_envs ({total_envs})"
+                f"Sum of flex_hole counts ({expected_total}) must equal scene.num_envs ({total_envs})"
             )
-        self.num_reg_envs = total_envs - self.num_large_envs
 
         # Store scale for later use
-        self._large_hole_size = cfg.flex_hole.large_hole_size
+        self._large_hole_size = flex.large_hole_size
 
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -52,11 +66,21 @@ class FactoryFlexHoleEnv(FactoryEnv):
         """Initialize tensors including hole scale multipliers and tolerances."""
         super()._init_tensors()
 
-        # Create scale multiplier tensor: [large, large, ..., reg, reg, ...]
+        # Index slices for each category
+        # Layout: [train_large][train_reg][val_large][val_reg]
+        self.idx_train_large = slice(0, self.num_train_large)
+        self.idx_train_reg = slice(self.num_train_large, self.num_train)
+        self.idx_val_large = slice(self.num_train, self.num_train + self.num_val_large)
+        self.idx_val_reg = slice(self.num_train + self.num_val_large, None)
+        self.idx_train = slice(0, self.num_train)
+        self.idx_val = slice(self.num_train, None)
+
+        # Create scale multiplier tensor for new layout
         # Shape: (num_envs,)
-        large_scales = torch.full((self.num_large_envs,), self._large_hole_size, device=self.device)
-        reg_scales = torch.ones(self.num_reg_envs, device=self.device)
-        self.hole_scale_multipliers = torch.cat([large_scales, reg_scales])
+        scales = torch.ones(self.num_envs, device=self.device)
+        scales[self.idx_train_large] = self._large_hole_size
+        scales[self.idx_val_large] = self._large_hole_size
+        self.hole_scale_multipliers = scales
 
         # Compute per-environment XY success tolerance using affine formula:
         # xy_tolerance = base_tolerance + (hole_diameter * (scale - 1)) / 2
@@ -121,6 +145,9 @@ class FactoryFlexHoleEnv(FactoryEnv):
     def _create_multi_scale_fixed_asset(self):
         """Create ArticulationCfg with MultiAssetSpawnerCfg for mixed hole sizes.
 
+        Layout: [train_large][train_reg][val_large][val_reg]
+        Large holes at train_large and val_large indices.
+
         Returns:
             ArticulationCfg with MultiAssetSpawnerCfg spawner containing per-environment
             spawn configurations with appropriate scales.
@@ -131,11 +158,12 @@ class FactoryFlexHoleEnv(FactoryEnv):
         asset_cfgs = []
         for i in range(self.num_envs):
             scaled_spawn_cfg = deepcopy(base_spawn_cfg)
-            if i < self.num_large_envs:
-                # Large hole: scale only x,y (not z height)
+            # Large hole for train_large or val_large indices
+            is_train_large = i < self.num_train_large
+            is_val_large = self.num_train <= i < self.num_train + self.num_val_large
+            if is_train_large or is_val_large:
                 scaled_spawn_cfg.scale = (self._large_hole_size, self._large_hole_size, 1.0)
             else:
-                # Regular hole: no scaling
                 scaled_spawn_cfg.scale = (1.0, 1.0, 1.0)
             asset_cfgs.append(scaled_spawn_cfg)
 
@@ -152,21 +180,24 @@ class FactoryFlexHoleEnv(FactoryEnv):
         return fixed_asset_cfg
 
     def _get_observations(self):
-        """Get observations with additional split by hole size.
+        """Get observations filtered to train envs only.
 
         Returns:
             dict with keys:
-                - "policy": Full policy observations for all envs
-                - "critic": Full critic observations for all envs
-                - "policy_large": Policy observations for large hole envs only
-                - "policy_reg": Policy observations for regular hole envs only
+                - "policy": Policy observations for train envs only
+                - "critic": Critic observations for train envs only
+                - "policy_large": Policy observations for train_large envs
+                - "policy_reg": Policy observations for train_reg envs
         """
         obs = super()._get_observations()
 
-        # Add split observations by hole size
-        policy_obs = obs["policy"]
-        obs["policy_large"] = policy_obs[:self.num_large_envs]
-        obs["policy_reg"] = policy_obs[self.num_large_envs:]
+        # Filter to train envs only (val envs run but their obs are not used for training)
+        obs["policy"] = obs["policy"][self.idx_train]
+        obs["critic"] = obs["critic"][self.idx_train]
+
+        # Split within train by hole type
+        obs["policy_large"] = obs["policy"][:self.num_train_large]
+        obs["policy_reg"] = obs["policy"][self.num_train_large:]
 
         return obs
 
@@ -226,8 +257,18 @@ class FactoryFlexHoleEnv(FactoryEnv):
         return curr_successes
 
     def _log_factory_metrics(self, rew_dict, curr_successes):
-        """Log factory metrics with separate success rates for large and regular holes."""
+        """Log factory metrics with separate success rates for all 4 categories."""
         super()._log_factory_metrics(rew_dict, curr_successes)
 
-        self.extras["successes_large"] = torch.count_nonzero(curr_successes[:self.num_large_envs]) / max(self.num_large_envs, 1)
-        self.extras["successes_reg"] = torch.count_nonzero(curr_successes[self.num_large_envs:]) / max(self.num_reg_envs, 1)
+        # Log all 4 categories separately (always, regardless of mode)
+        self.extras["successes_train_large"] = torch.count_nonzero(curr_successes[self.idx_train_large]) / max(self.num_train_large, 1)
+        self.extras["successes_train_reg"] = torch.count_nonzero(curr_successes[self.idx_train_reg]) / max(self.num_train_reg, 1)
+        self.extras["successes_val_large"] = torch.count_nonzero(curr_successes[self.idx_val_large]) / max(self.num_val_large, 1)
+        self.extras["successes_val_reg"] = torch.count_nonzero(curr_successes[self.idx_val_reg]) / max(self.num_val_reg, 1)
+
+    def _get_rewards(self):
+        """Get rewards filtered to train envs only."""
+        # Get full rewards from parent (computes for all envs)
+        full_rewards = super()._get_rewards()
+        # Return only train env rewards
+        return full_rewards[self.idx_train]
