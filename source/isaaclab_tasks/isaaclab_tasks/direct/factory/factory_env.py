@@ -84,8 +84,8 @@ class FactoryEnv(DirectRLEnv):
         self.ep_succeeded = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.ep_success_times = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
 
-        # Smoothed force sensor data for data collection
-        self.finger_wrench_smooth = torch.zeros((self.num_envs, 6), device=self.device)
+        # Smoothed force sensor data (EMA buffer)
+        self.finger_wrench = torch.zeros((self.num_envs, 6), device=self.device)
 
     def _setup_scene(self):
         """Initialize simulation scene."""
@@ -181,16 +181,13 @@ class FactoryEnv(DirectRLEnv):
         ## ADD contact sensor reading
         self.contact_force = self.scene["contact_sensor"].data.net_forces_w.squeeze(1).clone()
 
-        ## ADD Finger Wrench Reading at panda_link7
+        ## ADD Finger Wrench Reading at panda_link7 (with EMA smoothing)
         self.cfg.wrench_joint_cfg.resolve(self.scene)
         wrench_joint_id = self.cfg.wrench_joint_cfg.body_ids[0]
         link_incoming_forces = self._robot.root_physx_view.get_link_incoming_joint_force()
-        link_incoming_forces = link_incoming_forces[:, wrench_joint_id]
-        self.finger_wrench = link_incoming_forces.view(self.num_envs, -1).clone()
-
-        # Smooth force sensor readings (EMA)
+        raw_wrench = link_incoming_forces[:, wrench_joint_id].view(self.num_envs, -1)
         alpha = 0.25
-        self.finger_wrench_smooth = alpha * self.finger_wrench + (1 - alpha) * self.finger_wrench_smooth
+        self.finger_wrench = alpha * raw_wrench + (1 - alpha) * self.finger_wrench
 
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
@@ -226,7 +223,6 @@ class FactoryEnv(DirectRLEnv):
             "fingertip_quat": self.fingertip_midpoint_quat,
             "ee_linvel": self.ee_linvel_fd,
             "ee_angvel": self.ee_angvel_fd,
-            "finger_wrench": self.finger_wrench_smooth,  # 6D: 3 force + 3 torque
             "prev_actions": prev_actions,
         }
 
