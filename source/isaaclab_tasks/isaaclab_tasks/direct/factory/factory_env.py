@@ -84,6 +84,9 @@ class FactoryEnv(DirectRLEnv):
         self.ep_succeeded = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.ep_success_times = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
 
+        # Smoothed force sensor data for data collection
+        self.finger_wrench_smooth = torch.zeros((self.num_envs, 6), device=self.device)
+
     def _setup_scene(self):
         """Initialize simulation scene."""
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg(), translation=(0.0, 0.0, -1.05))
@@ -185,6 +188,10 @@ class FactoryEnv(DirectRLEnv):
         link_incoming_forces = link_incoming_forces[:, wrench_joint_id]
         self.finger_wrench = link_incoming_forces.view(self.num_envs, -1).clone()
 
+        # Smooth force sensor readings (EMA)
+        alpha = 0.25
+        self.finger_wrench_smooth = alpha * self.finger_wrench + (1 - alpha) * self.finger_wrench_smooth
+
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
@@ -219,6 +226,7 @@ class FactoryEnv(DirectRLEnv):
             "fingertip_quat": self.fingertip_midpoint_quat,
             "ee_linvel": self.ee_linvel_fd,
             "ee_angvel": self.ee_angvel_fd,
+            "finger_wrench": self.finger_wrench_smooth,  # 6D: 3 force + 3 torque
             "prev_actions": prev_actions,
         }
 
