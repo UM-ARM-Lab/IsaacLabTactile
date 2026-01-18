@@ -67,6 +67,7 @@ import os
 import random
 import time
 import torch
+from omegaconf import OmegaConf
 
 from rl_games.common import env_configurations, vecenv
 from rl_games.common.player import BasePlayer
@@ -106,6 +107,44 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override tactile sensor calibration if requested
     if args_cli.use_real_calib and hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
         env_cfg.tactile_cam.calib_variant = "real"
+    
+    # Apply task-specific overrides from agent config (e.g., Factory peg insertion specific parameters)
+    task_overrides = agent_cfg["params"].get("task_overrides", {})
+    if task_overrides:
+        # Override tactile sensor calibration if specified
+        if task_overrides.get("use_real_calib", False) and hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
+            env_cfg.tactile_cam.calib_variant = "real"
+        
+        # Override gripper-peg friction if specified
+        gripper_peg_friction = task_overrides.get("gripper_peg_friction", None)
+        if gripper_peg_friction is not None:
+            if hasattr(env_cfg, "task") and hasattr(env_cfg.task, "gripper_peg_friction"):
+                env_cfg.task.gripper_peg_friction = gripper_peg_friction
+                print(f"[INFO] Setting gripper-peg friction to {gripper_peg_friction}")
+            else:
+                print("[WARNING] gripper_peg_friction parameter not available in this task configuration")
+        
+        # Override observation noise enable flag if specified
+        obs_noise = task_overrides.get("obs_noise", None)
+        if obs_noise is not None and hasattr(env_cfg, "obs_rand"):
+            if isinstance(obs_noise, dict) and "enable_obs_noise" in obs_noise:
+                env_cfg.obs_rand.enable_obs_noise = obs_noise["enable_obs_noise"]
+                print(f"[INFO] Setting enable_obs_noise to {obs_noise['enable_obs_noise']}")
+            else:
+                print("[WARNING] obs_noise must be a dictionary with 'enable_obs_noise' key")
+        
+        # Override include_held_asset_obs flag if specified
+        include_held_asset_obs = task_overrides.get("include_held_asset_obs", None)
+        if include_held_asset_obs is not None:
+            # Initialize params structure if needed
+            if env_cfg.params is None:
+                env_cfg.params = OmegaConf.create({})
+            if "env" not in env_cfg.params:
+                env_cfg.params["env"] = OmegaConf.create({})
+            env_cfg.params["env"]["include_held_asset_obs"] = include_held_asset_obs
+            print(f"[INFO] Setting include_held_asset_obs to {include_held_asset_obs}")
+            # Call update_env_params() again to apply the change to obs_order
+            env_cfg.update_env_params()
 
     if args_cli.device is not None:
         agent_cfg["params"]["config"]["device"] = args_cli.device

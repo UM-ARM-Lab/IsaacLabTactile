@@ -93,7 +93,11 @@ params:
     # Set enable_obs_noise to true to enable observation noise
     # Individual noise parameters are configured in factory_env_cfg.py (ObsRandCfg)
     obs_noise:
-      enable_obs_noise: True  # Set to true to enable observation noise
+      enable_obs_noise: False  # Set to true to enable observation noise
+    
+    # Include held asset observations (held_pos_rel_fixed and held_quat) in obs_order
+    # When enabled, adds held object position relative to fixed asset and held object orientation to policy observations
+    include_held_asset_obs: False  # Set to true to include held_pos_rel_fixed and held_quat in observations
 
   config:
     name: Factory_Tactile
@@ -116,7 +120,7 @@ params:
     schedule_type: standard
     kl_threshold: 0.008
     score_to_win: 20000
-    max_epochs: 2500
+    max_epochs: 500
     save_best_after: 10
     save_frequency: 20
     print_stats: True

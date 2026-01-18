@@ -66,6 +66,7 @@ import random
 from datetime import datetime
 
 import omni
+from omegaconf import OmegaConf
 from rl_games.common import env_configurations, vecenv
 from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
@@ -120,6 +121,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print(f"[INFO] Setting enable_obs_noise to {obs_noise['enable_obs_noise']}")
             else:
                 print("[WARNING] obs_noise must be a dictionary with 'enable_obs_noise' key")
+        
+        # Override include_held_asset_obs flag if specified
+        include_held_asset_obs = task_overrides.get("include_held_asset_obs", None)
+        if include_held_asset_obs is not None:
+            # Initialize params structure if needed
+            if env_cfg.params is None:
+                env_cfg.params = OmegaConf.create({})
+            if "env" not in env_cfg.params:
+                env_cfg.params["env"] = OmegaConf.create({})
+            env_cfg.params["env"]["include_held_asset_obs"] = include_held_asset_obs
+            print(f"[INFO] Setting include_held_asset_obs to {include_held_asset_obs}")
+            # Call update_env_params() again to apply the change to obs_order
+            env_cfg.update_env_params()
     
     # update agent device configuration to match environment device
     if args_cli.device is not None:

@@ -346,6 +346,22 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.use_gelsight_finger = env.use_gelsight_finger
         if env.get("obs_history", None) is not None and env["obs_history"].get("history_length", None) is not None:
             self.obs_history.history_length = env["obs_history"]["history_length"]
+        
+        # Handle include_held_asset_obs option
+        if env.get("include_held_asset_obs", None) is not None:
+            include_held_asset_obs = env.get("include_held_asset_obs", False)
+            if include_held_asset_obs:
+                # Add held_pos_rel_fixed and held_quat to obs_order if not already present
+                if "held_pos_rel_fixed" not in self.obs_order:
+                    self.obs_order.append("held_pos_rel_fixed")
+                if "held_quat" not in self.obs_order:
+                    self.obs_order.append("held_quat")
+            else:
+                # Remove held_pos_rel_fixed and held_quat from obs_order if present
+                if "held_pos_rel_fixed" in self.obs_order:
+                    self.obs_order.remove("held_pos_rel_fixed")
+                if "held_quat" in self.obs_order:
+                    self.obs_order.remove("held_quat")
 
         task = env.get("task", OmegaConf.create({}))
         if task.get("held_asset_rot_noise", None) is not None:
