@@ -209,22 +209,15 @@ class FactoryFlexHoleEnv(FactoryEnv):
     def _get_observations(self):
         """Get observations with 6D quaternion representation.
 
-        All environments (train and val) contribute to training.
-        Success rates are logged separately for monitoring.
-
-        Returns:
-            dict with keys:
-                - "policy": Policy observations for all envs
-                - "critic": Critic observations for all envs
+        Returns all environments' observations. The RlGamesTrainValVecEnvWrapper
+        handles filtering to train envs only.
         """
         obs_dict, state_dict, collect_dict = super()._get_factory_obs_state_dict()
-        # Replace keys with "quat" with 6D representation
+        # Replace quaternion keys with 6D representation
         for d in [obs_dict, state_dict, collect_dict]:
             for key in d.keys():
-                if not key.endswith("_quat"):
-                    continue
-                quat_tensor = d[key]
-                d[key] = self.quat_to_6d(quat_tensor)
+                if key.endswith("_quat"):
+                    d[key] = self.quat_to_6d(d[key])
 
         obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
@@ -232,13 +225,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
         # Store collection observations for data collection
         self.collect_obs = torch.cat([collect_dict[key] for key in collect_dict.keys()], dim=-1)
 
-        # Return observations for ALL environments (no filtering)
-        # Val envs contribute to training but have separate success rate logging
-        obs = {}
-        obs["policy"] = obs_tensors
-        obs["critic"] = state_tensors
-
-        return obs
+        return {"policy": obs_tensors, "critic": state_tensors}
 
     def _get_curr_successes(self, success_threshold, check_rot=False):
         """Get success mask with per-environment XY tolerance based on hole scale.
@@ -307,9 +294,5 @@ class FactoryFlexHoleEnv(FactoryEnv):
             self.extras["successes_val_reg"] = torch.count_nonzero(curr_successes[self.idx_val_reg]) / max(self.num_val_reg, 1)
 
     def _get_rewards(self):
-        """Get rewards for all environments.
-
-        All envs (train and val) contribute to training.
-        Success rates are logged separately for monitoring.
-        """
+        """Get rewards for all environments."""
         return super()._get_rewards()
