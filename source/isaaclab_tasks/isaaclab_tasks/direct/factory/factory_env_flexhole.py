@@ -9,7 +9,7 @@ from copy import deepcopy
 import torch
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, RigidObjectCollection
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
@@ -122,17 +122,13 @@ class FactoryFlexHoleEnv(FactoryEnv):
             translation=(0.55, 0.0, 0.0), orientation=(0.70711, 0.0, 0.0, 0.70711)
         )
 
-        # Clone environments FIRST (required for MultiAssetSpawnerCfg)
-        self.scene.clone_environments(copy_from_source=False)
-        if self.device == "cpu":
-            self.scene.filter_collisions()
-
         # Create MultiAssetSpawnerCfg for fixed_asset with mixed scales
-        fixed_asset_cfg = self._create_multi_scale_fixed_asset()
+        # fixed_asset_cfg = self._create_multi_scale_fixed_asset()
 
         # Spawn assets
         self._robot = Articulation(self.cfg.robot)
-        self._fixed_asset = Articulation(fixed_asset_cfg)
+        # self._fixed_asset = Articulation(self.cfg_task.fixed_assets)
+        self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
         self._held_asset = Articulation(self.cfg_task.held_asset)
 
         # Handle gear mesh task assets
@@ -148,6 +144,14 @@ class FactoryFlexHoleEnv(FactoryEnv):
             self.scene.articulations["small_gear"] = self._small_gear_asset
             self.scene.articulations["large_gear"] = self._large_gear_asset
 
+        # Copy environment
+        self.scene.clone_environments(copy_from_source=False)
+        if self.device == "cpu":
+            self.scene.filter_collisions()
+
+        # Apply per-environment hole scaling via USD API
+        self._apply_flex_hole_scales()
+
         # Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -161,42 +165,17 @@ class FactoryFlexHoleEnv(FactoryEnv):
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor_cfg)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
 
-    def _create_multi_scale_fixed_asset(self):
-        """Create ArticulationCfg with MultiAssetSpawnerCfg for mixed hole sizes.
+    def _apply_flex_hole_scales(self):
+        """Apply per-environment hole scaling via USD API after clone_environments()."""
+        from pxr import Gf
+        from isaacsim.core.utils.stage import get_current_stage
+        stage = get_current_stage()
 
-        Layout: [train_large][train_reg][val_large][val_reg]
-        Large holes at train_large and val_large indices.
-
-        Returns:
-            ArticulationCfg with MultiAssetSpawnerCfg spawner containing per-environment
-            spawn configurations with appropriate scales.
-        """
-        base_spawn_cfg = self.cfg_task.fixed_asset.spawn
-
-        # Create spawn configs for each environment
-        asset_cfgs = []
         for i in range(self.num_envs):
-            scaled_spawn_cfg = deepcopy(base_spawn_cfg)
-            # Large hole for train_large or val_large indices
-            is_train_large = i < self.num_train_large
-            is_val_large = self.num_train <= i < self.num_train + self.num_val_large
-            if is_train_large or is_val_large:
-                scaled_spawn_cfg.scale = (self._large_hole_size, self._large_hole_size, 1.0)
-            else:
-                scaled_spawn_cfg.scale = (1.0, 1.0, 1.0)
-            asset_cfgs.append(scaled_spawn_cfg)
-
-        # Create MultiAssetSpawnerCfg
-        multi_asset_spawn_cfg = sim_utils.MultiAssetSpawnerCfg(
-            assets_cfg=asset_cfgs,
-            random_choice=False,  # Deterministic: env i uses asset_cfgs[i]
-            activate_contact_sensors=True,
-        )
-
-        # Create new ArticulationCfg with multi-asset spawner
-        fixed_asset_cfg = deepcopy(self.cfg_task.fixed_asset)
-        fixed_asset_cfg.spawn = multi_asset_spawn_cfg
-        return fixed_asset_cfg
+            is_large = i < self.num_train_large or self.num_train <= i < self.num_train + self.num_val_large
+            scale = self._large_hole_size if is_large else 1.0
+            fixed_asset = stage.GetPrimAtPath(f"/World/envs/env_{i}/FixedAsset")
+            fixed_asset.GetAttribute("xformOp:scale").Set(Gf.Vec3f(scale, scale, 1.0))
 
     @staticmethod
     def quat_to_6d(quat: torch.Tensor) -> torch.Tensor:

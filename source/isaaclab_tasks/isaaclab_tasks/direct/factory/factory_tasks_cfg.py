@@ -7,6 +7,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
+from isaaclab.assets import RigidObjectCollectionCfg, RigidObjectCfg
 
 ASSET_DIR = f"{ISAACLAB_NUCLEUS_DIR}/Factory"
 
@@ -182,7 +183,10 @@ class PegInsert(FactoryTask):
         actuators={},
     )
 
-
+@configclass
+class PegFlexHole(PegInsert):
+    fixed_large_multiplier: float = 2.0
+    
 @configclass
 class GearBase(FixedAssetCfg):
     usd_path = f"{ASSET_DIR}/factory_gear_base.usd"

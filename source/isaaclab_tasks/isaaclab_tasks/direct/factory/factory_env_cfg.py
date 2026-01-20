@@ -17,7 +17,14 @@ from isaaclab.managers import SceneEntityCfg
 
 from omegaconf import OmegaConf, ListConfig
 
-from .factory_tasks_cfg import ASSET_DIR, FactoryTask, GearMesh, NutThread, PegInsert
+from .factory_tasks_cfg import (
+    ASSET_DIR,
+    FactoryTask,
+    GearMesh,
+    NutThread,
+    PegInsert,
+    PegFlexHole
+)
 
 OBS_DIM_CFG = {
     "held_pos_rel_fixed": 3,
@@ -215,7 +222,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
 
     # Contact sensor configuration
     contact_filter_path = [
-        "/World/envs/env_.*/FixedAsset/forge_hole_8mm/forge_hole_8mm",
+        "/World/envs/env_.*/FixedAsset/forge_hole_8mm",
         "/World/envs/env_.*/FixedAsset/factory_bolt_loose",
         "/World/envs/env_.*/FixedAsset/factory_gear_base_loose",
         "/World/envs/env_.*/LargeGearAsset/factory_gear_large",
@@ -293,4 +300,6 @@ class FlexHoleCfg:
 @configclass
 class FactoryTaskPegInsertFlexHoleCfg(FactoryTaskPegInsertCfg):
     """PegInsert task with mixed large/regular hole sizes."""
+    task_name = "peg_insert_flex_hole"
+    task = PegFlexHole()
     flex_hole: FlexHoleCfg = FlexHoleCfg()
