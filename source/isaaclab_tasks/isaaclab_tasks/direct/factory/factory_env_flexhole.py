@@ -280,7 +280,8 @@ class FactoryFlexHoleEnv(FactoryEnv):
             is_rotated = curr_yaw < self.cfg_task.ee_success_yaw
             curr_successes = torch.logical_and(curr_successes, is_rotated)
 
-        return curr_successes
+        # Return training success only
+        return curr_successes[self.idx_train]
 
     def _log_factory_metrics(self, rew_dict, curr_successes):
         """Log factory metrics with separate success rates for all 4 categories."""

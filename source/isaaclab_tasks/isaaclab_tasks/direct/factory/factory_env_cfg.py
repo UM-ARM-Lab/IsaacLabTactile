@@ -222,7 +222,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
 
     # Contact sensor configuration
     contact_filter_path = [
-        "/World/envs/env_.*/FixedAsset/forge_hole_8mm",
+        "/World/envs/env_.*/FixedAsset/factory_hole_8mm",
         "/World/envs/env_.*/FixedAsset/factory_bolt_loose",
         "/World/envs/env_.*/FixedAsset/factory_gear_base_loose",
         "/World/envs/env_.*/LargeGearAsset/factory_gear_large",
