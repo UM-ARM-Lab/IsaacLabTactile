@@ -371,14 +371,16 @@ class RlGamesTrainValVecEnvWrapper(RlGamesVecEnvWrapper):
         Uses runner.create_player() to create a player that handles RNN states
         internally. Weights are synced from training agent every step.
         """
+        assert hasattr(runner, "get_eval_player"), "Runner must implement get_eval_player()"
+        assert hasattr(runner, "get_train_agent"), "Runner must implement get_train_agent()"
+        assert hasattr(runner, "sync_eval_player"), "Runner must implement sync_eval_player()"
         self._rlgames_runner = runner
 
         if self._num_val == 0:
             return
 
-        # Create separate player for val inference using RLGames factory
-        # This player has its own model and handles RNN states internally
-        self._val_player = runner.create_player()
+        # Use cached eval player from runner (dedicated inference model)
+        self._val_player = runner.get_eval_player()
 
         # Configure player for batched val inference
         # (normally player.run() calls get_batch_size() to set these)
@@ -394,15 +396,10 @@ class RlGamesTrainValVecEnvWrapper(RlGamesVecEnvWrapper):
                              device=self._rl_device)
 
         # Only sync weights after training update (when epoch_num changes)
-        agent = self._rlgames_runner.algo
+        agent = self._rlgames_runner.get_train_agent()
         current_epoch = getattr(agent, 'epoch_num', 0)
         if current_epoch != self._last_synced_epoch:
-            self._val_player.model.load_state_dict(agent.model.state_dict())
-            # Also sync running_mean_std if using input normalization
-            if self._val_player.normalize_input:
-                self._val_player.model.running_mean_std.load_state_dict(
-                    agent.model.running_mean_std.state_dict()
-                )
+            self._rlgames_runner.sync_eval_player()
             self._last_synced_epoch = current_epoch
 
         # Use player's get_action which handles RNN states internally

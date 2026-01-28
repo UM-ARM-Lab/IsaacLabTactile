@@ -513,7 +513,6 @@ class FactoryEnv(DirectRLEnv):
                 keypoint_offset.repeat(self.num_envs, 1),
             )[1]
         keypoint_dist = torch.norm(keypoints_held - keypoints_fixed, p=2, dim=-1).mean(-1)
-
         a0, b0 = self.cfg_task.keypoint_coef_baseline
         a1, b1 = self.cfg_task.keypoint_coef_coarse
         a2, b2 = self.cfg_task.keypoint_coef_fine
