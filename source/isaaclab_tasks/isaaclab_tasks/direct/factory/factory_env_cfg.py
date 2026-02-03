@@ -314,12 +314,66 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             },
         ),
     )
+    
+    # TacSL Tactile Sensor for Right Finger
+    tactile_cam_right = VisuoTactileSensorCfg(
+        prim_path="/World/envs/env_.*/Robot/panda_rightfinger/tactile_sensor",
+        history_length=0,
+        debug_vis=False,
+        # Sensor configuration
+        sensor_type="gelsight_r15",
+        enable_camera_tactile=True,
+        enable_force_field=True,
+        # Elastomer configuration
+        elastomer_rigid_body="elastomer",
+        elastomer_tactile_mesh="elastomer/visuals",
+        elastomer_tip_link_name="elastomer_tip",
+        # Force field configuration
+        num_tactile_rows=20,
+        num_tactile_cols=25,
+        tactile_margin=0.003,
+        # Indenter configuration (will be set based on indenter type)
+        indenter_rigid_body=None,  # Will be updated based on indenter type
+        indenter_sdf_mesh=None,  # Will be updated based on indenter type
+        # Force field physics parameters
+        tactile_kn=1.0,
+        tactile_mu=2.0,
+        tactile_kt=0.1,
+        # Compliant dynamics
+        compliance_stiffness=350.0,
+        compliant_damping=1.0,
+        # Camera configuration
+        camera_cfg=TiledCameraCfg(
+            prim_path="/World/envs/env_.*/Robot/panda_rightfinger/elastomer_tip/cam",
+            update_period=1 / 60,  # 60 Hz
+            # height=320,
+            # width=240,
+            height=80,
+            width=60,
+            data_types=["distance_to_image_plane"],
+            spawn=None,  # the camera is already spawned in the scene, properties are set in the gelsight_r15_finger.usd file
+        ),
+        # Debug Visualization
+        trimesh_vis_tactile_points=False,
+        visualize_sdf_closest_pts=False,
+        visualizer_cfg=VisualizationMarkersCfg(
+            prim_path="/Visuals/TactileSensorDebugPtsRight",
+            markers={
+                "debug_pts": sim_utils.SphereCfg(
+                    radius=0.0002,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
+                ),
+            },
+        ),
+    )
+    
     # To enable experiments with cfg dicts
     params = None
 
     # My parameters
     enable_tactile_sensor: bool = False
     read_tactile_sensor: bool = False # this is actually not taking effect, unless we change obs_order to include tactile_taxim
+    enable_tactile_sensor_right: bool = False  # Enable right finger tactile sensor (uses extra compute)
     enable_obs_camera: bool = False
     use_compliant_gripper: bool = True
     use_gelsight_finger: bool = True
@@ -338,6 +392,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.enable_tactile_sensor = env.enable_tactile_sensor
         if env.get("read_tactile_sensor", None) is not None:
             self.read_tactile_sensor = env.read_tactile_sensor
+        if env.get("enable_tactile_sensor_right", None) is not None:
+            self.enable_tactile_sensor_right = env.enable_tactile_sensor_right
         if env.get("enable_obs_camera", None) is not None:
             self.enable_obs_camera = env.enable_obs_camera
         if env.get("use_compliant_gripper", None) is not None:

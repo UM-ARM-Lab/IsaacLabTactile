@@ -200,11 +200,22 @@ class FactoryEnv(DirectRLEnv):
             print(f"[INFO] Enabling tactile sensor")
             self._tactile_cam: VisuoTactileSensor = VisuoTactileSensor(self.cfg.tactile_cam)
             self.scene.sensors["tactile_cam"] = self._tactile_cam
+            # Enable right finger tactile sensor only if explicitly enabled
+            if self.cfg.enable_tactile_sensor_right:
+                self._tactile_cam_right: VisuoTactileSensor = VisuoTactileSensor(self.cfg.tactile_cam_right)
+                self.scene.sensors["tactile_cam_right"] = self._tactile_cam_right
+                print(f"[INFO] Right finger tactile sensor enabled")
+            else:
+                self._tactile_cam_right = None
+                print(f"[INFO] Right finger tactile sensor disabled (set enable_tactile_sensor_right=True to enable)")
         else:
             print(f"[INFO] Disabling tactile sensor")
             self._tactile_cam = None
+            self._tactile_cam_right = None
         if self.cfg.use_compliant_gripper:
             VisuoTactileSensor.setup_compliant_materials(self.cfg.tactile_cam)
+            if self.cfg.enable_tactile_sensor_right and hasattr(self.cfg, "tactile_cam_right"):
+                VisuoTactileSensor.setup_compliant_materials(self.cfg.tactile_cam_right)
 
         # Debug: Print environment info
         print(f"[INFO] Scene created with {self.scene.num_envs} environments")
@@ -747,6 +758,10 @@ class FactoryEnv(DirectRLEnv):
             if self._tactile_cam._nominal_tactile is None:
                 self.sim.render()
                 self._tactile_cam.get_initial_render()
+            # Initialize right finger tactile sensor if enabled and available
+            if self.cfg.enable_tactile_sensor_right and self._tactile_cam_right is not None:
+                if self._tactile_cam_right._nominal_tactile is None:
+                    self._tactile_cam_right.get_initial_render()
         self.randomize_initial_state(env_ids)
 
     def _set_assets_to_default_pose(self, env_ids):

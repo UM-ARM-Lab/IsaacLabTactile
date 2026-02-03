@@ -51,17 +51,29 @@ params:
 
   # Task-specific overrides (e.g., Factory peg insertion specific parameters)
   task_overrides:
-    # Use real calibration file (polycalib_real.npz) instead of simulated calibration (polycalib.npz)
-    use_real_calib: False
     # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
     # Set to null to use individual config values, or specify a float value (e.g., 1.0)
     gripper_peg_friction: null
-    
+
     # Observation noise for domain randomization
     # Set enable_obs_noise to true to enable observation noise
     # Individual noise parameters are configured in factory_env_cfg.py (ObsRandCfg)
     obs_noise:
       enable_obs_noise: False  # Set to true to enable observation noise
+
+    # Include held asset observations (held_pos_rel_fixed and held_quat) in obs_order
+    # When enabled, adds held object position relative to fixed asset and held object orientation to policy observations
+    include_held_asset_obs: True  # Set to true to include held_pos_rel_fixed and held_quat in observations
+
+    # Tactile transfer configuration (used when training with tactile sensor and transfer model)
+    # If transfer_checkpoint is provided, observations will be transferred before being saved to replay buffer
+    tactile_transfer:
+      # Path to tactile transfer model checkpoint (.pt). Set to null to disable transfer.
+      transfer_checkpoint: null
+      # Direction of transfer: A_to_B (use model_A) or B_to_A (use model_B)
+      transfer_direction: A_to_B
+      # If enabled, transfer both tactile images and vector observations; otherwise only tactile images
+      decode_observations: False
 
   config:
     name: Factory
