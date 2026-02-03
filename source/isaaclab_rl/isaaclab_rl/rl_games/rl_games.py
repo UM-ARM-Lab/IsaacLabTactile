@@ -336,173 +336,173 @@ class RlGamesVecEnvWrapper(IVecEnv):
         return rl_games_obs
 
 
+# THIS IMPLEMENTATION SUCKS IN REALITY, NEEDS A REWORK IF WE EVER USE IT
+# class RlGamesTrainValVecEnvWrapper(RlGamesVecEnvWrapper):
+#     """RLGames wrapper with train/val split.
 
-class RlGamesTrainValVecEnvWrapper(RlGamesVecEnvWrapper):
-    """RLGames wrapper with train/val split.
+#     RLGames sees only num_train environments. Validation envs run with a separate
+#     player (created via runner.create_player()) that handles RNN states internally.
 
-    RLGames sees only num_train environments. Validation envs run with a separate
-    player (created via runner.create_player()) that handles RNN states internally.
+#     IMPORTANT: When using this wrapper, ensure agent_cfg.params.config.num_actors = num_train
+#     (not total envs). RLGames uses num_actors from config, not vec_env.num_envs.
 
-    IMPORTANT: When using this wrapper, ensure agent_cfg.params.config.num_actors = num_train
-    (not total envs). RLGames uses num_actors from config, not vec_env.num_envs.
+#     Usage:
+#         env = RlGamesTrainValVecEnvWrapper(env, rl_device, clip_obs, clip_actions, num_train=100)
+#         runner = load_rlgames_policy(agent_cfg, train_mode=True)
+#         env.set_rlgames_runner(runner)  # Creates separate val player
+#     """
 
-    Usage:
-        env = RlGamesTrainValVecEnvWrapper(env, rl_device, clip_obs, clip_actions, num_train=100)
-        runner = load_rlgames_policy(agent_cfg, train_mode=True)
-        env.set_rlgames_runner(runner)  # Creates separate val player
-    """
+#     def __init__(self, env, rl_device, clip_obs, clip_actions, obs_groups=None,
+#                  concate_obs_groups=True, num_train=None):
+#         self._total_envs = env.unwrapped.num_envs
+#         self._num_train = num_train if num_train is not None else self._total_envs
+#         self._num_val = self._total_envs - self._num_train
+#         self._rlgames_runner = None
+#         self._val_player = None
+#         self._last_val_obs = None
+#         self._last_synced_epoch = -1  # Track when we last synced weights
 
-    def __init__(self, env, rl_device, clip_obs, clip_actions, obs_groups=None,
-                 concate_obs_groups=True, num_train=None):
-        self._total_envs = env.unwrapped.num_envs
-        self._num_train = num_train if num_train is not None else self._total_envs
-        self._num_val = self._total_envs - self._num_train
-        self._rlgames_runner = None
-        self._val_player = None
-        self._last_val_obs = None
-        self._last_synced_epoch = -1  # Track when we last synced weights
+#         super().__init__(env, rl_device, clip_obs, clip_actions, obs_groups, concate_obs_groups)
+#         print(f"[RlGamesTrainValVecEnvWrapper] Total: {self._total_envs}, Train: {self._num_train}, Val: {self._num_val}")
 
-        super().__init__(env, rl_device, clip_obs, clip_actions, obs_groups, concate_obs_groups)
-        print(f"[RlGamesTrainValVecEnvWrapper] Total: {self._total_envs}, Train: {self._num_train}, Val: {self._num_val}")
+#     def set_rlgames_runner(self, runner):
+#         """Set RLGames runner and create separate val player for inference.
 
-    def set_rlgames_runner(self, runner):
-        """Set RLGames runner and create separate val player for inference.
+#         Uses runner.create_player() to create a player that handles RNN states
+#         internally. Weights are synced from training agent every step.
+#         """
+#         assert hasattr(runner, "get_eval_player"), "Runner must implement get_eval_player()"
+#         assert hasattr(runner, "get_train_agent"), "Runner must implement get_train_agent()"
+#         assert hasattr(runner, "sync_eval_player"), "Runner must implement sync_eval_player()"
+#         self._rlgames_runner = runner
 
-        Uses runner.create_player() to create a player that handles RNN states
-        internally. Weights are synced from training agent every step.
-        """
-        assert hasattr(runner, "get_eval_player"), "Runner must implement get_eval_player()"
-        assert hasattr(runner, "get_train_agent"), "Runner must implement get_train_agent()"
-        assert hasattr(runner, "sync_eval_player"), "Runner must implement sync_eval_player()"
-        self._rlgames_runner = runner
+#         if self._num_val == 0:
+#             return
 
-        if self._num_val == 0:
-            return
+#         # Use cached eval player from runner (dedicated inference model)
+#         self._val_player = runner.get_eval_player()
 
-        # Use cached eval player from runner (dedicated inference model)
-        self._val_player = runner.get_eval_player()
+#         # Configure player for batched val inference
+#         # (normally player.run() calls get_batch_size() to set these)
+#         self._val_player.batch_size = self._num_val
+#         self._val_player.has_batch_dimension = True
+#         self._val_player.init_rnn()  # Initialize RNN states for num_val batch size
+#         print(f"[INFO] Created separate val player for {self._num_val} val envs (batch_size={self._num_val})")
 
-        # Configure player for batched val inference
-        # (normally player.run() calls get_batch_size() to set these)
-        self._val_player.batch_size = self._num_val
-        self._val_player.has_batch_dimension = True
-        self._val_player.init_rnn()  # Initialize RNN states for num_val batch size
-        print(f"[INFO] Created separate val player for {self._num_val} val envs (batch_size={self._num_val})")
+#     def _get_val_actions(self, obs):
+#         """Get actions for val envs using separate val player."""
+#         if self._val_player is None or self._rlgames_runner is None:
+#             return torch.zeros(self._num_val, self.action_space.shape[0],
+#                              device=self._rl_device)
 
-    def _get_val_actions(self, obs):
-        """Get actions for val envs using separate val player."""
-        if self._val_player is None or self._rlgames_runner is None:
-            return torch.zeros(self._num_val, self.action_space.shape[0],
-                             device=self._rl_device)
+#         # Only sync weights after training update (when epoch_num changes)
+#         agent = self._rlgames_runner.get_train_agent()
+#         current_epoch = getattr(agent, 'epoch_num', 0)
+#         if current_epoch != self._last_synced_epoch:
+#             self._rlgames_runner.sync_eval_player()
+#             self._last_synced_epoch = current_epoch
 
-        # Only sync weights after training update (when epoch_num changes)
-        agent = self._rlgames_runner.get_train_agent()
-        current_epoch = getattr(agent, 'epoch_num', 0)
-        if current_epoch != self._last_synced_epoch:
-            self._rlgames_runner.sync_eval_player()
-            self._last_synced_epoch = current_epoch
+#         # Use player's get_action which handles RNN states internally
+#         with torch.no_grad():
+#             actions = self._val_player.get_action(obs, is_deterministic=True)
 
-        # Use player's get_action which handles RNN states internally
-        with torch.no_grad():
-            actions = self._val_player.get_action(obs, is_deterministic=True)
+#         return actions
 
-        return actions
+#     def _reset_val_rnn_states(self, val_dones):
+#         """Reset RNN states for done val envs (indices relative to val envs)."""
+#         if self._val_player is None or not getattr(self._val_player, 'is_rnn', False):
+#             return
+#         if self._val_player.states is None:
+#             return
 
-    def _reset_val_rnn_states(self, val_dones):
-        """Reset RNN states for done val envs (indices relative to val envs)."""
-        if self._val_player is None or not getattr(self._val_player, 'is_rnn', False):
-            return
-        if self._val_player.states is None:
-            return
+#         # Get indices of done val envs (relative to val slice)
+#         done_indices = val_dones.nonzero(as_tuple=False).squeeze(-1)
+#         if done_indices.numel() == 0:
+#             return
 
-        # Get indices of done val envs (relative to val slice)
-        done_indices = val_dones.nonzero(as_tuple=False).squeeze(-1)
-        if done_indices.numel() == 0:
-            return
-
-        # Reset RNN states for done envs (states are (num_layers, batch, hidden))
-        for state in self._val_player.states:
-            state[:, done_indices, :] = 0.0
+#         # Reset RNN states for done envs (states are (num_layers, batch, hidden))
+#         for state in self._val_player.states:
+#             state[:, done_indices, :] = 0.0
         
-    @property
-    def num_envs(self) -> int:
-        """Number of training envs (what RLGames sees)."""
-        return self._num_train
+#     @property
+#     def num_envs(self) -> int:
+#         """Number of training envs (what RLGames sees)."""
+#         return self._num_train
 
-    @property
-    def total_envs(self) -> int:
-        """Total number of envs (train + val)."""
-        return self._total_envs
+#     @property
+#     def total_envs(self) -> int:
+#         """Total number of envs (train + val)."""
+#         return self._total_envs
 
-    @property
-    def num_val_envs(self) -> int:
-        """Number of validation envs."""
-        return self._num_val
+#     @property
+#     def num_val_envs(self) -> int:
+#         """Number of validation envs."""
+#         return self._num_val
 
-    def _slice_obs(self, obs, start, end):
-        """Slice observations (handles both tensor and dict formats)."""
-        if isinstance(obs, dict):
-            return {k: v[start:end].clone() for k, v in obs.items()}
-        return obs[start:end].clone()
+#     def _slice_obs(self, obs, start, end):
+#         """Slice observations (handles both tensor and dict formats)."""
+#         if isinstance(obs, dict):
+#             return {k: v[start:end].clone() for k, v in obs.items()}
+#         return obs[start:end].clone()
 
-    def _filter_extras(self, extras):
-        """Filter per-env tensors in extras to train envs only. Handles nested dicts."""
-        filtered = {}
-        for k, v in extras.items():
-            if isinstance(v, torch.Tensor) and len(v.shape) > 0 and v.shape[0] == self._total_envs:
-                filtered[k] = v[:self._num_train]
-            elif isinstance(v, dict):
-                # Recursively filter nested dicts (e.g., extras["episode"])
-                filtered[k] = self._filter_extras(v)
-            else:
-                filtered[k] = v
-        return filtered
+#     def _filter_extras(self, extras):
+#         """Filter per-env tensors in extras to train envs only. Handles nested dicts."""
+#         filtered = {}
+#         for k, v in extras.items():
+#             if isinstance(v, torch.Tensor) and len(v.shape) > 0 and v.shape[0] == self._total_envs:
+#                 filtered[k] = v[:self._num_train]
+#             elif isinstance(v, dict):
+#                 # Recursively filter nested dicts (e.g., extras["episode"])
+#                 filtered[k] = self._filter_extras(v)
+#             else:
+#                 filtered[k] = v
+#         return filtered
 
-    def reset(self):
-        # Reset all envs via parent (returns obs for all envs)
-        obs_and_states = super().reset()
+#     def reset(self):
+#         # Reset all envs via parent (returns obs for all envs)
+#         obs_and_states = super().reset()
 
-        # Reset val player RNN states on full reset
-        if self._num_val > 0 and self._val_player is not None:
-            self._val_player.init_rnn()
+#         # Reset val player RNN states on full reset
+#         if self._num_val > 0 and self._val_player is not None:
+#             self._val_player.init_rnn()
 
-        # Store val obs BEFORE filtering for next step's action inference
-        if self._num_val > 0:
-            self._last_val_obs = self._slice_obs(obs_and_states["obs"], self._num_train, None)
+#         # Store val obs BEFORE filtering for next step's action inference
+#         if self._num_val > 0:
+#             self._last_val_obs = self._slice_obs(obs_and_states["obs"], self._num_train, None)
 
-        # Filter outputs to train envs only (what RLGames sees)
-        obs_and_states["obs"] = self._slice_obs(obs_and_states["obs"], 0, self._num_train)
-        if "states" in obs_and_states:
-            obs_and_states["states"] = self._slice_obs(obs_and_states["states"], 0, self._num_train)
-        return obs_and_states
+#         # Filter outputs to train envs only (what RLGames sees)
+#         obs_and_states["obs"] = self._slice_obs(obs_and_states["obs"], 0, self._num_train)
+#         if "states" in obs_and_states:
+#             obs_and_states["states"] = self._slice_obs(obs_and_states["states"], 0, self._num_train)
+#         return obs_and_states
 
-    def step(self, train_actions):
-        # Get val actions using separate player (handles RNN internally)
-        if self._num_val > 0:
-            val_actions = self._get_val_actions(self._last_val_obs)
-            full_actions = torch.cat([train_actions, val_actions], dim=0)
-        else:
-            full_actions = train_actions
+#     def step(self, train_actions):
+#         # Get val actions using separate player (handles RNN internally)
+#         if self._num_val > 0:
+#             val_actions = self._get_val_actions(self._last_val_obs)
+#             full_actions = torch.cat([train_actions, val_actions], dim=0)
+#         else:
+#             full_actions = train_actions
 
-        # Step all envs via parent (returns obs/rew/dones for all envs)
-        obs_and_states, rew, dones, extras = super().step(full_actions)
+#         # Step all envs via parent (returns obs/rew/dones for all envs)
+#         obs_and_states, rew, dones, extras = super().step(full_actions)
 
-        # Handle val env RNN state resets BEFORE filtering dones
-        if self._num_val > 0:
-            val_dones = dones[self._num_train:]
-            self._reset_val_rnn_states(val_dones)
+#         # Handle val env RNN state resets BEFORE filtering dones
+#         if self._num_val > 0:
+#             val_dones = dones[self._num_train:]
+#             self._reset_val_rnn_states(val_dones)
 
-        # Store val obs BEFORE filtering for next step's action inference
-        if self._num_val > 0:
-            self._last_val_obs = self._slice_obs(obs_and_states["obs"], self._num_train, None)
+#         # Store val obs BEFORE filtering for next step's action inference
+#         if self._num_val > 0:
+#             self._last_val_obs = self._slice_obs(obs_and_states["obs"], self._num_train, None)
 
-        # Filter outputs to train envs only (what RLGames sees)
-        obs_and_states["obs"] = self._slice_obs(obs_and_states["obs"], 0, self._num_train)
-        if "states" in obs_and_states:
-            obs_and_states["states"] = self._slice_obs(obs_and_states["states"], 0, self._num_train)
-        rew, dones = rew[:self._num_train], dones[:self._num_train]
-        extras = self._filter_extras(extras)
-        return obs_and_states, rew, dones, extras
+#         # Filter outputs to train envs only (what RLGames sees)
+#         obs_and_states["obs"] = self._slice_obs(obs_and_states["obs"], 0, self._num_train)
+#         if "states" in obs_and_states:
+#             obs_and_states["states"] = self._slice_obs(obs_and_states["states"], 0, self._num_train)
+#         rew, dones = rew[:self._num_train], dones[:self._num_train]
+#         extras = self._filter_extras(extras)
+#         return obs_and_states, rew, dones, extras
 
 
 
