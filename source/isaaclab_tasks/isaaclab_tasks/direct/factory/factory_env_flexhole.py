@@ -21,37 +21,28 @@ from . import factory_utils
 
 
 class FactoryFlexHoleEnv(FactoryEnv):
-    """Factory environment with train/val split and mixed hole sizes.
+    """Factory environment with sim/real split and mixed hole sizes.
 
-    Index layout: [train_large][train_reg][val_large][val_reg]
-    - train_large: sim-train (scaled hole, easier)
-    - train_reg: real-train (regular hole, harder)
-    - val_large: sim-val (scaled hole, for monitoring)
-    - val_reg: real-val (regular hole, for monitoring)
+    Index layout: [sim][real]
+    - sim: Scaled hole (easier clearance, for sim-to-real transfer)
+    - real: Regular hole (tight clearance, mimics real hardware)
 
-    Training uses only train envs (obs/rewards filtered). Val envs run for monitoring only.
-    All 4 success rates are always logged to wandb.
+    The environment does not know about "training" vs "validation" - that's
+    context-dependent. It only needs to know about "sim" vs "real" hole sizes.
+    Both success rates (success_sim, success_real) are logged to wandb.
     """
 
     cfg: FactoryTaskPegInsertFlexHoleCfg
 
     def __init__(self, cfg: FactoryTaskPegInsertFlexHoleCfg, render_mode: str | None = None, **kwargs):
-        # Parse train/val counts from config
+        # Parse sim/real counts from config
         flex = cfg.flex_hole
-        self.num_train_large = flex.num_train_large
-        self.num_train_reg = flex.num_train_reg
-        self.num_val_large = flex.num_val_large
-        self.num_val_reg = flex.num_val_reg
-
-        # Computed counts
-        self.num_train = self.num_train_large + self.num_train_reg
-        self.num_val = self.num_val_large + self.num_val_reg
-        self.num_large_envs = self.num_train_large + self.num_val_large
-        self.num_reg_envs = self.num_train_reg + self.num_val_reg
+        self.num_sim = flex.num_sim
+        self.num_real = flex.num_real
 
         # Validate total matches scene.num_envs
         total_envs = cfg.scene.num_envs
-        expected_total = self.num_train + self.num_val
+        expected_total = self.num_sim + self.num_real
         if expected_total != total_envs:
             raise ValueError(
                 f"Sum of flex_hole counts ({expected_total}) must equal scene.num_envs ({total_envs})"
@@ -85,20 +76,15 @@ class FactoryFlexHoleEnv(FactoryEnv):
         """Initialize tensors including hole scale multipliers and tolerances."""
         super()._init_tensors()
 
-        # Index slices for each category
-        # Layout: [train_large][train_reg][val_large][val_reg]
-        self.idx_train_large = slice(0, self.num_train_large)
-        self.idx_train_reg = slice(self.num_train_large, self.num_train)
-        self.idx_val_large = slice(self.num_train, self.num_train + self.num_val_large)
-        self.idx_val_reg = slice(self.num_train + self.num_val_large, None)
-        self.idx_train = slice(0, self.num_train)
-        self.idx_val = slice(self.num_train, None)
+        # Index slices for sim/real
+        # Layout: [sim][real]
+        self.idx_sim = slice(0, self.num_sim)
+        self.idx_real = slice(self.num_sim, None)
 
-        # Create scale multiplier tensor for new layout
+        # Create scale multiplier tensor
         # Shape: (num_envs,)
         scales = torch.ones(self.num_envs, device=self.device)
-        scales[self.idx_train_large] = self._large_hole_size
-        scales[self.idx_val_large] = self._large_hole_size
+        scales[self.idx_sim] = self._large_hole_size
         self.hole_scale_multipliers = scales
 
         # Compute per-environment XY success tolerance using affine formula:
@@ -172,8 +158,8 @@ class FactoryFlexHoleEnv(FactoryEnv):
         stage = get_current_stage()
 
         for i in range(self.num_envs):
-            is_large = i < self.num_train_large or self.num_train <= i < self.num_train + self.num_val_large
-            scale = self._large_hole_size if is_large else 1.0
+            is_sim = i < self.num_sim
+            scale = self._large_hole_size if is_sim else 1.0
             fixed_asset = stage.GetPrimAtPath(f"/World/envs/env_{i}/FixedAsset")
             fixed_asset.GetAttribute("xformOp:scale").Set(Gf.Vec3f(scale, scale, 1.0))
 
@@ -209,8 +195,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
     def _get_observations(self):
         """Get observations with 6D quaternion representation.
 
-        Returns all environments' observations. The RlGamesTrainValVecEnvWrapper
-        handles filtering to train envs only.
+        Returns all environments' observations.
         """
         obs_dict, state_dict, collect_dict = super()._get_factory_obs_state_dict()
         # Replace quaternion keys with 6D representation
@@ -284,15 +269,13 @@ class FactoryFlexHoleEnv(FactoryEnv):
         return curr_successes
 
     def _log_factory_metrics(self, rew_dict, curr_successes):
-        """Log factory metrics with separate success rates for all 4 categories."""
+        """Log factory metrics with separate success rates for sim and real."""
         super()._log_factory_metrics(rew_dict, curr_successes)
 
-        # Log 4 categories only at episode boundaries (matching parent's behavior for smooth curves)
+        # Log sim/real success rates at episode boundaries (matching parent's behavior for smooth curves)
         if torch.any(self.reset_buf):
-            self.extras["successes_train_large"] = torch.count_nonzero(curr_successes[self.idx_train_large]) / max(self.num_train_large, 1)
-            self.extras["successes_train_reg"] = torch.count_nonzero(curr_successes[self.idx_train_reg]) / max(self.num_train_reg, 1)
-            self.extras["successes_val_large"] = torch.count_nonzero(curr_successes[self.idx_val_large]) / max(self.num_val_large, 1)
-            self.extras["successes_val_reg"] = torch.count_nonzero(curr_successes[self.idx_val_reg]) / max(self.num_val_reg, 1)
+            self.extras["success_sim"] = torch.count_nonzero(curr_successes[self.idx_sim]) / max(self.num_sim, 1)
+            self.extras["success_real"] = torch.count_nonzero(curr_successes[self.idx_real]) / max(self.num_real, 1)
 
     def _get_rewards(self):
         """Get rewards for all environments."""
