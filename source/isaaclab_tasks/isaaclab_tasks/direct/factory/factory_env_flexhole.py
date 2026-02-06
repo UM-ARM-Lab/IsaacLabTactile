@@ -35,21 +35,22 @@ class FactoryFlexHoleEnv(FactoryEnv):
     cfg: FactoryTaskPegInsertFlexHoleCfg
 
     def __init__(self, cfg: FactoryTaskPegInsertFlexHoleCfg, render_mode: str | None = None, **kwargs):
-        # Parse sim/real counts from config
-        flex = cfg.flex_hole
-        self.num_sim = flex.num_sim
-        self.num_real = flex.num_real
+        # Parse sim/real counts from flat config
+        self.num_sim = cfg.num_sim
+        self.num_real = cfg.num_real
 
         # Validate total matches scene.num_envs
         total_envs = cfg.scene.num_envs
         expected_total = self.num_sim + self.num_real
         if expected_total != total_envs:
             raise ValueError(
-                f"Sum of flex_hole counts ({expected_total}) must equal scene.num_envs ({total_envs})"
+                f"Sum of sim/real counts ({expected_total}) must equal scene.num_envs ({total_envs})"
             )
 
-        # Store scale for later use
-        self._large_hole_size = flex.large_hole_size
+        # Store scale and budget for later use
+        self._sim_hole_size = cfg.sim_hole_size
+        self.sim_budget = cfg.sim_budget
+        self.real_budget = cfg.real_budget
 
         # Pre-adjust observation_space for 6D quaternion representation
         # Each quaternion field (4D) becomes 6D, adding 2 dimensions per field
@@ -76,6 +77,11 @@ class FactoryFlexHoleEnv(FactoryEnv):
         """Initialize tensors including hole scale multipliers and tolerances."""
         super()._init_tensors()
 
+        # Budget tracking (episode-based)
+        self.sim_budget_used = 0.0
+        self.real_budget_used = 0.0
+        self.total_budget_used = 0.0
+
         # Index slices for sim/real
         # Layout: [sim][real]
         self.idx_sim = slice(0, self.num_sim)
@@ -84,7 +90,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
         # Create scale multiplier tensor
         # Shape: (num_envs,)
         scales = torch.ones(self.num_envs, device=self.device)
-        scales[self.idx_sim] = self._large_hole_size
+        scales[self.idx_sim] = self._sim_hole_size
         self.hole_scale_multipliers = scales
 
         # Compute per-environment XY success tolerance using affine formula:
@@ -159,7 +165,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
 
         for i in range(self.num_envs):
             is_sim = i < self.num_sim
-            scale = self._large_hole_size if is_sim else 1.0
+            scale = self._sim_hole_size if is_sim else 1.0
             fixed_asset = stage.GetPrimAtPath(f"/World/envs/env_{i}/FixedAsset")
             fixed_asset.GetAttribute("xformOp:scale").Set(Gf.Vec3f(scale, scale, 1.0))
 
@@ -272,10 +278,23 @@ class FactoryFlexHoleEnv(FactoryEnv):
         """Log factory metrics with separate success rates for sim and real."""
         super()._log_factory_metrics(rew_dict, curr_successes)
 
-        # Log sim/real success rates at episode boundaries (matching parent's behavior for smooth curves)
-        if torch.any(self.reset_buf):
-            self.extras["success_sim"] = torch.count_nonzero(curr_successes[self.idx_sim]) / max(self.num_sim, 1)
-            self.extras["success_real"] = torch.count_nonzero(curr_successes[self.idx_real]) / max(self.num_real, 1)
+        # Only log at episode boundaries
+        if not torch.any(self.reset_buf):
+            return
+
+        self.extras["success_sim"] = torch.count_nonzero(curr_successes[self.idx_sim]) / max(self.num_sim, 1)
+        self.extras["success_real"] = torch.count_nonzero(curr_successes[self.idx_real]) / max(self.num_real, 1)
+
+        # Update budget usage based on completed episodes
+        num_done_sim = torch.count_nonzero(self.reset_buf[self.idx_sim]).item()
+        num_done_real = torch.count_nonzero(self.reset_buf[self.idx_real]).item()
+        self.sim_budget_used += num_done_sim * float(self.sim_budget)
+        self.real_budget_used += num_done_real * float(self.real_budget)
+        self.total_budget_used = self.sim_budget_used + self.real_budget_used
+
+        self.extras["budget/sim_used"] = self.sim_budget_used
+        self.extras["budget/real_used"] = self.real_budget_used
+        self.extras["budget/total_used"] = self.total_budget_used
 
     def _get_rewards(self):
         """Get rewards for all environments."""

@@ -276,24 +276,17 @@ class FactoryTaskNutThreadCfg(FactoryEnvCfg):
 
 
 @configclass
-class FlexHoleCfg:
-    """Configuration for flexible hole sizes with sim/real split.
-
-    Index layout: [sim][real]
-    - sim: Scaled hole (easier clearance, for sim-to-real transfer)
-    - real: Regular hole (tight clearance, mimics real hardware)
-
-    The environment does not know about "training" vs "validation" - that's
-    context-dependent. It only needs to know about "sim" vs "real" hole sizes.
-    """
-    num_sim: int = 0                 # Number of sim environments (scaled hole)
-    num_real: int = 0                # Number of real environments (regular hole)
-    large_hole_size: float = 2.0     # Scale multiplier for sim holes (real = 1.0)
-
-
-@configclass
 class FactoryTaskPegInsertFlexHoleCfg(FactoryTaskPegInsertCfg):
-    """PegInsert task with mixed large/regular hole sizes."""
-    task_name = "peg_insert_flex_hole"
+    """PegInsert task with mixed sim/real hole sizes."""
+    task_name = "peg_insert_sim2real"
     task = PegFlexHole()
-    flex_hole: FlexHoleCfg = FlexHoleCfg()
+
+    # Sim/real environment counts
+    num_sim: int = 0              # sim environments (scaled hole)
+    num_real: int = 0             # real environments (regular hole)
+    # Hole scale
+    sim_hole_size: float = 2.0    # Scale multiplier for sim holes (real = 1.0)
+
+    # Budget multipliers
+    sim_budget: float = 1.0
+    real_budget: float = 1000.0
