@@ -282,8 +282,12 @@ class FactoryTaskPegInsertFlexHoleCfg(FactoryTaskPegInsertCfg):
     task = PegFlexHole()
 
     # Sim/real environment counts
-    num_sim: int = 0              # sim environments (scaled hole)
-    num_real: int = 0             # real environments (regular hole)
+    num_train_sim: int = 0              # sim environments (scaled hole)
+    num_train_real: int = 0             # real environments (regular hole)
+
+    num_val_sim: int = 0              # sim environments (scaled hole)
+    num_val_real: int = 0             # real
+    
     # Hole scale
     sim_hole_size: float = 2.0    # Scale multiplier for sim holes (real = 1.0)
 

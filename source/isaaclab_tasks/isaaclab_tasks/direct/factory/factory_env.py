@@ -542,7 +542,13 @@ class FactoryEnv(DirectRLEnv):
         return rew_dict, rew_scales
 
     def _reset_idx(self, env_ids):
-        """We assume all envs will always be reset at the same time."""
+        """Reset envs, capturing pre-reset observations for bootstrapping."""
+        # Cache terminal observations before reset destroys them.
+        # Skip on initial reset() — intermediate values don't exist yet.
+        if hasattr(self, "held_pos"):
+            pre_reset_obs = self._get_observations()
+            self.extras["final_observations"] = {k: v.clone() for k, v in pre_reset_obs.items()}
+
         super()._reset_idx(env_ids)
 
         self._set_assets_to_default_pose(env_ids)

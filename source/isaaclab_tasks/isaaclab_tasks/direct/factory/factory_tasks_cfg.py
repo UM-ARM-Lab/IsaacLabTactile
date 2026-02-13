@@ -185,8 +185,8 @@ class PegInsert(FactoryTask):
 
 @configclass
 class PegFlexHole(PegInsert):
-    fixed_large_multiplier: float = 2.0
-    
+    pass
+
 @configclass
 class GearBase(FixedAssetCfg):
     usd_path = f"{ASSET_DIR}/factory_gear_base.usd"
