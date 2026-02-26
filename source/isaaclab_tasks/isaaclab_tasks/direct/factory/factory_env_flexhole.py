@@ -4,19 +4,19 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """Factory environment with flexible hole sizes (mixed large/regular environments)."""
-import torch
+
 from typing import Dict, Union
 
 import isaaclab.sim as sim_utils
+import torch
 from isaaclab.assets import Articulation, RigidObjectCollection
+from isaaclab.sensors import ContactSensor, TiledCamera
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from isaaclab.sensors import TiledCamera, ContactSensor
-
+from . import factory_utils
 from .factory_env import FactoryEnv
 from .factory_env_cfg import FactoryTaskPegInsertFlexHoleCfg
-from . import factory_utils
 
 
 class FactoryFlexHoleEnv(FactoryEnv):
@@ -41,12 +41,18 @@ class FactoryFlexHoleEnv(FactoryEnv):
 
         # Store scale and budget for later use
         self._sim_hole_size = cfg.sim_hole_size
+
         # Set the params
-        for attr in ["num_train_sim", "num_train_real", "num_eval_sim", "num_eval_real", "sim_budget", "real_budget"]:
-            setattr(self, attr, getattr(cfg, attr))
-        self.num_envs = self.num_train_sim + self.num_train_real + self.num_eval_sim + self.num_eval_real
+        self.num_train_sim = cfg.num_train_sim
+        self.num_train_real = cfg.num_train_real
+        self.num_val_sim = cfg.num_val_sim
+        self.num_val_real = cfg.num_val_real
+        self.sim_budget = cfg.sim_budget
+        self.real_budget = cfg.real_budget
+        # No need for self.num_envs, since already resolved and auto-set in super()
+        # self.num_envs = self.num_train_sim + self.num_train_real + self.num_val_sim + self.num_val_real
         self.num_train = self.num_train_sim + self.num_train_real
-        self.num_eval = self.num_eval_sim + self.num_eval_real
+        self.num_eval = self.num_val_sim + self.num_val_real
 
         # Pre-adjust observation_space for 6D quaternion representation
         # Each quaternion field (4D) becomes 6D, adding 2 dimensions per field
@@ -62,8 +68,9 @@ class FactoryFlexHoleEnv(FactoryEnv):
         self.cfg.state_space += self._state_quat_adjustment
 
         # Update the gym observation space Dict to match new dimensions
-        from gymnasium import spaces
         import numpy as np
+        from gymnasium import spaces
+
         new_obs_dim = self.cfg.observation_space
         new_state_dim = self.cfg.state_space
         self.single_observation_space["policy"] = spaces.Box(low=-np.inf, high=np.inf, shape=(new_obs_dim,))
@@ -72,13 +79,12 @@ class FactoryFlexHoleEnv(FactoryEnv):
     @classmethod
     def _verify_num_envs(cls, cfg):
         actual_total_envs = cfg.scene.num_envs
-        expected_total_envs = cfg.num_train_sim + cfg.num_train_real + cfg.num_eval_sim + cfg.num_eval_real
+        expected_total_envs = cfg.num_train_sim + cfg.num_train_real + cfg.num_val_sim + cfg.num_val_real
         if actual_total_envs != expected_total_envs:
             raise ValueError(
                 f"Total num_envs ({actual_total_envs}) must equal sum of sim/real train/eval envs ({expected_total_envs})"
             )
         return True
-
 
     def _init_tensors(self):
         """Initialize tensors including hole scale multipliers and tolerances."""
@@ -93,10 +99,10 @@ class FactoryFlexHoleEnv(FactoryEnv):
         # Layout: [sim][real]
         # FIXME: add sim/real environments
         self.idx_train_real = slice(0, self.num_train_real)
-        self.idx_train_sim =  slice(self.num_train_real, self.num_train_real + self.num_train_sim)
+        self.idx_train_sim = slice(self.num_train_real, self.num_train_real + self.num_train_sim)
         self.idx_train = slice(0, self.num_train)
-        self.idx_val_real = slice(self.num_train, self.num_train + self.num_eval_real)
-        self.idx_val_sim = slice(self.num_train + self.num_eval_real, self.num_envs)
+        self.idx_val_real = slice(self.num_train, self.num_train + self.num_val_real)
+        self.idx_val_sim = slice(self.num_train + self.num_val_real, self.num_envs)
         self.idx_val = slice(self.num_train, self.num_envs)
         self._avail_slice_keys = set(["train", "val", "train_sim", "train_real", "val_sim", "val_real"])
 
@@ -124,8 +130,10 @@ class FactoryFlexHoleEnv(FactoryEnv):
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd"
         )
         table_cfg.func(
-            "/World/envs/env_.*/Table", table_cfg,
-            translation=(0.55, 0.0, 0.0), orientation=(0.70711, 0.0, 0.0, 0.70711)
+            "/World/envs/env_.*/Table",
+            table_cfg,
+            translation=(0.55, 0.0, 0.0),
+            orientation=(0.70711, 0.0, 0.0, 0.70711),
         )
 
         # Spawn assets
@@ -171,15 +179,17 @@ class FactoryFlexHoleEnv(FactoryEnv):
     def _apply_flex_hole_scales(self):
         """
         Apply per-environment hole scaling via USD API after clone_environments().
-        # FIXME: apply train/eval partition 
+        # FIXME: apply train/eval partition
         """
         from itertools import chain
-        from pxr import Gf
+
         from isaacsim.core.utils.stage import get_current_stage
+        from pxr import Gf
+
         stage = get_current_stage()
 
         train_sim_range = range(self.num_train_real, self.num_train_real + self.num_train_sim)
-        val_sim_range = range(self.num_train + self.num_eval_real, self.num_envs)
+        val_sim_range = range(self.num_train + self.num_val_real, self.num_envs)
 
         for i in chain(train_sim_range, val_sim_range):
             fixed_asset = stage.GetPrimAtPath(f"/World/envs/env_{i}/FixedAsset")
@@ -202,14 +212,14 @@ class FactoryFlexHoleEnv(FactoryEnv):
         w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
 
         # First column of rotation matrix
-        v1 = 1 - 2*y*y - 2*z*z
-        v2 = 2*x*y + 2*z*w
-        v3 = 2*x*z - 2*y*w
+        v1 = 1 - 2 * y * y - 2 * z * z
+        v2 = 2 * x * y + 2 * z * w
+        v3 = 2 * x * z - 2 * y * w
 
         # Second column of rotation matrix
-        v4 = 2*x*y - 2*z*w
-        v5 = 1 - 2*x*x - 2*z*z
-        v6 = 2*y*z + 2*x*w
+        v4 = 2 * x * y - 2 * z * w
+        v5 = 1 - 2 * x * x - 2 * z * z
+        v6 = 2 * y * z + 2 * x * w
 
         return torch.stack([v1, v2, v3, v4, v5, v6], dim=-1)
 
@@ -232,21 +242,23 @@ class FactoryFlexHoleEnv(FactoryEnv):
         self.collect_obs = torch.cat([collect_dict[key] for key in collect_dict.keys()], dim=-1)
 
         return {"policy": obs_tensors, "critic": state_tensors}
-    
+
     def get_slice_keys(self):
         """Get available slice keys for slicing observations/states according to sim/real partition."""
         return self._avail_slice_keys
-    
+
     def slice_for_envs(self, item: Union[torch.Tensor, Dict], key: str) -> Union[torch.Tensor, Dict]:
         """
         Slice the given item (tensor or dict of tensors) according to the sim/real partition for the specified key.
         """
         assert key in self._avail_slice_keys, f"Invalid key: {key}"
-        partition_key = getattr(self, f"idx_{key}")     # e.g. key="train_sim" -> self.idx_train_sim
-        
+        partition_key = getattr(self, f"idx_{key}")  # e.g. key="train_sim" -> self.idx_train_sim
+
         # If tensor, slice directly. If dict, apply slicing to each value (used for collect_obs dict during data collection).
         if isinstance(item, torch.Tensor):
-            assert item.shape[0] == self.num_envs, f"Expected first dimension to be num_envs ({self.num_envs}), got {item.shape[0]}"
+            assert item.shape[0] == self.num_envs, (
+                f"Expected first dimension to be num_envs ({self.num_envs}), got {item.shape[0]}"
+            )
             return item[partition_key]
 
         if isinstance(item, dict):
@@ -255,10 +267,10 @@ class FactoryFlexHoleEnv(FactoryEnv):
                 assert isinstance(v, torch.Tensor), f"Expected dict values to be tensors, got {type(v)} for key {k}"
                 if v.shape[0] != self.num_envs:
                     sliced_dict[k] = v  # If not env-batched, return as is (e.g. scalar values)
-                else:   # Otherwise slice along env dimension
+                else:  # Otherwise slice along env dimension
                     sliced_dict[k] = v[partition_key]
             return sliced_dict
-        
+
         assert False, f"Expected item to be either torch.Tensor or dict, got {type(item)}"
 
     def _get_curr_successes(self, success_threshold, check_rot=False):
@@ -288,9 +300,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
 
         # Use per-environment XY tolerance instead of fixed 0.0025
         is_centered = torch.where(
-            xy_dist < self.xy_success_tolerance,
-            torch.ones_like(curr_successes),
-            torch.zeros_like(curr_successes)
+            xy_dist < self.xy_success_tolerance, torch.ones_like(curr_successes), torch.zeros_like(curr_successes)
         )
 
         # Height threshold (same as parent - not scaled since hole height is unchanged)
@@ -309,6 +319,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
 
         if check_rot:
             import isaacsim.core.utils.torch as torch_utils
+
             _, _, curr_yaw = torch_utils.get_euler_xyz(self.fingertip_midpoint_quat)
             curr_yaw = factory_utils.wrap_yaw(curr_yaw)
             is_rotated = curr_yaw < self.cfg_task.ee_success_yaw
@@ -326,12 +337,41 @@ class FactoryFlexHoleEnv(FactoryEnv):
         # Only log at episode boundaries
         if not torch.any(self.reset_buf):
             return
-
+ 
         for key in ["train_real", "train_sim", "val_real", "val_sim"]:
             assert hasattr(self, f"idx_{key}"), f"Missing index slice for key: {key}"
             num_envs = getattr(self, f"num_{key}")
             num_success = torch.count_nonzero(curr_successes[getattr(self, f"idx_{key}")]).item()
             self.extras[f"success_rate_{key}"] = num_success / max(num_envs, 1)
+
+        # DEBUG: Log physical measurements for val partitions to verify metric correctness
+        held_base_pos, _ = factory_utils.get_held_base_pose(
+            self.held_pos, self.held_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
+        )
+        target_held_base_pos, _ = factory_utils.get_target_held_base_pose(
+            self.fixed_pos, self.fixed_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device,
+        )
+        xy_dist = torch.linalg.vector_norm(target_held_base_pos[:, 0:2] - held_base_pos[:, 0:2], dim=1)
+        z_disp = held_base_pos[:, 2] - target_held_base_pos[:, 2]
+        height_threshold = self.cfg_task.fixed_asset_cfg.height * self.cfg_task.success_threshold
+        for key in ["val_real", "val_sim"]:
+            idx = getattr(self, f"idx_{key}")
+            n = getattr(self, f"num_{key}")
+            if n == 0:
+                continue
+            xy_k = xy_dist[idx]
+            z_k = z_disp[idx]
+            tol_k = self.xy_success_tolerance[idx]
+            scale_k = self.hole_scale_multipliers[idx]
+            succ_k = curr_successes[idx]
+            print(
+                f"[DEBUG {key}] n={n} scale={scale_k[0]:.1f} "
+                f"xy_tol={tol_k[0]*1000:.2f}mm "
+                f"xy_dist: mean={xy_k.mean()*1000:.2f}mm max={xy_k.max()*1000:.2f}mm "
+                f"z_disp: mean={z_k.mean()*1000:.2f}mm max={z_k.max()*1000:.2f}mm "
+                f"z_thresh={height_threshold*1000:.2f}mm "
+                f"success={succ_k.sum()}/{n}"
+            )
 
         # Update budget usage based on completed episodes
         num_done_sim = torch.count_nonzero(self.reset_buf[self.idx_train_sim]).item()

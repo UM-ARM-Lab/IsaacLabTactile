@@ -87,6 +87,11 @@ params:
     seq_length: 128
     bounds_loss_coef: 0.0001
 
+    # Whether the environment has separate train/validation sets
+    train_val: False
+    num_train_envs: 0
+    num_val_envs: 0
+
     central_value_config:
       minibatch_size: 512
       mini_epochs: 4
@@ -118,6 +123,14 @@ params:
           before_mlp: True
           concat_input: True
           layer_norm: True
+
+    cotrain:
+      enabled: False
+      # Environment
+      num_train_real: 0
+      num_train_sim: 0
+      # Scorer
+      scorer: null
 
     player:
       deterministic: False
