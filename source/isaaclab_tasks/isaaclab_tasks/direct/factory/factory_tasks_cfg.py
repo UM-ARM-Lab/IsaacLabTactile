@@ -67,6 +67,8 @@ class FactoryTask:
     held_asset_rot_init: float = -90.0
 
     # Reward
+    normalize_reward: bool = False
+    
     ee_success_yaw: float = 0.0  # nut_thread task only.
     action_penalty_ee_scale: float = 0.0
     action_grad_penalty_scale: float = 0.0

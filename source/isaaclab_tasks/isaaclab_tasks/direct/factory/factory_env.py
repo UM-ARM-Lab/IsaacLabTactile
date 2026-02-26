@@ -87,6 +87,14 @@ class FactoryEnv(DirectRLEnv):
         # Smoothed force sensor data (EMA buffer)
         self.finger_wrench = torch.zeros((self.num_envs, 6), device=self.device)
 
+        # Reward normalization: max_per_step × episode_length maps cumulative return to [0, ~1]
+        if self.cfg_task.normalize_reward:
+            _, b0 = self.cfg_task.keypoint_coef_baseline
+            _, b1 = self.cfg_task.keypoint_coef_coarse
+            _, b2 = self.cfg_task.keypoint_coef_fine
+            max_per_step = 1/(2+b0) + 1/(2+b1) + 1/(2+b2) + 1.0 + 1.0
+            self._reward_normalizer = max_per_step * self.max_episode_length
+
     def _setup_scene(self):
         """Initialize simulation scene."""
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg(), translation=(0.0, 0.0, -1.05))
@@ -472,6 +480,9 @@ class FactoryEnv(DirectRLEnv):
         rew_buf = torch.zeros_like(rew_dict["kp_coarse"])
         for rew_name, rew in rew_dict.items():
             rew_buf += rew_dict[rew_name] * rew_scales[rew_name]
+
+        if self.cfg_task.normalize_reward:
+            rew_buf = rew_buf / self._reward_normalizer
 
         self.prev_actions = self.actions.clone()
 
