@@ -354,24 +354,6 @@ class FactoryFlexHoleEnv(FactoryEnv):
         xy_dist = torch.linalg.vector_norm(target_held_base_pos[:, 0:2] - held_base_pos[:, 0:2], dim=1)
         z_disp = held_base_pos[:, 2] - target_held_base_pos[:, 2]
         height_threshold = self.cfg_task.fixed_asset_cfg.height * self.cfg_task.success_threshold
-        for key in ["val_real", "val_sim"]:
-            idx = getattr(self, f"idx_{key}")
-            n = getattr(self, f"num_{key}")
-            if n == 0:
-                continue
-            xy_k = xy_dist[idx]
-            z_k = z_disp[idx]
-            tol_k = self.xy_success_tolerance[idx]
-            scale_k = self.hole_scale_multipliers[idx]
-            succ_k = curr_successes[idx]
-            print(
-                f"[DEBUG {key}] n={n} scale={scale_k[0]:.1f} "
-                f"xy_tol={tol_k[0]*1000:.2f}mm "
-                f"xy_dist: mean={xy_k.mean()*1000:.2f}mm max={xy_k.max()*1000:.2f}mm "
-                f"z_disp: mean={z_k.mean()*1000:.2f}mm max={z_k.max()*1000:.2f}mm "
-                f"z_thresh={height_threshold*1000:.2f}mm "
-                f"success={succ_k.sum()}/{n}"
-            )
 
         # Update budget usage based on completed episodes
         num_done_sim = torch.count_nonzero(self.reset_buf[self.idx_train_sim]).item()
