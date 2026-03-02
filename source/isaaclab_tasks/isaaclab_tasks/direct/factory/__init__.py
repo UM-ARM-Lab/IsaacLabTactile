@@ -52,5 +52,17 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": FactoryTaskPegInsertFlexHoleCfg,
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rl_games_sac_cfg_entry_point": f"{agents.__name__}:rl_games_sac_cfg.yaml",
     },
 )
+
+
+# gym.register(
+#     id="Isaac-Factory-PegInsert-FlexHole-Direct-SAC-v0",
+#     entry_point="isaaclab_tasks.direct.factory:FactoryFlexHoleEnv",
+#     disable_env_checker=True,
+#     kwargs={
+#         "env_cfg_entry_point": FactoryTaskPegInsertFlexHoleCfg,
+#         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_sac_cfg.yaml",
+#     },
+# )
