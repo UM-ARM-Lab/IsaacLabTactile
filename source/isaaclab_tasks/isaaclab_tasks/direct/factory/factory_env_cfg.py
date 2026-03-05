@@ -32,16 +32,16 @@ OBS_DIM_CFG = {
     # "fingertip_pos": 3,
     "fingertip_pos_rel_fixed": 3,
     "fingertip_quat": 4,
-    # "ee_linvel": 3,
-    # "ee_angvel": 3,
+    "ee_linvel": 3,
+    "ee_angvel": 3,
 }
 
 STATE_DIM_CFG = {
     "fingertip_pos": 3,
     "fingertip_pos_rel_fixed": 3,
     "fingertip_quat": 4,
-    # "ee_linvel": 3,
-    # "ee_angvel": 3,
+    "ee_linvel": 3,
+    "ee_angvel": 3,
     "joint_pos": 7,
     "held_pos": 3,
     "held_pos_rel_fixed": 3,
@@ -89,12 +89,19 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     # num_*: will be overwritten to correspond to obs_order, state_order.
     observation_space = 21
     state_space = 72
-    obs_order: list = ["held_pos_rel_fixed", "held_quat", "fingertip_pos_rel_fixed", "fingertip_quat"] # , "ee_linvel", "ee_angvel"]
+    obs_order: list = [
+        "held_pos_rel_fixed",
+        "held_quat",
+        "fingertip_pos_rel_fixed",
+        "fingertip_quat",
+        "ee_linvel",
+        "ee_angvel"
+    ]
     state_order: list = [
         "fingertip_pos",
         "fingertip_quat",
-        # "ee_linvel",
-        # "ee_angvel",
+        "ee_linvel",
+        "ee_angvel",
         "joint_pos",
         "held_pos",
         "held_pos_rel_fixed",

@@ -215,11 +215,11 @@ class FactoryEnv(DirectRLEnv):
         obs_dict = {
             "held_pos_rel_fixed": self.held_pos - self.fixed_pos_obs_frame,
             "held_quat": self.held_quat,
-            # "fingertip_pos": self.fingertip_midpoint_pos,
+            "fingertip_pos": self.fingertip_midpoint_pos,
             "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - noisy_fixed_pos,
             "fingertip_quat": self.fingertip_midpoint_quat,
-            # "ee_linvel": self.ee_linvel_fd,
-            # "ee_angvel": self.ee_angvel_fd,
+            "ee_linvel": self.ee_linvel_fd,
+            "ee_angvel": self.ee_angvel_fd,
             "prev_actions": prev_actions,
         }
 
@@ -229,8 +229,8 @@ class FactoryEnv(DirectRLEnv):
             "held_quat": self.held_quat,
             "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - noisy_fixed_pos,
             "fingertip_quat": self.fingertip_midpoint_quat,
-            # "ee_linvel": self.ee_linvel_fd,
-            # "ee_angvel": self.ee_angvel_fd,
+            "ee_linvel": self.ee_linvel_fd,
+            "ee_angvel": self.ee_angvel_fd,
             "prev_actions": prev_actions,
         }
 
@@ -238,8 +238,8 @@ class FactoryEnv(DirectRLEnv):
             "fingertip_pos": self.fingertip_midpoint_pos,
             "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - self.fixed_pos_obs_frame,
             "fingertip_quat": self.fingertip_midpoint_quat,
-            # "ee_linvel": self.fingertip_midpoint_linvel,
-            # "ee_angvel": self.fingertip_midpoint_angvel,
+            "ee_linvel": self.fingertip_midpoint_linvel,
+            "ee_angvel": self.fingertip_midpoint_angvel,
             "joint_pos": self.joint_pos[:, 0:7],
             "held_pos": self.held_pos,
             "held_pos_rel_fixed": self.held_pos - self.fixed_pos_obs_frame,
