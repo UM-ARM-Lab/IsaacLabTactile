@@ -344,6 +344,15 @@ class FactoryFlexHoleEnv(FactoryEnv):
             num_success = torch.count_nonzero(curr_successes[getattr(self, f"idx_{key}")]).item()
             self.extras[f"success_rate_{key}"] = num_success / max(num_envs, 1)
 
+        # "Any time during rollout" success: was the env ever successful during this episode?
+        # super()._log_factory_metrics() already updated ep_succeeded for the current step,
+        # so self.ep_succeeded[idx] == 1 iff success occurred at any point this episode.
+        for key in ["val_real", "val_sim"]:
+            idx = getattr(self, f"idx_{key}")
+            num_envs = getattr(self, f"num_{key}")
+            num_any_success = torch.count_nonzero(self.ep_succeeded[idx]).item()
+            self.extras[f"success_rate_{key}_any"] = num_any_success / max(num_envs, 1)
+
         # DEBUG: Log physical measurements for val partitions to verify metric correctness
         held_base_pos, _ = factory_utils.get_held_base_pose(
             self.held_pos, self.held_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
