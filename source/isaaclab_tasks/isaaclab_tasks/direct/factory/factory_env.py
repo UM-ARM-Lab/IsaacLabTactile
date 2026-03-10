@@ -16,6 +16,7 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import axis_angle_from_quat
 from isaaclab.sensors import VisuoTactileSensor, TiledCamera
+from isaaclab.sensors.contact_sensor import ContactSensor, ContactSensorCfg
 from . import factory_control, factory_utils
 from .factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, FactoryEnvCfg, ASSET_DIR
 import matplotlib.pyplot as plt
@@ -69,6 +70,41 @@ class FactoryEnv(DirectRLEnv):
             # However, RL-Games wrapper will handle the batching, so we don't need to update it here
             # The wrapper uses single_observation_space to build its own spaces
 
+        # Optional contact sensors attached to the fingertip links, reporting net normal
+        # forces in the world frame. These are only created if include_contact_forces
+        # is enabled to avoid unnecessary overhead.
+        self._left_finger_contact_sensor: ContactSensor | None = None
+        self._right_finger_contact_sensor: ContactSensor | None = None
+        if self.cfg.include_contact_forces:
+            left_prim_path = "/World/envs/env_.*/Robot/panda_leftfinger/elastomer"
+            right_prim_path = "/World/envs/env_.*/Robot/panda_rightfinger/elastomer"
+
+            left_cfg = ContactSensorCfg(
+                prim_path=left_prim_path,
+                history_length=0,
+                track_pose=False,
+                track_contact_points=False,
+                track_air_time=False,
+                filter_prim_paths_expr=[],
+                debug_vis=False,
+            )
+            right_cfg = ContactSensorCfg(
+                prim_path=right_prim_path,
+                history_length=0,
+                track_pose=False,
+                track_contact_points=False,
+                track_air_time=False,
+                filter_prim_paths_expr=[],
+                debug_vis=False,
+            )
+            self._left_finger_contact_sensor = ContactSensor(left_cfg)
+            self._right_finger_contact_sensor = ContactSensor(right_cfg)
+            # Explicitly initialize sensors immediately instead of relying solely on
+            # timeline callbacks so that internal buffers (_timestamp, _is_outdated, etc.)
+            # are available before first use.
+            self._left_finger_contact_sensor._initialize_callback(None)
+            self._right_finger_contact_sensor._initialize_callback(None)
+
         factory_utils.set_body_inertias(self._robot, self.scene.num_envs)
         self._init_tensors()
         self._set_default_dynamics_parameters()
@@ -87,19 +123,27 @@ class FactoryEnv(DirectRLEnv):
         )
 
         # Set masses and frictions.
-        # If gripper_peg_friction is set in task config, use it for both held_asset and robot (gripper-peg friction).
-        # Otherwise, use individual config values.
-        factory_utils.set_friction(
-            self._held_asset,
-            self.cfg_task.gripper_peg_friction if self.cfg_task.gripper_peg_friction is not None else self.cfg_task.held_asset_cfg.friction,
-            self.scene.num_envs,
-        )
-        factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
-        factory_utils.set_friction(
-            self._robot,
-            self.cfg_task.gripper_peg_friction if self.cfg_task.gripper_peg_friction is not None else self.cfg_task.robot_cfg.friction,
-            self.scene.num_envs,
-        )
+        # If gripper_peg_friction_randomization is enabled, use midpoint of range for initial set; per-env values applied at reset.
+        # Otherwise, if gripper_peg_friction is set in task config, use it for both held_asset and robot (gripper-peg friction).
+        # Else use individual config values.
+        if getattr(self.cfg_task, "gripper_peg_friction_randomization", False):
+            low, high = self.cfg_task.gripper_peg_friction_range[0], self.cfg_task.gripper_peg_friction_range[1]
+            nominal_friction = (low + high) * 0.5
+            factory_utils.set_friction(self._held_asset, nominal_friction, self.scene.num_envs)
+            factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
+            factory_utils.set_friction(self._robot, nominal_friction, self.scene.num_envs)
+        else:
+            factory_utils.set_friction(
+                self._held_asset,
+                self.cfg_task.gripper_peg_friction if self.cfg_task.gripper_peg_friction is not None else self.cfg_task.held_asset_cfg.friction,
+                self.scene.num_envs,
+            )
+            factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
+            factory_utils.set_friction(
+                self._robot,
+                self.cfg_task.gripper_peg_friction if self.cfg_task.gripper_peg_friction is not None else self.cfg_task.robot_cfg.friction,
+                self.scene.num_envs,
+            )
 
     def _init_tensors(self):
         """Initialize tensors once."""
@@ -137,9 +181,14 @@ class FactoryEnv(DirectRLEnv):
             self.left_finger_body_idx = self._robot.body_names.index("panda_leftfinger")
             self.right_finger_body_idx = self._robot.body_names.index("panda_rightfinger")
         else:
-            self.left_finger_body_idx = self._robot.body_names.index("gelsight_finger")
-            self.right_finger_body_idx = self._robot.body_names.index("gelsight_finger_0")
+            self.left_finger_body_idx = self._robot.body_names.index("elastomer")
+            self.right_finger_body_idx = self._robot.body_names.index("elastomer_0")
         self.fingertip_body_idx = self._robot.body_names.index("panda_fingertip_centered")
+
+        # Contact force buffers at individual fingertips (world frame).
+        # Each force is 3D: (Fx, Fy, Fz)
+        self.left_finger_force = torch.zeros((self.num_envs, 3), device=self.device)
+        self.right_finger_force = torch.zeros((self.num_envs, 3), device=self.device)
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -248,6 +297,19 @@ class FactoryEnv(DirectRLEnv):
         self.arm_mass_matrix = self._robot.root_physx_view.get_generalized_mass_matrices()[:, 0:7, 0:7]
         self.joint_pos = self._robot.data.joint_pos.clone()
         self.joint_vel = self._robot.data.joint_vel.clone()
+
+        # Contact forces at the individual fingertips (world frame), measured via contact sensors.
+        # We use the net normal contact forces reported by the sensors so that each observation
+        # is a 3D force vector (Fx, Fy, Fz).
+        if self.cfg.include_contact_forces:
+            left_data = self._left_finger_contact_sensor.data
+            # net_forces_w has shape (num_envs, num_bodies, 3)
+            # For fingertip sensors we expect a single body per env.
+            left_forces = left_data.net_forces_w[:, 0, :]
+            self.left_finger_force[:, :] = left_forces
+            right_data = self._right_finger_contact_sensor.data
+            right_forces = right_data.net_forces_w[:, 0, :]
+            self.right_finger_force[:, :] = right_forces
 
         # Finite-differencing results in more reliable velocity estimates.
         self.ee_linvel_fd = (self.fingertip_midpoint_pos - self.prev_fingertip_pos) / dt
@@ -387,6 +449,13 @@ class FactoryEnv(DirectRLEnv):
             "rot_threshold": self.rot_threshold,
             "prev_actions": prev_actions,
         }
+
+        # Optionally include fingertip contact forces in both observations and critic state.
+        if self.cfg.include_contact_forces:
+            obs_dict["fingertip_force_left"] = self.left_finger_force
+            obs_dict["fingertip_force_right"] = self.right_finger_force
+            state_dict["fingertip_force_left"] = self.left_finger_force
+            state_dict["fingertip_force_right"] = self.right_finger_force
         
         # Apply observation noise to policy observations (not critic states)
         obs_dict = self._apply_observation_noise(obs_dict)
@@ -447,6 +516,11 @@ class FactoryEnv(DirectRLEnv):
         if self.obs_history_length > 0:
             for obs_name in self.obs_history_buffers:
                 self.obs_history_buffers[obs_name][env_ids] = 0.0
+
+        # Reset contact sensor state for the selected environments (if enabled)
+        if self.cfg.include_contact_forces:
+            self._left_finger_contact_sensor.reset(env_ids)
+            self._right_finger_contact_sensor.reset(env_ids)
 
     def _pre_physics_step(self, action):
         """Apply policy actions with smoothing."""
@@ -574,6 +648,11 @@ class FactoryEnv(DirectRLEnv):
 
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
         self._robot.set_joint_effort_target(self.joint_torque)
+
+        # Update contact sensors if fingertip contact forces are enabled
+        if self.cfg.include_contact_forces:
+            self._left_finger_contact_sensor.update(self.physics_dt * self.cfg.decimation)
+            self._right_finger_contact_sensor.update(self.physics_dt * self.cfg.decimation)
 
     def _get_dones(self):
         """Check which environments are terminated.
@@ -763,6 +842,19 @@ class FactoryEnv(DirectRLEnv):
                 if self._tactile_cam_right._nominal_tactile is None:
                     self._tactile_cam_right.get_initial_render()
         self.randomize_initial_state(env_ids)
+        self._apply_gripper_peg_friction_randomization(env_ids)
+
+    def _apply_gripper_peg_friction_randomization(self, env_ids):
+        """If enabled, sample gripper-peg friction from configured range for the given envs."""
+        if not getattr(self.cfg_task, "gripper_peg_friction_randomization", False):
+            return
+        env_ids = env_ids.reshape(-1)  # ensure 1D (avoid 0-dim when single env)
+        if env_ids.numel() == 0:
+            return
+        low, high = self.cfg_task.gripper_peg_friction_range[0], self.cfg_task.gripper_peg_friction_range[1]
+        friction = (high - low) * torch.rand(env_ids.numel(), device=self.device) + low
+        factory_utils.set_friction_for_envs(self._held_asset, friction, env_ids)
+        factory_utils.set_friction_for_envs(self._robot, friction, env_ids)
 
     def _set_assets_to_default_pose(self, env_ids):
         """Move assets to default pose before randomization."""
@@ -881,6 +973,10 @@ class FactoryEnv(DirectRLEnv):
         self.scene.write_data_to_sim()
         self.sim.step(render=False)
         self.scene.update(dt=self.physics_dt)
+        # Update contact sensors if fingertip contact forces are enabled
+        if self.cfg.include_contact_forces:
+            self._left_finger_contact_sensor.update(self.physics_dt)
+            self._right_finger_contact_sensor.update(self.physics_dt)
         self._compute_intermediate_values(dt=self.physics_dt)
 
     def randomize_initial_state(self, env_ids):

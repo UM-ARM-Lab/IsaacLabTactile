@@ -87,8 +87,13 @@ params:
     use_real_calib: True
     # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
     # Set to null to use individual config values, or specify a float value (e.g., 1.0)
+    # Ignored when gripper_peg_friction_randomization is true.
     gripper_peg_friction: 0.75
-    
+
+    # Domain randomization: gripper-peg friction sampled uniformly per env at each reset.
+    gripper_peg_friction_randomization: False  # Set to true to enable friction domain randomization
+    gripper_peg_friction_range: [0.4, 1.0]   # [min, max] friction when randomization is enabled
+
     # Observation noise for domain randomization
     # Set enable_obs_noise to true to enable observation noise
     # Individual noise parameters are configured in factory_env_cfg.py (ObsRandCfg)
@@ -107,14 +112,15 @@ params:
       # If null, training proceeds without transfer (observations saved as-is to replay buffer).
       # transfer_checkpoint: "/home/fanyang/github/tactile_transfer/outputs/2026-01-18_21-33-55_0059_peg_real_dynamics_small_transfer_w_peg_pose/best_model.pt"  # e.g., "/path/to/tactile_transfer/outputs/.../best_model.pt"
       # transfer_checkpoint: null  # e.g., "/path/to/tactile_transfer/outputs/.../best_model.pt"
-      transfer_checkpoint: "/home/fanyang/github/tactile_transfer/outputs/2026-01-28_16-30-47_0063_full_info_no_action/best_model.pt"
+      transfer_checkpoint: null
+      # transfer_checkpoint: "/home/fanyang/github/tactile_transfer/outputs/2026-01-17_15-24-42_0055_peg_real_dynamics_small_transfer_vis/best_model.pt"
       # Direction of transfer: A_to_B (use model_A) or B_to_A (use model_B)
       # A_to_B: Transfer from domain A to domain B (e.g., sim to real)
       # B_to_A: Transfer from domain B to domain A (e.g., real to sim)
       transfer_direction: A_to_B  # Options: "A_to_B" or "B_to_A"
       # If enabled, transfer both tactile images and vector observations.
       # Otherwise, only transfer tactile images.
-      decode_observations: True  # Set to true to transfer both tactile and vector observations
+      decode_observations: False  # Set to true to transfer both tactile and vector observations
 
   config:
     name: Factory_Tactile

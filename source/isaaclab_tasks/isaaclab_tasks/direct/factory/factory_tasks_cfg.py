@@ -90,6 +90,10 @@ class FactoryTask:
     # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
     gripper_peg_friction: float | None = None
 
+    # Domain randomization: sample gripper-peg friction uniformly in [min, max] at each env reset.
+    gripper_peg_friction_randomization: bool = False
+    gripper_peg_friction_range: list = [0.5, 0.75]  # [min, max] when randomization is enabled
+
 
 @configclass
 class Peg8mm(HeldAssetCfg):

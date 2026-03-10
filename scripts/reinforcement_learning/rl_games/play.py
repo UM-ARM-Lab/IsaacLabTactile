@@ -105,7 +105,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if task_overrides.get("use_real_calib", False) and hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
             env_cfg.tactile_cam.calib_variant = "real"
         
-        # Override gripper-peg friction if specified
+        # Override gripper-peg friction if specified (ignored when gripper_peg_friction_randomization is True)
         gripper_peg_friction = task_overrides.get("gripper_peg_friction", None)
         if gripper_peg_friction is not None:
             if hasattr(env_cfg, "task") and hasattr(env_cfg.task, "gripper_peg_friction"):
@@ -113,7 +113,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print(f"[INFO] Setting gripper-peg friction to {gripper_peg_friction}")
             else:
                 print("[WARNING] gripper_peg_friction parameter not available in this task configuration")
-        
+
+        # Override gripper-peg friction domain randomization if specified
+        if hasattr(env_cfg, "task"):
+            if "gripper_peg_friction_randomization" in task_overrides:
+                env_cfg.task.gripper_peg_friction_randomization = task_overrides["gripper_peg_friction_randomization"]
+                print(f"[INFO] Setting gripper_peg_friction_randomization to {env_cfg.task.gripper_peg_friction_randomization}")
+            if "gripper_peg_friction_range" in task_overrides:
+                env_cfg.task.gripper_peg_friction_range = task_overrides["gripper_peg_friction_range"]
+                print(f"[INFO] Setting gripper_peg_friction_range to {env_cfg.task.gripper_peg_friction_range}")
+
         # Override observation noise enable flag if specified
         obs_noise = task_overrides.get("obs_noise", None)
         if obs_noise is not None and hasattr(env_cfg, "obs_rand"):

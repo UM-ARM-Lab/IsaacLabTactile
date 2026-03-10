@@ -40,6 +40,9 @@ OBS_DIM_CFG = {
     "held_quat": 4,
     "fixed_pos": 3,
     "fixed_quat": 4,
+    # Optional contact forces at fingertips (left/right), each 3D: (Fx, Fy, Fz)
+    "fingertip_force_left": 3,
+    "fingertip_force_right": 3,
 }
 
 STATE_DIM_CFG = {
@@ -59,6 +62,9 @@ STATE_DIM_CFG = {
     "pos_threshold": 3,
     "rot_threshold": 3,
     "scales": 1,
+    # Optional contact forces at fingertips (left/right), each 3D: (Fx, Fy, Fz)
+    "fingertip_force_left": 3,
+    "fingertip_force_right": 3,
 }
 
 
@@ -142,6 +148,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     obs_rand: ObsRandCfg = ObsRandCfg()
     obs_history: ObsHistoryCfg = ObsHistoryCfg()
     ctrl: CtrlCfg = CtrlCfg()
+    # Whether to include fingertip contact forces (left/right) in observations and critic states
+    include_contact_forces: bool = False
     
     episode_length_s = 10.0  # Probably need to override.
     sim: SimulationCfg = SimulationCfg(
@@ -402,6 +410,17 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.use_gelsight_finger = env.use_gelsight_finger
         if env.get("obs_history", None) is not None and env["obs_history"].get("history_length", None) is not None:
             self.obs_history.history_length = env["obs_history"]["history_length"]
+
+        # Handle optional inclusion of fingertip contact forces in observations and states
+        if env.get("include_contact_forces", None) is not None:
+            self.include_contact_forces = env.include_contact_forces
+            if self.include_contact_forces:
+                # Append fingertip force observations to obs/state order if not already present
+                for obs_name in ["fingertip_force_left", "fingertip_force_right"]:
+                    if obs_name not in self.obs_order:
+                        self.obs_order.append(obs_name)
+                    if obs_name not in self.state_order:
+                        self.state_order.append(obs_name)
         
         # Handle include_held_asset_obs option
         if env.get("include_held_asset_obs", None) is not None:
@@ -420,6 +439,10 @@ class FactoryEnvCfg(DirectRLEnvCfg):
                     self.obs_order.remove("held_quat")
 
         task = env.get("task", OmegaConf.create({}))
+        if task.get("gripper_peg_friction_randomization", None) is not None:
+            self.task.gripper_peg_friction_randomization = task.gripper_peg_friction_randomization
+        if task.get("gripper_peg_friction_range", None) is not None:
+            self.task.gripper_peg_friction_range = OmegaConf.to_container(task.gripper_peg_friction_range, resolve=True)
         if task.get("held_asset_rot_noise", None) is not None:
             self.task.held_asset_rot_noise = OmegaConf.to_container(task.held_asset_rot_noise, resolve=True)
         if task.get("hand_init_pos", None) is not None:

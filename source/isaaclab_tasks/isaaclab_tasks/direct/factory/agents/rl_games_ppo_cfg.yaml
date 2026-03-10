@@ -53,7 +53,12 @@ params:
   task_overrides:
     # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
     # Set to null to use individual config values, or specify a float value (e.g., 1.0)
+    # Ignored when gripper_peg_friction_randomization is true.
     gripper_peg_friction: null
+
+    # Domain randomization: gripper-peg friction sampled uniformly per env at each reset.
+    gripper_peg_friction_randomization: True  # Set to true to enable friction domain randomization
+    gripper_peg_friction_range: [0.5, 0.75]   # [min, max] friction when randomization is enabled
 
     # Observation noise for domain randomization
     # Set enable_obs_noise to true to enable observation noise

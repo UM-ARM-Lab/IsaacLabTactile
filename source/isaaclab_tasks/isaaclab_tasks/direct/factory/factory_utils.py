@@ -29,12 +29,32 @@ def wrap_yaw(angle):
 
 
 def set_friction(asset, value, num_envs):
-    """Update material properties for a given asset."""
+    """Update material properties for a given asset. value is a scalar applied to all envs."""
     materials = asset.root_physx_view.get_material_properties()
     materials[..., 0] = value  # Static friction.
     materials[..., 1] = value  # Dynamic friction.
     env_ids = torch.arange(num_envs, device="cpu")
     asset.root_physx_view.set_material_properties(materials, env_ids)
+
+
+def set_friction_for_envs(asset, values, env_ids):
+    """Set friction per env for the given env_ids. values: tensor of shape (len(env_ids),)."""
+    env_ids = env_ids.reshape(-1)  # ensure 1D (avoid 0-dim when single env)
+    if env_ids.numel() == 0:
+        return
+    materials = asset.root_physx_view.get_material_properties()
+    values = values.to(device=materials.device, dtype=materials.dtype)
+    env_ids_idx = env_ids.to(device=materials.device)
+    # Support both 2D (num_envs, 3) and 3D (num_envs, num_shapes, 3) material buffers
+    if materials.dim() == 2:
+        materials[env_ids_idx, 0] = values
+        materials[env_ids_idx, 1] = values
+    else:
+        materials[env_ids_idx, ..., 0] = values.unsqueeze(-1)
+        materials[env_ids_idx, ..., 1] = values.unsqueeze(-1)
+    # PhysX API expects env indices on CPU, contiguous long (consistent with set_friction)
+    env_ids_cpu = env_ids.cpu().long().contiguous()
+    asset.root_physx_view.set_material_properties(materials, env_ids_cpu)
 
 
 def set_body_inertias(robot, num_envs):
