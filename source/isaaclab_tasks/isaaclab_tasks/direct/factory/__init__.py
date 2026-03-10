@@ -8,7 +8,7 @@ import gymnasium as gym
 from . import agents
 from .factory_env import FactoryEnv
 from .factory_env_cfg import FactoryTaskGearMeshCfg, FactoryTaskNutThreadCfg, FactoryTaskPegInsertCfg
-from .factory_env_cfg import FactoryTaskPegInsertFlexHoleCfg
+from .factory_env_cfg import FactoryTaskNutThreadFlexHoleCfg, FactoryTaskPegInsertFlexHoleCfg
 from .factory_env_flexhole import FactoryFlexHoleEnv
 
 ##
@@ -53,6 +53,16 @@ gym.register(
         "env_cfg_entry_point": FactoryTaskPegInsertFlexHoleCfg,
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
         "rl_games_sac_cfg_entry_point": f"{agents.__name__}:rl_games_sac_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Factory-NutThread-FlexHole-Direct-v0",
+    entry_point="isaaclab_tasks.direct.factory:FactoryFlexHoleEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": FactoryTaskNutThreadFlexHoleCfg,
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
     },
 )
 

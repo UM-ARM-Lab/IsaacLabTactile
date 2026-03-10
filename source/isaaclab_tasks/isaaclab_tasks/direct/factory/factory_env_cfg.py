@@ -22,8 +22,9 @@ from .factory_tasks_cfg import (
     FactoryTask,
     GearMesh,
     NutThread,
+    NutThreadFlexHole,
     PegInsert,
-    PegFlexHole
+    PegFlexHole,
 )
 
 OBS_DIM_CFG = {
@@ -283,21 +284,43 @@ class FactoryTaskNutThreadCfg(FactoryEnvCfg):
 
 
 @configclass
-class FactoryTaskPegInsertFlexHoleCfg(FactoryTaskPegInsertCfg):
-    """PegInsert task with mixed sim/real hole sizes."""
-    task_name = "peg_insert_sim2real"
-    task = PegFlexHole()
+class FactoryTaskBaseFlexHoleCfg(FactoryEnvCfg):
+    """Base config for FlexHole environments with mixed sim/real asset sizes.
+
+    Sim environments use a scaled fixed asset to make the task easier:
+    - PegInsert: sim_fixed_asset_scale > 1.0 — hole scaled UP (larger opening)
+    - NutThread: sim_fixed_asset_scale < 1.0 — bolt scaled DOWN (more threading clearance)
+    Real environments always use scale 1.0 (unmodified asset).
+    """
 
     # Sim/real environment counts
-    num_train_sim: int = 0              # sim environments (scaled hole)
-    num_train_real: int = 0             # real environments (regular hole)
+    num_train_sim: int = 0
+    num_train_real: int = 0
+    num_val_sim: int = 0
+    num_val_real: int = 0
 
-    num_val_sim: int = 0              # sim environments (scaled hole)
-    num_val_real: int = 0             # real
-    
-    # Hole scale
-    sim_hole_size: float = 2.0    # Scale multiplier for sim holes (real = 1.0)
+    # Scale applied to the fixed asset in X-Y for sim environments.
+    # >1.0 makes the fixed asset larger; <1.0 makes it smaller.
+    sim_fixed_asset_scale: float = 1.0
 
-    # Budget multipliers
+    # Budget cost per episode (used for curriculum / resampling weighting)
     sim_budget: float = 1.0
     real_budget: float = 1000.0
+
+
+@configclass
+class FactoryTaskPegInsertFlexHoleCfg(FactoryTaskBaseFlexHoleCfg):
+    """PegInsert with a scaled-up hole in sim environments."""
+    task_name = "peg_insert_flexhole"
+    task = PegFlexHole()
+    episode_length_s = 10.0
+    sim_fixed_asset_scale: float = 2.0  # Hole is 2× larger in sim → easier peg insertion
+
+
+@configclass
+class FactoryTaskNutThreadFlexHoleCfg(FactoryTaskBaseFlexHoleCfg):
+    """NutThread with a scaled-down bolt in sim environments."""
+    task_name = "nut_thread_flexhole"
+    task = NutThreadFlexHole()
+    episode_length_s = 30.0
+    sim_fixed_asset_scale: float = 0.98  # Bolt is slightly thinner in sim → easier threading

@@ -189,6 +189,11 @@ class PegInsert(FactoryTask):
 class PegFlexHole(PegInsert):
     pass
 
+
+@configclass
+class NutThreadFlexHole(NutThread):
+    pass
+
 @configclass
 class GearBase(FixedAssetCfg):
     usd_path = f"{ASSET_DIR}/factory_gear_base.usd"
