@@ -43,6 +43,9 @@ OBS_DIM_CFG = {
     # Optional contact forces at fingertips (left/right), each 3D: (Fx, Fy, Fz)
     "fingertip_force_left": 3,
     "fingertip_force_right": 3,
+    # Optional net wrenches at fingertips (left/right), each 6D: (Fx, Fy, Fz, Tx, Ty, Tz)
+    "fingertip_wrench_left": 6,
+    "fingertip_wrench_right": 6,
 }
 
 STATE_DIM_CFG = {
@@ -65,6 +68,9 @@ STATE_DIM_CFG = {
     # Optional contact forces at fingertips (left/right), each 3D: (Fx, Fy, Fz)
     "fingertip_force_left": 3,
     "fingertip_force_right": 3,
+    # Optional net wrenches at fingertips (left/right), each 6D: (Fx, Fy, Fz, Tx, Ty, Tz)
+    "fingertip_wrench_left": 6,
+    "fingertip_wrench_right": 6,
 }
 
 
@@ -246,8 +252,6 @@ class FactoryEnvCfg(DirectRLEnvCfg):
                 velocity_limit_sim=0.04,
                 # stiffness=7500.0, # og param
                 # damping=173.0,
-                # stiffness=100.0, # params worked for my initial visual transfer exp
-                # damping=10.0,
                 stiffness = 500.0,
                 damping = 40.0,
                 friction=0.1,
@@ -411,12 +415,17 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         if env.get("obs_history", None) is not None and env["obs_history"].get("history_length", None) is not None:
             self.obs_history.history_length = env["obs_history"]["history_length"]
 
-        # Handle optional inclusion of fingertip contact forces in observations and states
+        # Handle optional inclusion of fingertip contact forces/wrenches in observations and states
         if env.get("include_contact_forces", None) is not None:
             self.include_contact_forces = env.include_contact_forces
             if self.include_contact_forces:
-                # Append fingertip force observations to obs/state order if not already present
-                for obs_name in ["fingertip_force_left", "fingertip_force_right"]:
+                # Append fingertip force and wrench observations to obs/state order if not already present
+                for obs_name in [
+                    "fingertip_force_left",
+                    "fingertip_force_right",
+                    "fingertip_wrench_left",
+                    "fingertip_wrench_right",
+                ]:
                     if obs_name not in self.obs_order:
                         self.obs_order.append(obs_name)
                     if obs_name not in self.state_order:

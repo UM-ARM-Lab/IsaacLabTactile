@@ -176,19 +176,33 @@ class FactoryEnv(DirectRLEnv):
                 (self.num_envs, self.obs_history_length, action_dim), device=self.device
             )
 
-        # Computer body indices.
+        # Compute body indices.
+        # For non-gelsight fingers, the fingertip bodies are the panda_*finger links themselves.
+        # For gelsight fingers, the fingertip bodies are the elastomer rigid bodies, whose parents
+        # are the panda_*finger links. We track both child (fingertip) and parent indices so we
+        # can interpret joint wrenches correctly.
         if not self.cfg.use_gelsight_finger:
             self.left_finger_body_idx = self._robot.body_names.index("panda_leftfinger")
             self.right_finger_body_idx = self._robot.body_names.index("panda_rightfinger")
+            print("WARNING: Need to specify the parent body index for the left and right finger")
+            self.left_finger_parent_body_idx = self.left_finger_body_idx
+            self.right_finger_parent_body_idx = self.right_finger_body_idx
         else:
             self.left_finger_body_idx = self._robot.body_names.index("elastomer")
             self.right_finger_body_idx = self._robot.body_names.index("elastomer_0")
+            self.left_finger_parent_body_idx = self._robot.body_names.index("gelsight_finger")
+            self.right_finger_parent_body_idx = self._robot.body_names.index("gelsight_finger_0")
         self.fingertip_body_idx = self._robot.body_names.index("panda_fingertip_centered")
 
         # Contact force buffers at individual fingertips (world frame).
         # Each force is 3D: (Fx, Fy, Fz)
         self.left_finger_force = torch.zeros((self.num_envs, 3), device=self.device)
         self.right_finger_force = torch.zeros((self.num_envs, 3), device=self.device)
+
+        # Net wrench buffers at individual fingertips, derived from incoming joint forces.
+        # Each wrench is 6D: (Fx, Fy, Fz, Tx, Ty, Tz) in the parent link frame.
+        self.left_finger_wrench = torch.zeros((self.num_envs, 6), device=self.device)
+        self.right_finger_wrench = torch.zeros((self.num_envs, 6), device=self.device)
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -311,6 +325,31 @@ class FactoryEnv(DirectRLEnv):
             right_forces = right_data.net_forces_w[:, 0, :]
             self.right_finger_force[:, :] = right_forces
 
+            # Net joint reaction wrenches at fingertip links from PhysX (includes normal + tangential + dynamics).
+            # Shape from PhysX: (num_envs, num_bodies, 6), expressed in the parent-link frames.
+            link_wrenches_parent = self._robot.root_physx_view.get_link_incoming_joint_force()
+
+            # Rotate forces and torques from parent-link frames into world frame using the parent body orientations.
+            parent_quat_w = self._robot.data.body_quat_w
+            # Left fingertip
+            left_wrench_p = link_wrenches_parent[:, self.left_finger_body_idx]
+            left_force_p = left_wrench_p[:, 0:3]
+            left_torque_p = left_wrench_p[:, 3:6]
+            left_parent_quat = parent_quat_w[:, self.left_finger_parent_body_idx]
+            left_force_w = torch_utils.quat_apply(left_parent_quat, left_force_p)
+            left_torque_w = torch_utils.quat_apply(left_parent_quat, left_torque_p)
+            self.left_finger_wrench[:, 0:3] = left_force_w
+            self.left_finger_wrench[:, 3:6] = left_torque_w
+
+            # Right fingertip
+            right_wrench_p = link_wrenches_parent[:, self.right_finger_body_idx]
+            right_force_p = right_wrench_p[:, 0:3]
+            right_torque_p = right_wrench_p[:, 3:6]
+            right_parent_quat = parent_quat_w[:, self.right_finger_parent_body_idx]
+            right_force_w = torch_utils.quat_apply(right_parent_quat, right_force_p)
+            right_torque_w = torch_utils.quat_apply(right_parent_quat, right_torque_p)
+            self.right_finger_wrench[:, 0:3] = right_force_w
+            self.right_finger_wrench[:, 3:6] = right_torque_w
         # Finite-differencing results in more reliable velocity estimates.
         self.ee_linvel_fd = (self.fingertip_midpoint_pos - self.prev_fingertip_pos) / dt
         self.prev_fingertip_pos = self.fingertip_midpoint_pos.clone()
@@ -450,12 +489,17 @@ class FactoryEnv(DirectRLEnv):
             "prev_actions": prev_actions,
         }
 
-        # Optionally include fingertip contact forces in both observations and critic state.
+        # Optionally include fingertip contact forces and net joint wrenches in both observations and critic state.
         if self.cfg.include_contact_forces:
             obs_dict["fingertip_force_left"] = self.left_finger_force
             obs_dict["fingertip_force_right"] = self.right_finger_force
             state_dict["fingertip_force_left"] = self.left_finger_force
             state_dict["fingertip_force_right"] = self.right_finger_force
+
+            obs_dict["fingertip_wrench_left"] = self.left_finger_wrench
+            obs_dict["fingertip_wrench_right"] = self.right_finger_wrench
+            state_dict["fingertip_wrench_left"] = self.left_finger_wrench
+            state_dict["fingertip_wrench_right"] = self.right_finger_wrench
         
         # Apply observation noise to policy observations (not critic states)
         obs_dict = self._apply_observation_noise(obs_dict)

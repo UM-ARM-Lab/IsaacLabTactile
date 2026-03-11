@@ -42,7 +42,7 @@ parser.add_argument("--peg_points", type=int, default=1000, help="Total points f
 parser.add_argument("--point_radius", type=float, default=0.002, help="Marker radius for point visualization")
 parser.add_argument(
     "--include_contact_forces",
-    default=False,
+    default=True,
     action="store_true",
     help="Include fingertip contact forces (left/right, 3D each) in observations and critic states",
 )
