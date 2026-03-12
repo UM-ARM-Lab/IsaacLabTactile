@@ -41,6 +41,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
 
         # Store scale and budget for later use
         self._sim_fixed_asset_scale = cfg.sim_fixed_asset_scale
+        self._real_fixed_asset_scale = cfg.real_fixed_asset_scale
 
         # Set the params
         self.num_train_sim = cfg.num_train_sim
@@ -192,10 +193,16 @@ class FactoryFlexHoleEnv(FactoryEnv):
 
         train_sim_range = range(self.num_train_real, self.num_train_real + self.num_train_sim)
         val_sim_range = range(self.num_train + self.num_val_real, self.num_envs)
+        train_real_range = range(0, self.num_train_real)
+        val_real_range = range(self.num_train, self.num_train + self.num_val_real)
 
         for i in chain(train_sim_range, val_sim_range):
             fixed_asset = stage.GetPrimAtPath(f"/World/envs/env_{i}/FixedAsset")
             fixed_asset.GetAttribute("xformOp:scale").Set(Gf.Vec3f(self._sim_fixed_asset_scale, self._sim_fixed_asset_scale, 1.0))
+
+        for i in chain(train_real_range, val_real_range):
+            fixed_asset = stage.GetPrimAtPath(f"/World/envs/env_{i}/FixedAsset")
+            fixed_asset.GetAttribute("xformOp:scale").Set(Gf.Vec3f(self._real_fixed_asset_scale, self._real_fixed_asset_scale, 1.0))
 
     @staticmethod
     def quat_to_6d(quat: torch.Tensor) -> torch.Tensor:

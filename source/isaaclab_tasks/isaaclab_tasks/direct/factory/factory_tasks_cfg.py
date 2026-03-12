@@ -186,15 +186,6 @@ class PegInsert(FactoryTask):
     )
 
 @configclass
-class PegFlexHole(PegInsert):
-    pass
-
-
-@configclass
-class NutThreadFlexHole(NutThread):
-    pass
-
-@configclass
 class GearBase(FixedAssetCfg):
     usd_path = f"{ASSET_DIR}/factory_gear_base.usd"
     height = 0.02
@@ -456,3 +447,13 @@ class NutThread(FactoryTask):
         ),
         actuators={},
     )
+
+
+@configclass
+class PegFlexHole(PegInsert):
+    pass
+
+
+@configclass
+class NutThreadFlexHole(NutThread):
+    pass

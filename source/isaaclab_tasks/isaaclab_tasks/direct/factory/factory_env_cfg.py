@@ -91,8 +91,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     observation_space = 21
     state_space = 72
     obs_order: list = [
-        "held_pos_rel_fixed",
-        "held_quat",
+        # "held_pos_rel_fixed",
+        # "held_quat",
         "fingertip_pos_rel_fixed",
         "fingertip_quat",
         "ee_linvel",
@@ -302,6 +302,11 @@ class FactoryTaskBaseFlexHoleCfg(FactoryEnvCfg):
     # Scale applied to the fixed asset in X-Y for sim environments.
     # >1.0 makes the fixed asset larger; <1.0 makes it smaller.
     sim_fixed_asset_scale: float = 1.0
+
+    # Scale applied to the fixed asset in X-Y for real environments.
+    # Default 1.0 (unmodified). Set >1.0 to reverse the ordering experiment
+    # (place tight env at high indices, matching force_tool layout).
+    real_fixed_asset_scale: float = 1.0
 
     # Budget cost per episode (used for curriculum / resampling weighting)
     sim_budget: float = 1.0
