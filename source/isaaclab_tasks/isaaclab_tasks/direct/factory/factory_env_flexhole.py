@@ -114,15 +114,8 @@ class FactoryFlexHoleEnv(FactoryEnv):
         scales[self.idx_val_sim] = self._sim_fixed_asset_scale
         self.asset_scale_multipliers = scales
 
-        # Compute per-environment XY success tolerance.
-        # When the hole is scaled UP (scale > 1), the peg has more room, so we loosen the
-        # success criterion proportionally. When the bolt is scaled DOWN (scale < 1), the
-        # success criterion is kept at the base tolerance (same as real).
-        #   xy_tolerance = base_tolerance + (fixed_diameter * max(scale - 1, 0)) / 2
-        base_xy_tolerance = 0.0025  # Original hardcoded tolerance
-        fixed_diameter = self.cfg_task.fixed_asset_cfg.diameter
-        scale_increase = torch.clamp(self.asset_scale_multipliers - 1.0, min=0.0)
-        self.xy_success_tolerance = base_xy_tolerance + (fixed_diameter * scale_increase) / 2
+        # Fixed XY success tolerance — same for all envs regardless of asset scale.
+        self.xy_success_tolerance = 0.0025
 
     def _setup_scene(self):
         """Initialize simulation scene with mixed hole sizes using MultiAssetSpawnerCfg."""
