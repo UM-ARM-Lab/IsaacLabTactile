@@ -156,6 +156,12 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     ctrl: CtrlCfg = CtrlCfg()
     # Whether to include fingertip contact forces (left/right) in observations and critic states
     include_contact_forces: bool = False
+    # Whether to maintain per-step fingertip + peg point clouds as an additional tactile representation.
+    # Point clouds are treated like sensor readings: they are always kept on the environment (when enabled),
+    # and can optionally be added to observations if future configs desire.
+    include_tactile_pointclouds: bool = False
+    tactile_pointcloud_gripper_points: int = 800
+    tactile_pointcloud_peg_points: int = 400
     
     episode_length_s = 10.0  # Probably need to override.
     sim: SimulationCfg = SimulationCfg(

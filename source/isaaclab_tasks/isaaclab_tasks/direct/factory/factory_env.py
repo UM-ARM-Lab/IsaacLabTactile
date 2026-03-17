@@ -6,6 +6,9 @@
 import numpy as np
 import torch
 
+from pathlib import Path
+from typing import Any
+
 import carb
 import isaacsim.core.utils.torch as torch_utils
 
@@ -20,6 +23,78 @@ from isaaclab.sensors.contact_sensor import ContactSensor, ContactSensorCfg
 from . import factory_control, factory_utils
 from .factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, FactoryEnvCfg, ASSET_DIR
 import matplotlib.pyplot as plt
+
+
+def _triangulate_face_indices(usd_mesh: Any) -> np.ndarray:
+    from pxr import UsdGeom
+
+    counts = usd_mesh.GetFaceVertexCountsAttr().Get()
+    indices = usd_mesh.GetFaceVertexIndicesAttr().Get()
+    faces: list[list[int]] = []
+    it = iter(indices)
+    for cnt in counts:
+        poly = [next(it) for _ in range(cnt)]
+        for k in range(1, cnt - 1):
+            faces.append([poly[0], poly[k], poly[k + 1]])
+    return np.asarray(faces, dtype=np.int64) if faces else np.zeros((0, 3), dtype=np.int64)
+
+
+def _collect_meshes_from_stage(stage: Any, root_path: str):
+    from pxr import Usd, UsdGeom
+
+    root = stage.GetPrimAtPath(root_path)
+    if not root or not root.IsValid():
+        return []
+
+    meshes = []
+    for prim in Usd.PrimRange(root):  # pyright: ignore[reportAttributeAccessIssue]
+        if prim.GetTypeName() != "Mesh":
+            continue
+        usd_mesh = UsdGeom.Mesh(prim)  # pyright: ignore[reportAttributeAccessIssue]
+        points = np.asarray(usd_mesh.GetPointsAttr().Get(), dtype=np.float64)
+        if points.size == 0:
+            continue
+
+        face_counts = usd_mesh.GetFaceVertexCountsAttr().Get()
+        if face_counts:
+            faces = _triangulate_face_indices(usd_mesh)
+        else:
+            indices = usd_mesh.GetFaceVertexIndicesAttr().Get()
+            faces = (
+                np.asarray(indices, dtype=np.int64).reshape(-1, 3) if len(indices) else np.zeros((0, 3), dtype=np.int64)
+            )
+
+        if len(faces) > 0:
+            import trimesh
+
+            meshes.append(trimesh.Trimesh(vertices=points, faces=faces, process=False))
+    return meshes
+
+
+def _load_meshes_from_usd(usd_path: Path, prim_path: str) -> list:
+    if not usd_path.exists():
+        return []
+    from pxr import Usd
+
+    stage = Usd.Stage.Open(str(usd_path))  # pyright: ignore[reportAttributeAccessIssue]
+    return _collect_meshes_from_stage(stage, prim_path)
+
+
+def _sample_meshes_to_points(meshes: list, num_points: int) -> np.ndarray:
+    if not meshes or num_points <= 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    total_area = float(sum(m.area for m in meshes))
+    if total_area <= 0.0:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    from trimesh.sample import sample_surface
+
+    all_points = []
+    for mesh in meshes:
+        n = max(1, int(num_points * float(mesh.area) / total_area))
+        points = sample_surface(mesh, n, face_weight=mesh.area_faces)[0]
+        all_points.append(np.asarray(points, dtype=np.float64))
+    return np.vstack(all_points) if all_points else np.zeros((0, 3), dtype=np.float64)
 
 class FactoryEnv(DirectRLEnv):
     cfg: FactoryEnvCfg
@@ -215,6 +290,19 @@ class FactoryEnv(DirectRLEnv):
         self.ep_succeeded = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.ep_success_times = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
 
+        # Optional tactile point-cloud buffers (gripper fingertips + peg) in world frame.
+        # When enabled via cfg.include_tactile_pointclouds, these are updated every physics step
+        # to behave like sensor readings. External scripts can always access them directly from
+        # the environment, regardless of whether they are included in the observation vector.
+        self.tactile_pc_left_w = torch.zeros((self.num_envs, 0, 3), device=self.device)
+        self.tactile_pc_right_w = torch.zeros((self.num_envs, 0, 3), device=self.device)
+        self.tactile_pc_peg_w = torch.zeros((self.num_envs, 0, 3), device=self.device)
+
+        # Local-frame meshes for point-cloud sampling (loaded lazily from USD assets).
+        self._pc_left_meshes: list | None = None
+        self._pc_right_meshes: list | None = None
+        self._pc_peg_meshes: list | None = None
+
     def _setup_scene(self):
         """Initialize simulation scene."""
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg(), translation=(0.0, 0.0, -1.05))
@@ -366,6 +454,72 @@ class FactoryEnv(DirectRLEnv):
         joint_diff = self.joint_pos[:, 0:7] - self.prev_joint_pos
         self.joint_vel_fd = joint_diff / dt
         self.prev_joint_pos = self.joint_pos[:, 0:7].clone()
+
+        # Optional tactile point clouds (treated as sensor-like data).
+        if self.cfg.include_tactile_pointclouds:
+            # Lazily load meshes from USD assets if not already loaded.
+            if self._pc_left_meshes is None or self._pc_right_meshes is None or self._pc_peg_meshes is None:
+                robot_usd = Path(ASSET_DIR) / "franka_gelsight_r15_assembled.usd"
+                peg_usd = Path(ASSET_DIR) / "factory_peg_8mm.usd"
+                self._pc_left_meshes = _load_meshes_from_usd(robot_usd, "/panda/panda_leftfinger/elastomer")
+                self._pc_right_meshes = _load_meshes_from_usd(robot_usd, "/panda/panda_rightfinger/elastomer")
+                if not self._pc_left_meshes or not self._pc_right_meshes:
+                    meshes = _load_meshes_from_usd(robot_usd, "/panda")
+                    self._pc_left_meshes = meshes
+                    self._pc_right_meshes = meshes
+
+                if peg_usd.exists():
+                    from pxr import Usd  # local import for USD
+
+                    stage = Usd.Stage.Open(str(peg_usd))  # pyright: ignore[reportAttributeAccessIssue]
+                    default_prim = stage.GetDefaultPrim()
+                    root = default_prim.GetPath().pathString if default_prim else "/"
+                    self._pc_peg_meshes = _collect_meshes_from_stage(stage, root)
+                else:
+                    self._pc_peg_meshes = []
+
+            # Resample local-frame point clouds for this timestep.
+            half = max(1, self.cfg.tactile_pointcloud_gripper_points // 2)
+            left_pts_np = _sample_meshes_to_points(self._pc_left_meshes, half)
+            right_pts_np = _sample_meshes_to_points(self._pc_right_meshes, self.cfg.tactile_pointcloud_gripper_points - half)
+            peg_pts_np = _sample_meshes_to_points(self._pc_peg_meshes, self.cfg.tactile_pointcloud_peg_points)
+
+            if left_pts_np.size == 0 or right_pts_np.size == 0 or peg_pts_np.size == 0:
+                # Keep previous buffers (or zeros) if sampling failed.
+                pass
+            else:
+                left_pts_l = torch.tensor(left_pts_np, dtype=torch.float32, device=self.device)
+                right_pts_l = torch.tensor(right_pts_np, dtype=torch.float32, device=self.device)
+                peg_pts_l = torch.tensor(peg_pts_np, dtype=torch.float32, device=self.device)
+
+                # Use environment-frame positions (subtract env_origins) so point clouds for
+                # different envs are centered consistently, matching other obs like held_pos.
+                left_pos_e = self._robot.data.body_pos_w[:, self.left_finger_body_idx] - self.scene.env_origins
+                left_quat_w = self._robot.data.body_quat_w[:, self.left_finger_body_idx]
+                right_pos_e = self._robot.data.body_pos_w[:, self.right_finger_body_idx] - self.scene.env_origins
+                right_quat_w = self._robot.data.body_quat_w[:, self.right_finger_body_idx]
+                peg_pos_e = self._held_asset.data.root_pos_w - self.scene.env_origins
+                peg_quat_w = self._held_asset.data.root_quat_w
+
+                # The torch_utils.quat_apply helper expects the quaternion and point tensors
+                # to have the same leading dimension (no implicit broadcasting). To obtain a
+                # per-env point cloud where each environment sees the same local points, we
+                # explicitly expand both tensors to (num_envs * num_points, 4/3) and then
+                # reshape back to (num_envs, num_points, 3).
+                num_envs = self.num_envs
+
+                def _apply_pc(quat_w, pts_l, pos_e):
+                    # quat_w: (E, 4), pts_l: (P, 3), pos_e: (E, 3)
+                    E, P = quat_w.shape[0], pts_l.shape[0]
+                    quat_exp = quat_w.unsqueeze(1).expand(E, P, 4).reshape(-1, 4)
+                    pts_exp = pts_l.unsqueeze(0).expand(E, P, 3).reshape(-1, 3)
+                    pos_exp = pos_e.unsqueeze(1).expand(E, P, 3).reshape(-1, 3)
+                    pc = torch_utils.quat_apply(quat_exp, pts_exp) + pos_exp
+                    return pc.view(E, P, 3)
+
+                self.tactile_pc_left_w = _apply_pc(left_quat_w, left_pts_l, left_pos_e)
+                self.tactile_pc_right_w = _apply_pc(right_quat_w, right_pts_l, right_pos_e)
+                self.tactile_pc_peg_w = _apply_pc(peg_quat_w, peg_pts_l, peg_pos_e)
 
         self.last_update_timestamp = self._robot._data._sim_timestamp
 
