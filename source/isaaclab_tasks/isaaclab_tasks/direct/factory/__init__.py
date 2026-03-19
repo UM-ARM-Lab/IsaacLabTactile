@@ -52,6 +52,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": FactoryTaskPegInsertFlexHoleCfg,
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rl_games_ppo_mlp_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_mlp_cfg.yaml",
         "rl_games_sac_cfg_entry_point": f"{agents.__name__}:rl_games_sac_cfg.yaml",
     },
 )
@@ -63,6 +64,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": FactoryTaskNutThreadFlexHoleCfg,
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rl_games_ppo_mlp_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_mlp_cfg.yaml",
         "rl_games_sac_cfg_entry_point": f"{agents.__name__}:rl_games_sac_cfg.yaml",
     },
 )
