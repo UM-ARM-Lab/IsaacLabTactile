@@ -26,7 +26,7 @@ app.version = "5.1.0"
 "omni.physx.fabric" = {}
 "omni.warp.core" = {}
 "usdrt.scenegraph" = {}
-"omni.kit.telemetry" = {}
+# "omni.kit.telemetry" = {}  # disabled: fork/exec fails in Singularity containers (Permission denied)
 "omni.kit.loop" = {}
 # this is needed to create physics material through CreatePreviewSurfaceMaterialPrim
 "omni.kit.usd.mdl" = {}
@@ -188,7 +188,7 @@ folders = [
 ]
 
 [settings.ngx]
-enabled=true # Enable this for DLSS
+enabled=false # disabled: NGX/DLSS not needed for headless RL training
 
 ########################
 # Isaac Sim Extensions #

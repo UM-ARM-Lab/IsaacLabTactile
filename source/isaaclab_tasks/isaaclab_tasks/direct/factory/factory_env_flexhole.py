@@ -97,8 +97,6 @@ class FactoryFlexHoleEnv(FactoryEnv):
         self.total_budget_used = 0.0
 
         # Index slices for sim/real
-        # Layout: [sim][real]
-        # FIXME: add sim/real environments
         self.idx_train_real = slice(0, self.num_train_real)
         self.idx_train_sim = slice(self.num_train_real, self.num_train_real + self.num_train_sim)
         self.idx_train = slice(0, self.num_train)
