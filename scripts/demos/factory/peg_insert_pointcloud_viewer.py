@@ -213,8 +213,8 @@ def main():
     right_pts_l = torch.tensor(right_pts_np, dtype=torch.float32, device=sim_device)
     peg_pts_l = torch.tensor(peg_pts_np, dtype=torch.float32, device=sim_device)
 
-    left_body_idx = env.unwrapped._robot.body_names.index("gelsight_finger")
-    right_body_idx = env.unwrapped._robot.body_names.index("gelsight_finger_0")
+    left_body_idx = env.unwrapped._robot.body_names.index("elastomer")
+    right_body_idx = env.unwrapped._robot.body_names.index("elastomer_0")
 
     has_gui = not bool(getattr(args_cli, "headless", False))
 

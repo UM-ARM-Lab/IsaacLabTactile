@@ -68,7 +68,8 @@ params:
           padding: 0
     
     # MLP for processing vector observations (robot state, object state, velocities, actions)
-    # RL-Games will automatically route "vector_obs" group to MLP based on shape
+    # RL-Games will automatically route "vector_obs" group (augmented with Point-MAE latent
+    # when enabled) to this MLP based on shape.
     mlp:
       units: [512, 128, 64]
       activation: elu
@@ -121,6 +122,29 @@ params:
       # If enabled, transfer both tactile images and vector observations.
       # Otherwise, only transfer tactile images.
       decode_observations: False  # Set to true to transfer both tactile and vector observations
+
+    # Point-MAE tactile point cloud encoder configuration
+    # If checkpoint is provided, point clouds and fingertip forces/wrenches will be encoded
+    # into a latent token that is concatenated to the vector observations before entering
+    # the policy network.
+    tactile_pointmae:
+      # Path to Point-MAE checkpoint (.pth) saved by tactile_transfer/script/train_point_mae.py.
+      # Set to null to disable the Point-MAE encoder during RL training.
+      checkpoint: null  # e.g., "/home/fanyang/github/tactile_transfer/outputs/point_mae_pc/point_mae_epoch_0100.pth"
+      # Names of observation dictionary entries that contain the tactile point clouds.
+      # For the factory peg insertion task with TacSL point clouds enabled, these keys
+      # will be provided by the environment; adjust if your task uses different names.
+      pc_keys:
+        - tactile_pc_left_w
+        - tactile_pc_right_w
+        - tactile_pc_peg_w
+      # Names of observation entries for fingertip forces and wrenches used to build the
+      # force token expected by PointMAE (shape 18 = fL(3)+wL(6)+fR(3)+wR(6)).
+      force_keys:
+        left_force: fingertip_force_left
+        left_wrench: fingertip_wrench_left
+        right_force: fingertip_force_right
+        right_wrench: fingertip_wrench_right
 
   config:
     name: Factory_Tactile

@@ -111,6 +111,11 @@ from isaaclab_rl.rl_games import MultiObserver, PbtAlgoObserver, RlGamesGpuEnv, 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
+from tactile_transfer.rl_pointmae_wrapper import (
+    PointMAEObsWrapper,
+    load_pointmae_encoder_from_checkpoint,
+)
+
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 
@@ -534,21 +539,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
-    # Load tactile transfer configuration from agent config
+    # Load tactile transfer and Point-MAE configurations from agent config
     task_overrides = agent_cfg["params"].get("task_overrides", {})
+
+    # Tactile transfer (image/domain transfer) configuration
     tactile_transfer_cfg = task_overrides.get("tactile_transfer", {})
-    
-    # Get transfer configuration from YAML
     transfer_checkpoint = tactile_transfer_cfg.get("transfer_checkpoint")
     transfer_direction = tactile_transfer_cfg.get("transfer_direction", "A_to_B")
     decode_observations = tactile_transfer_cfg.get("decode_observations", False)
-    
-    # Load tactile transfer model if checkpoint is provided (optional)
+
     transfer_model = None
     obs_dim = None
     action_dim = None
     use_tactile_transfer = transfer_checkpoint is not None and transfer_checkpoint != "null"
-    
+
     if use_tactile_transfer:
         transfer_checkpoint_path = Path(transfer_checkpoint)
         if not transfer_checkpoint_path.exists():
@@ -557,7 +561,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         device = torch.device(rl_device if torch.cuda.is_available() else "cpu")
         checkpoint = load_transfer_checkpoint(transfer_checkpoint_path, device)
         config = checkpoint["config"]
-        
+
         # Create both models (A and B)
         model_A = create_transfer_model_from_config(config, device)
         model_B = create_transfer_model_from_config(config, device)
@@ -565,7 +569,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         model_B.load_state_dict(checkpoint["model_B_state_dict"])
         model_A.eval()
         model_B.eval()
-        
+
         # Select model based on transfer direction
         if transfer_direction == "A_to_B":
             transfer_model = model_A  # model_A does A->B transfer
@@ -573,10 +577,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             transfer_model = model_B  # model_B does B->A transfer
         else:
             raise ValueError(f"Invalid transfer_direction: {transfer_direction}. Must be 'A_to_B' or 'B_to_A'")
-        
+
         obs_dim = config.get("obs_dim")
         action_dim = config.get("action_dim")
-        
+
         print("[INFO] Tactile transfer ENABLED:")
         print(f"  - Transfer checkpoint: {transfer_checkpoint_path}")
         print(f"  - Transfer direction: {transfer_direction}")
@@ -586,6 +590,38 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         print("[INFO] Tactile transfer DISABLED - training without transfer (observations saved as-is to replay buffer)")
 
+    # Point-MAE tactile point cloud encoder configuration
+    tactile_pointmae_cfg = task_overrides.get("tactile_pointmae", {})
+    pointmae_checkpoint = tactile_pointmae_cfg.get("checkpoint")
+    use_pointmae = pointmae_checkpoint is not None and pointmae_checkpoint != "null"
+
+    pointmae_model = None
+    if use_pointmae:
+        mae_device = torch.device(rl_device if torch.cuda.is_available() else "cpu")
+        pointmae_model = load_pointmae_encoder_from_checkpoint(
+            pointmae_checkpoint,
+            mae_device,
+            tactile_pointmae_cfg,
+        )
+
+        # Ensure env is configured to produce the observations PointMAE expects.
+        if hasattr(env_cfg, "include_contact_forces"):
+            env_cfg.include_contact_forces = True
+        else:
+            raise ValueError("include_contact_forces must be set to True in env_cfg")
+        if hasattr(env_cfg, "include_tactile_pointclouds"):
+            env_cfg.include_tactile_pointclouds = True
+        else:
+            raise ValueError("include_tactile_pointclouds must be set to True in env_cfg")
+
+        print("[INFO] Point-MAE encoder ENABLED:")
+        print(f"  - Checkpoint: {pointmae_checkpoint}")
+        print(f"  - force_share_with_patches: {getattr(pointmae_model.cfg, 'force_share_with_patches', None)}")
+        print(f"  - include_contact_forces: {getattr(env_cfg, 'include_contact_forces', None)}")
+        print(f"  - include_tactile_pointclouds: {getattr(env_cfg, 'include_tactile_pointclouds', None)}")
+    else:
+        print("[INFO] Point-MAE encoder DISABLED - training without Point-MAE tactile encoding")
+
     # create isaac environment
     base_env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
@@ -593,18 +629,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(base_env.unwrapped, DirectMARLEnv):
         base_env = multi_agent_to_single_agent(base_env)
     
+    env = base_env
+
     # Wrap with tactile transfer wrapper if transfer is enabled
     if use_tactile_transfer and transfer_model is not None:
         env = TactileTransferWrapper(
-            base_env,
+            env,
             transfer_model,
             torch.device(rl_device if torch.cuda.is_available() else "cpu"),
             obs_dim,
             action_dim,
-            decode_observations=decode_observations
+            decode_observations=decode_observations,
         )
-    else:
-        env = base_env
+
+    # Wrap with Point-MAE observation wrapper if enabled
+    if use_pointmae and pointmae_model is not None:
+        env = PointMAEObsWrapper(
+            env,
+            pointmae_model,
+            torch.device(rl_device if torch.cuda.is_available() else "cpu"),
+            tactile_pointmae_cfg,
+        )
 
     # wrap for video recording
     if args_cli.video:

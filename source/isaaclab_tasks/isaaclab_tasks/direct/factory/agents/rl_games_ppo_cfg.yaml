@@ -57,7 +57,7 @@ params:
     gripper_peg_friction: null
 
     # Domain randomization: gripper-peg friction sampled uniformly per env at each reset.
-    gripper_peg_friction_randomization: True  # Set to true to enable friction domain randomization
+    gripper_peg_friction_randomization: False  # Set to true to enable friction domain randomization
     gripper_peg_friction_range: [0.5, 0.75]   # [min, max] friction when randomization is enabled
 
     # Observation noise for domain randomization
@@ -68,7 +68,7 @@ params:
 
     # Include held asset observations (held_pos_rel_fixed and held_quat) in obs_order
     # When enabled, adds held object position relative to fixed asset and held object orientation to policy observations
-    include_held_asset_obs: True  # Set to true to include held_pos_rel_fixed and held_quat in observations
+    include_held_asset_obs: False  # Set to true to include held_pos_rel_fixed and held_quat in observations
 
     # Tactile transfer configuration (used when training with tactile sensor and transfer model)
     # If transfer_checkpoint is provided, observations will be transferred before being saved to replay buffer
@@ -79,6 +79,23 @@ params:
       transfer_direction: A_to_B
       # If enabled, transfer both tactile images and vector observations; otherwise only tactile images
       decode_observations: False
+
+    # Point-MAE tactile point cloud encoder configuration (optional).
+    # This is primarily intended for experiments that also enable tactile point clouds
+    # in the environment config. When enabled, a latent token from PointMAE will be
+    # concatenated to the vector observations for the policy.
+    tactile_pointmae:
+      # checkpoint: "/home/fanyang/github/tactile_transfer/outputs/point_mae_pc/point_mae_epoch_0050.pth"
+      checkpoint: null  # set to null to disable Point-MAE
+      pc_keys:
+        - tactile_pc_left_w
+        - tactile_pc_right_w
+        - tactile_pc_peg_w
+      force_keys:
+        left_force: fingertip_force_left
+        left_wrench: fingertip_wrench_left
+        right_force: fingertip_force_right
+        right_wrench: fingertip_wrench_right
 
   config:
     name: Factory

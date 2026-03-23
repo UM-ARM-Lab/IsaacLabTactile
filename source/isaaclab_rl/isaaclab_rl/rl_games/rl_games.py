@@ -130,9 +130,13 @@ class RlGamesVecEnvWrapper(IVecEnv):
         self._obs_groups = obs_groups
         if obs_groups is None:
             self._obs_groups = {"obs": ["policy"], "states": []}
-            if not self.unwrapped.single_observation_space.get("policy"):
+            # Prefer wrapped env's `single_observation_space` when present.
+            # This allows obs-augmenting wrappers (e.g. PointMAEObsWrapper) to update the policy input shape
+            # without changing the base env class.
+            single_obs_space = getattr(self.env, "single_observation_space", None) or self.unwrapped.single_observation_space
+            if not single_obs_space.get("policy"):
                 raise KeyError("Policy observation group is expected if no explicit groups is defined")
-            if self.unwrapped.single_observation_space.get("critic"):
+            if single_obs_space.get("critic"):
                 self._obs_groups["states"] = ["critic"]
 
         if isinstance(self.state_space, gym.spaces.Box):
@@ -170,7 +174,7 @@ class RlGamesVecEnvWrapper(IVecEnv):
     def observation_space(self) -> gym.spaces.Box | gym.spaces.Dict:
         """Returns the :attr:`Env` :attr:`observation_space` (``Box`` if concatenated, otherwise ``Dict``)."""
         # note: rl-games only wants single observation space
-        space = self.unwrapped.single_observation_space
+        space = getattr(self.env, "single_observation_space", None) or self.unwrapped.single_observation_space
         clip = self._clip_obs
         if not self._concate_obs_groups:
             policy_space = {grp: gym.spaces.Box(-clip, clip, space.get(grp).shape) for grp in self._obs_groups["obs"]}
@@ -227,7 +231,7 @@ class RlGamesVecEnvWrapper(IVecEnv):
     def state_space(self) -> gym.spaces.Box | gym.spaces.Dict | None:
         """Returns the privileged observation space for the critic (``Box`` if concatenated, otherwise ``Dict``)."""
         # # note: rl-games only wants single observation space
-        space = self.unwrapped.single_observation_space
+        space = getattr(self.env, "single_observation_space", None) or self.unwrapped.single_observation_space
         clip = self._clip_obs
         if not self._concate_state_groups:
             state_space = {grp: gym.spaces.Box(-clip, clip, space.get(grp).shape) for grp in self._obs_groups["states"]}

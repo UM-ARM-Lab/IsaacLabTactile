@@ -84,6 +84,11 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
+from tactile_transfer.rl_pointmae_wrapper import (
+    PointMAEObsWrapper,
+    load_pointmae_encoder_from_checkpoint,
+)
+
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 
@@ -192,12 +197,53 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     concate_obs_groups = agent_cfg["params"]["env"].get("concate_obs_groups", True)
     concate_state_groups = agent_cfg["params"]["env"].get("concate_state_groups", None)
 
+    # Point-MAE tactile point cloud encoder configuration
+    tactile_pointmae_cfg = task_overrides.get("tactile_pointmae", {})
+    pointmae_checkpoint = tactile_pointmae_cfg.get("checkpoint")
+    use_pointmae = pointmae_checkpoint is not None and pointmae_checkpoint != "null"
+
+    pointmae_model = None
+    if use_pointmae:
+        mae_device = torch.device(rl_device if torch.cuda.is_available() else "cpu")
+        pointmae_model = load_pointmae_encoder_from_checkpoint(
+            pointmae_checkpoint,
+            mae_device,
+            tactile_pointmae_cfg,
+        )
+
+        # Ensure env is configured to produce the observations PointMAE expects.
+        if hasattr(env_cfg, "include_contact_forces"):
+            env_cfg.include_contact_forces = True
+        else:
+            raise ValueError("include_contact_forces must be set to True in env_cfg")
+        if hasattr(env_cfg, "include_tactile_pointclouds"):
+            env_cfg.include_tactile_pointclouds = True
+        else:
+            raise ValueError("include_tactile_pointclouds must be set to True in env_cfg")
+
+        print("[INFO] Point-MAE encoder ENABLED (play):")
+        print(f"  - Checkpoint: {pointmae_checkpoint}")
+        print(f"  - force_share_with_patches: {getattr(pointmae_model.cfg, 'force_share_with_patches', None)}")
+        print(f"  - include_contact_forces: {getattr(env_cfg, 'include_contact_forces', None)}")
+        print(f"  - include_tactile_pointclouds: {getattr(env_cfg, 'include_tactile_pointclouds', None)}")
+    else:
+        print("[INFO] Point-MAE encoder DISABLED - playing without Point-MAE tactile encoding")
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
+
+    # Wrap with Point-MAE observation wrapper if enabled
+    if use_pointmae and pointmae_model is not None:
+        env = PointMAEObsWrapper(
+            env,
+            pointmae_model,
+            torch.device(rl_device if torch.cuda.is_available() else "cpu"),
+            tactile_pointmae_cfg,
+        )
 
     # wrap for video recording
     if args_cli.video:
