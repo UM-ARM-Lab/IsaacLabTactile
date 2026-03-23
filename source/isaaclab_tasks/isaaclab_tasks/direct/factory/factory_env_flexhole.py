@@ -118,7 +118,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
         # success criterion is kept at the base tolerance (same as real).
         #   xy_tolerance = base_tolerance + (fixed_diameter * max(scale - 1, 0)) / 2
         base_xy_tolerance = 0.0025  # Original hardcoded tolerance
-        fixed_diameter = self.cfg_task.fixed_asset_cfg.diameter
+        fixed_diameter = 0.009  # Inner diameter of the Hole8mm asset (9mm); cfg.diameter is the nominal peg size
         scale_increase = torch.clamp(self.asset_scale_multipliers - 1.0, min=0.0)
         self.xy_success_tolerance = base_xy_tolerance + (fixed_diameter * scale_increase) / 2
 
