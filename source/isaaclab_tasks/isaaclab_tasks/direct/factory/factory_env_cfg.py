@@ -298,6 +298,7 @@ class FactoryTaskBaseFlexHoleCfg(FactoryEnvCfg):
     num_train_real: int = 0
     num_val_sim: int = 0
     num_val_real: int = 0
+    randomize_partition: bool = False
 
     # Scale applied to the fixed asset in X-Y for sim environments.
     # >1.0 makes the fixed asset larger; <1.0 makes it smaller.
