@@ -16,7 +16,11 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from . import factory_utils
 from .factory_env import FactoryEnv
-from .factory_env_cfg import FactoryTaskBaseFlexHoleCfg, FactoryTaskNutThreadFlexHoleCfg, FactoryTaskPegInsertFlexHoleCfg
+from .factory_env_cfg import (
+    FactoryTaskBaseFlexHoleCfg,
+    FactoryTaskNutThreadFlexHoleCfg,
+    FactoryTaskPegInsertFlexHoleCfg,
+)
 
 
 class FactoryFlexHoleEnv(FactoryEnv):
@@ -60,7 +64,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
         self.sim_budget_used = 0.0
         self.real_budget_used = 0.0
         self.total_budget_used = 0.0
-        
+
         # Pre-adjust observation_space for 6D quaternion representation
         # Each quaternion field (4D) becomes 6D, adding 2 dimensions per field
         num_quat_fields_obs = sum(1 for obs in cfg.obs_order if obs.endswith("_quat"))
@@ -102,7 +106,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
     def _init_partitions(self):
         # Index slices for sim/real
         train_ids = torch.arange(self.num_train, device=self.device)
-        self.idx_train = torch.randperm(self.num_train) if self.randomize_partition else train_ids
+        self.idx_train = torch.randperm(self.num_train, device=self.device) if self.randomize_partition else train_ids
         self.idx_train_real = self.idx_train[: self.num_train_real]
         self.idx_train_sim = self.idx_train[self.num_train_real :]
 
@@ -123,13 +127,15 @@ class FactoryFlexHoleEnv(FactoryEnv):
         scales[self.idx_real] = self._real_fixed_asset_scale
         scales[self.idx_sim] = self._sim_fixed_asset_scale
         self.asset_scale_multipliers = scales
-        
+
         # Compute per-environment XY success tolerance.
         # When the hole is scaled UP (scale > 1), the peg has more room, so we loosen the
         # success criterion proportionally. When the bolt is scaled DOWN (scale < 1), the
         # success criterion is kept at the base tolerance (same as real).
         #   xy_tolerance = base_tolerance + (fixed_diameter * max(scale - 1, 0)) / 2
-        base_xy_tolerance = 0.0025 * torch.ones((self.num_envs,), dtype=torch.float32, device=self.device) # Original hardcoded tolerance
+        base_xy_tolerance = 0.0025 * torch.ones(
+            (self.num_envs,), dtype=torch.float32, device=self.device
+        )  # Original hardcoded tolerance
         # For peg flexhole task
         if self.cfg_task.name == "peg_insert":
             fixed_diameter = 0.009  # Inner diameter of the Hole8mm asset (9mm); cfg.diameter is the nominal peg size
@@ -204,7 +210,6 @@ class FactoryFlexHoleEnv(FactoryEnv):
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor_cfg)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
 
-        
     @staticmethod
     def quat_to_6d(quat: torch.Tensor) -> torch.Tensor:
         """
@@ -347,38 +352,19 @@ class FactoryFlexHoleEnv(FactoryEnv):
         # Only log at episode boundaries
         if not torch.any(self.reset_buf):
             return
- 
+
+        # Last-frame success rate for all 4 partitions.
         for key in ["train_real", "train_sim", "val_real", "val_sim"]:
-            assert hasattr(self, f"idx_{key}"), f"Missing index slice for key: {key}"
-            num_envs = getattr(self, f"num_{key}")
-            num_success = torch.count_nonzero(curr_successes[getattr(self, f"idx_{key}")]).item()
-            self.extras[f"success_rate_{key}"] = num_success / max(num_envs, 1)
-
-        # "Any time during rollout" success: was the env ever successful during this episode?
-        # super()._log_factory_metrics() already updated ep_succeeded for the current step,
-        # so self.ep_succeeded[idx] == 1 iff success occurred at any point this episode.
-        for key in ["val_real", "val_sim"]:
             idx = getattr(self, f"idx_{key}")
-            num_envs = getattr(self, f"num_{key}")
-            num_any_success = torch.count_nonzero(self.ep_succeeded[idx]).item()
-            self.extras[f"success_rate_{key}_any"] = num_any_success / max(num_envs, 1)
-
-        # DEBUG: Log physical measurements for val partitions to verify metric correctness
-        # held_base_pos, _ = factory_utils.get_held_base_pose(
-        #     self.held_pos, self.held_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
-        # )
-        # target_held_base_pos, _ = factory_utils.get_target_held_base_pose(
-        #     self.fixed_pos, self.fixed_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device,
-        # )
-        # xy_dist = torch.linalg.vector_norm(target_held_base_pos[:, 0:2] - held_base_pos[:, 0:2], dim=1)
-        # z_disp = held_base_pos[:, 2] - target_held_base_pos[:, 2]
-        # height_threshold = self.cfg_task.fixed_asset_cfg.height * self.cfg_task.success_threshold
+            num_success = curr_successes[idx].sum().item()
+            self.extras[f"success_rate_{key}"] = num_success / max(idx.numel(), 1)
 
         # Update budget usage based on completed episodes
-        num_done_sim = torch.count_nonzero(self.reset_buf[self.idx_train_sim]).item()
-        num_done_real = torch.count_nonzero(self.reset_buf[self.idx_train_real]).item()
-        self.sim_budget_used += num_done_sim * float(self.sim_budget)
-        self.real_budget_used += num_done_real * float(self.real_budget)
+        # Budget is a bit useless at this moment
+        done_sim = self.reset_buf[self.idx_train_sim].sum().item()
+        done_real = self.reset_buf[self.idx_train_real].sum().item()
+        self.sim_budget_used += done_sim * self.sim_budget
+        self.real_budget_used += done_real * self.real_budget
         self.total_budget_used = self.sim_budget_used + self.real_budget_used
 
         self.extras["budget/sim_used"] = self.sim_budget_used
