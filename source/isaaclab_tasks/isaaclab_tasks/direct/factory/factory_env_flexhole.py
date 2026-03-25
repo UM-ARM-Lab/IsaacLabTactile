@@ -74,12 +74,6 @@ class FactoryFlexHoleEnv(FactoryEnv):
 
         super().__init__(cfg, render_mode, **kwargs)
 
-        # When self.device is available after super(), run this
-        self._init_partitions()
-        self._init_scales()
-        # Apply per-environment hole scaling via USD API
-        self._apply_flex_hole_scales()
-
         # Adjust the computed observation_space and state_space for 6D quaternions
         self.cfg.observation_space += self._obs_quat_adjustment
         self.cfg.state_space += self._state_quat_adjustment
@@ -196,6 +190,11 @@ class FactoryFlexHoleEnv(FactoryEnv):
         self.scene.clone_environments(copy_from_source=False)
         if self.device == "cpu":
             self.scene.filter_collisions()
+
+        # Apply per-environment hole scaling via USD API
+        self._init_partitions()
+        self._init_scales()
+        self._apply_flex_hole_scales()
 
         # Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
