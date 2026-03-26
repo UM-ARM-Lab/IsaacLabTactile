@@ -144,12 +144,12 @@ class FactoryFlexHoleEnv(FactoryEnv):
         from pxr import Gf
 
         stage = get_current_stage()
-        # Apply both
         real_gp = (self.idx_real.tolist(), self._real_fixed_asset_scale)
         sim_gp = (self.idx_sim.tolist(), self._sim_fixed_asset_scale)
         for idx_list, scale in [real_gp, sim_gp]:
             for i in idx_list:
-                fixed_asset = stage.GetPrimAtPath(f"/World/envs/env_{i}/FixedAsset")
+                prim_path = f"/World/envs/env_{i}/FixedAsset"
+                fixed_asset = stage.GetPrimAtPath(prim_path)
                 fixed_asset.GetAttribute("xformOp:scale").Set(Gf.Vec3f(scale, scale, 1.0))
 
     def _setup_scene(self):
@@ -187,7 +187,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
             self.scene.articulations["large_gear"] = self._large_gear_asset
 
         # Copy environment
-        self.scene.clone_environments(copy_from_source=False)
+        self.scene.clone_environments(copy_from_source=True)
         if self.device == "cpu":
             self.scene.filter_collisions()
 

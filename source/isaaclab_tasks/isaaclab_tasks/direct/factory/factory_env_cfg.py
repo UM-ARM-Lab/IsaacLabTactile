@@ -140,7 +140,12 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     )
 
     # Note: clone_in_fabric=False is required when using TiledCamera, as sensors use USD stage traversal
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=2.0, clone_in_fabric=False)
+    # replicate_physics=False: required for per-env hole scale variation. With replicate_physics=True (default),
+    # Isaac Lab replicates env_0's PhysX shapes to all envs at clone time, before _apply_flex_hole_scales() runs,
+    # so all envs get the same (unscaled) collision geometry regardless of xformOp:scale overrides.
+    # With replicate_physics=False, each env initializes its own physics from its USD prims at sim.reset(),
+    # after scales have been applied, giving correct per-env collision geometry.
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=2.0, clone_in_fabric=False, replicate_physics=False)
 
     robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
