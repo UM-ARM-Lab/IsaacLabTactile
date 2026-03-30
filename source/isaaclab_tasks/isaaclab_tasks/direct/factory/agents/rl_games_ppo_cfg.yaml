@@ -87,6 +87,10 @@ params:
     tactile_pointmae:
       # checkpoint: "/home/fanyang/github/tactile_transfer/outputs/point_mae_pc/point_mae_epoch_0050.pth"
       checkpoint: null  # set to null to disable Point-MAE
+      # Optional: Sinkhorn-trained point-latent projector (tactile_transfer/script/train_point_latent_projection_sinkhorn.py).
+      # When set, the pooled PointMAE latent is passed through this MLP before concatenation (same embed_dim).
+      # sinkhorn_projection_checkpoint: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0007_eps_002/point_latent_projection_epoch_2000.pth
+      sinkhorn_projection_checkpoint: null
       pc_keys:
         - tactile_pc_left_w
         - tactile_pc_right_w
@@ -96,6 +100,49 @@ params:
         left_wrench: fingertip_wrench_left
         right_force: fingertip_force_right
         right_wrench: fingertip_wrench_right
+
+    # Tactile-image MAE encoder configuration (optional).
+    # When enabled during training, a pooled tactile-image latent is concatenated
+    # to vector observations for policy conditioning.
+    tactile_image_mae:
+      # Path to tactile-image MAE checkpoint (.pth). Set to null to disable.
+      # checkpoint: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/tactile_image_mae_epoch_0200.pth
+      checkpoint: null
+      # Key name in `obs_dict` if present (wrapper also supports reading directly from env).
+      tactile_obs_key: tactile
+
+    # Rectified-flow latent OT: direction is read from the transfer checkpoint (`direction` key).
+    # This is appended to vector observations at play time in `rl_games/play.py`.
+    tactile_transfer_latent_ot:
+      # Path to rectified-flow latent OT checkpoint (.pt). If null, the wrapper is disabled.
+      transfer_checkpoint: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0002_high_eps_skip_norm/rectified_flow_latent_epoch_5000.pth
+      # transfer_checkpoint: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0005_skip_norm_img2pc/rectified_flow_latent_epoch_5000.pth
+      # transfer_checkpoint: null
+      # Path to tactile-image MAE checkpoint (.pth).
+      # image_mae_checkpoint: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/tactile_image_mae_epoch_0200.pth
+      image_mae_checkpoint: null
+      # For pc_to_image checkpoints: Point-MAE checkpoint.
+      point_mae_checkpoint: /home/fanyang/github/tactile_transfer/outputs/point_mae_pc/point_mae_epoch_0050.pth
+      # point_mae_checkpoint: null
+      # Point-cloud gather keys used when the transfer checkpoint direction is pc_to_image.
+      pc_keys:
+        - tactile_pc_left_w
+        - tactile_pc_right_w
+        - tactile_pc_peg_w
+      force_keys:
+        left_force: fingertip_force_left
+        left_wrench: fingertip_wrench_left
+        right_force: fingertip_force_right
+        right_wrench: fingertip_wrench_right
+      # Optional (pc_to_image only): projection MLP checkpoint trained by
+      # tactile_transfer/script/train_point_latent_projection_sinkhorn.py.
+      # If null, no post-PointMAE projection is applied.
+      point_latent_projection_checkpoint: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0007_eps_002/point_latent_projection_epoch_2000.pth
+      # point_latent_projection_checkpoint: null
+      # Key name in `obs_dict` if present (wrapper also supports reading directly from env).
+      tactile_obs_key: tactile
+      # Euler steps used to integrate the learned latent flow.
+      euler_steps: 32
 
   config:
     name: Factory
@@ -118,7 +165,7 @@ params:
     schedule_type: standard
     kl_threshold: 0.008
     score_to_win: 20000
-    max_epochs: 1500
+    max_epochs: 500
     save_best_after: 10
     save_frequency: 20
     print_stats: True

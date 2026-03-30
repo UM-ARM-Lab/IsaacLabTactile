@@ -111,9 +111,15 @@ from isaaclab_rl.rl_games import MultiObserver, PbtAlgoObserver, RlGamesGpuEnv, 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-from tactile_transfer.rl_pointmae_wrapper import (
+from tactile_transfer.model.point_latent_projection import load_point_latent_projection_from_checkpoint
+from tactile_transfer.utils.rl_pointmae_wrapper import (
     PointMAEObsWrapper,
     load_pointmae_encoder_from_checkpoint,
+)
+from tactile_transfer.utils.rl_pointmae_sinkhorn_projection_wrapper import PointMAEObsWithSinkhornProjectionWrapper
+from tactile_transfer.utils.rl_tactile_image_mae_wrapper import (
+    TactileImageMAEObsWrapper,
+    load_tactile_image_mae_encoder_from_checkpoint,
 )
 
 # PLACEHOLDER: Extension template (do not remove this comment)
@@ -594,8 +600,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     tactile_pointmae_cfg = task_overrides.get("tactile_pointmae", {})
     pointmae_checkpoint = tactile_pointmae_cfg.get("checkpoint")
     use_pointmae = pointmae_checkpoint is not None and pointmae_checkpoint != "null"
+    sinkhorn_projection_ckpt = tactile_pointmae_cfg.get("sinkhorn_projection_checkpoint")
+    use_sinkhorn_projection = sinkhorn_projection_ckpt is not None and str(sinkhorn_projection_ckpt) != "null"
+    if use_sinkhorn_projection and not use_pointmae:
+        raise ValueError(
+            "task_overrides.tactile_pointmae.sinkhorn_projection_checkpoint is set but "
+            "tactile_pointmae.checkpoint is missing. Sinkhorn projection applies on top of Point-MAE latents."
+        )
 
     pointmae_model = None
+    pointmae_sinkhorn_projection = None
     if use_pointmae:
         mae_device = torch.device(rl_device if torch.cuda.is_available() else "cpu")
         pointmae_model = load_pointmae_encoder_from_checkpoint(
@@ -603,6 +617,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             mae_device,
             tactile_pointmae_cfg,
         )
+        if use_sinkhorn_projection:
+            pointmae_sinkhorn_projection = load_point_latent_projection_from_checkpoint(
+                sinkhorn_projection_ckpt,
+                mae_device,
+                expected_latent_dim=int(pointmae_model.cfg.embed_dim),
+            )
 
         # Ensure env is configured to produce the observations PointMAE expects.
         if hasattr(env_cfg, "include_contact_forces"):
@@ -616,11 +636,45 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         print("[INFO] Point-MAE encoder ENABLED:")
         print(f"  - Checkpoint: {pointmae_checkpoint}")
+        if use_sinkhorn_projection:
+            print(f"  - Sinkhorn point-latent projection: {sinkhorn_projection_ckpt}")
         print(f"  - force_share_with_patches: {getattr(pointmae_model.cfg, 'force_share_with_patches', None)}")
         print(f"  - include_contact_forces: {getattr(env_cfg, 'include_contact_forces', None)}")
         print(f"  - include_tactile_pointclouds: {getattr(env_cfg, 'include_tactile_pointclouds', None)}")
     else:
         print("[INFO] Point-MAE encoder DISABLED - training without Point-MAE tactile encoding")
+
+    # Tactile-image MAE encoder configuration
+    tactile_image_mae_cfg = task_overrides.get("tactile_image_mae", {})
+    image_mae_checkpoint = tactile_image_mae_cfg.get("checkpoint")
+    tactile_image_obs_key = tactile_image_mae_cfg.get("tactile_obs_key", "tactile")
+    use_tactile_image_mae = image_mae_checkpoint is not None and image_mae_checkpoint != "null"
+
+    image_mae_model = None
+    if use_tactile_image_mae:
+        mae_device = torch.device(rl_device if torch.cuda.is_available() else "cpu")
+        image_mae_model = load_tactile_image_mae_encoder_from_checkpoint(
+            image_mae_checkpoint,
+            mae_device,
+        )
+
+        # Ensure tactile sensor stream is enabled when image MAE wrapper is active.
+        if hasattr(env_cfg, "enable_tactile_sensor"):
+            env_cfg.enable_tactile_sensor = True
+
+        print("[INFO] Tactile-image MAE encoder ENABLED:")
+        print(f"  - Checkpoint: {image_mae_checkpoint}")
+        print(f"  - tactile_obs_key: {tactile_image_obs_key}")
+        print(f"  - latent_dim: {getattr(image_mae_model.cfg, 'encoder_embed_dim', None)}")
+        print(f"  - enable_tactile_sensor: {getattr(env_cfg, 'enable_tactile_sensor', None)}")
+    else:
+        print("[INFO] Tactile-image MAE encoder DISABLED - training without tactile-image MAE encoding")
+
+    if use_pointmae and use_tactile_image_mae:
+        raise ValueError(
+            "Both 'tactile_pointmae' and 'tactile_image_mae' are enabled. "
+            "Choose only one because both append latent embeddings to vector observations."
+        )
 
     # create isaac environment
     base_env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -644,11 +698,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # Wrap with Point-MAE observation wrapper if enabled
     if use_pointmae and pointmae_model is not None:
-        env = PointMAEObsWrapper(
+        mae_wrap_device = torch.device(rl_device if torch.cuda.is_available() else "cpu")
+        if pointmae_sinkhorn_projection is not None:
+            env = PointMAEObsWithSinkhornProjectionWrapper(
+                env,
+                pointmae_model,
+                mae_wrap_device,
+                tactile_pointmae_cfg,
+                pointmae_sinkhorn_projection,
+            )
+        else:
+            env = PointMAEObsWrapper(
+                env,
+                pointmae_model,
+                mae_wrap_device,
+                tactile_pointmae_cfg,
+            )
+    elif use_tactile_image_mae and image_mae_model is not None:
+        env = TactileImageMAEObsWrapper(
             env,
-            pointmae_model,
-            torch.device(rl_device if torch.cuda.is_available() else "cpu"),
-            tactile_pointmae_cfg,
+            image_mae=image_mae_model,
+            device=torch.device(rl_device if torch.cuda.is_available() else "cpu"),
+            tactile_obs_key=tactile_image_obs_key,
         )
 
     # wrap for video recording
