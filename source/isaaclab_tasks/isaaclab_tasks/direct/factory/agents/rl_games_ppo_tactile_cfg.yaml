@@ -123,28 +123,46 @@ params:
       # Otherwise, only transfer tactile images.
       decode_observations: False  # Set to true to transfer both tactile and vector observations
 
-    # Point-MAE tactile point cloud encoder configuration
-    # If checkpoint is provided, point clouds and fingertip forces/wrenches will be encoded
-    # into a latent token that is concatenated to the vector observations before entering
-    # the policy network.
-    tactile_pointmae:
-      # Path to Point-MAE checkpoint (.pth) saved by tactile_transfer/script/train_point_mae.py.
-      # Set to null to disable the Point-MAE encoder during RL training.
-      checkpoint: null  # e.g., "/home/fanyang/github/tactile_transfer/outputs/point_mae_pc/point_mae_epoch_0100.pth"
-      # Names of observation dictionary entries that contain the tactile point clouds.
-      # For the factory peg insertion task with TacSL point clouds enabled, these keys
-      # will be provided by the environment; adjust if your task uses different names.
+    # -------------------------------------------------------------------------
+    # Tactile observation wrapper (refactored)
+    #
+    # Choose ONE wrapper to append a latent token to the policy's vector observations.
+    # Options:
+    # - null      : no additional tactile latent conditioning
+    # - mae       : tactile-image MAE pooled latent
+    # - point_mae : tactile point-cloud Point-MAE pooled latent (optional projection)
+    # - ot        : rectified-flow latent OT (direction comes from OT checkpoint)
+    #
+    # Checkpoints are listed once under `checkpoints` and are shared across wrappers.
+    # `use_projection` applies when name == "point_mae", and also for name == "ot"
+    # when OT checkpoint direction is pc_to_image.
+    tactile_obs_wrapper:
+      name: null  # one of: null, mae, point_mae, ot
+      use_projection: false
+      checkpoints:
+        # Point-MAE checkpoint (.pth) saved by tactile_transfer/script/train_point_mae.py
+        point_mae: null
+        # Tactile-image MAE checkpoint (.pth) saved by tactile_transfer/script/train_tactile_image_mae.py
+        mae: null
+        # Rectified-flow latent OT checkpoint (.pth) saved by tactile_transfer/script/train_rectified_flow_latent_ot.py
+        ot: null
+        # Optional: point-latent projection MLP checkpoint (.pth) saved by
+        # tactile_transfer/script/train_point_latent_projection_sinkhorn.py
+        projection: null
+      # Common observation key for tactile images (used by "mae" and OT when direction=image_to_pc)
+      tactile_obs_key: tactile
+      # Point-cloud gather settings (used by "point_mae" and OT when direction=pc_to_image)
       pc_keys:
         - tactile_pc_left_w
         - tactile_pc_right_w
         - tactile_pc_peg_w
-      # Names of observation entries for fingertip forces and wrenches used to build the
-      # force token expected by PointMAE (shape 18 = fL(3)+wL(6)+fR(3)+wR(6)).
       force_keys:
         left_force: fingertip_force_left
         left_wrench: fingertip_wrench_left
         right_force: fingertip_force_right
         right_wrench: fingertip_wrench_right
+      # OT integration settings (only used when name == "ot")
+      ot_euler_steps: 32
 
   config:
     name: Factory_Tactile
