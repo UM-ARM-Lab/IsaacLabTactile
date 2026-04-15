@@ -216,6 +216,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         },
     )
 
+    # Camera usage flags
+    use_obs_camera: bool = False
     # Observation camera configuration (V3 from old config)
     obs_camera_cfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/DepthCamera",
@@ -229,9 +231,6 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         width=224,
         height=224,
     )
-
-    # Camera usage flags
-    use_obs_camera: bool = False
 
     # Contact sensor configuration
     contact_filter_path = [

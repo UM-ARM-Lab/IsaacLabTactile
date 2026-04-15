@@ -200,17 +200,7 @@ class FactoryEnv(DirectRLEnv):
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
-
         prev_actions = self.actions.clone()
-
-        # obs_dict = {
-        #     "fingertip_pos": self.fingertip_midpoint_pos,
-        #     "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - noisy_fixed_pos,
-        #     "fingertip_quat": self.fingertip_midpoint_quat,
-        #     "ee_linvel": self.ee_linvel_fd,
-        #     "ee_angvel": self.ee_angvel_fd,
-        #     "prev_actions": prev_actions,
-        # }
 
         obs_dict = {
             "held_pos_rel_fixed": self.held_pos - self.fixed_pos_obs_frame,

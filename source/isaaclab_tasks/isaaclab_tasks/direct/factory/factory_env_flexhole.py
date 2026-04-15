@@ -243,6 +243,7 @@ class FactoryFlexHoleEnv(FactoryEnv):
         Returns all environments' observations.
         """
         obs_dict, state_dict, collect_dict = super()._get_factory_obs_state_dict()
+
         # Replace quaternion keys with 6D representation
         for d in [obs_dict, state_dict, collect_dict]:
             for key in d.keys():
@@ -252,8 +253,15 @@ class FactoryFlexHoleEnv(FactoryEnv):
         obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
 
-        # Store collection observations for data collection
-        self.collect_obs = torch.cat([collect_dict[key] for key in collect_dict.keys()], dim=-1)
+        # Compute low dim state
+        low_dim_state = torch.cat([collect_dict[key] for key in collect_dict.keys()], dim=-1)
+        # self.collect_obs = {"low_dim_state": low_dim_state,}
+        self.collect_obs = low_dim_state  # For backward compatibility with data collection code that expects tensor instead of dict
+
+        # TODO: make observations contained in environment, later, not now.
+        # # If use rgb
+        # if self.cfg.use_obs_camera:
+        #     obs_frame = self.obs_cam.data.output["rgb"].clone(), "b h w c -> b c h w")
 
         return {"policy": obs_tensors, "critic": state_tensors}
 
