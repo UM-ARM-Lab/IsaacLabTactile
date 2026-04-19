@@ -253,10 +253,13 @@ class FactoryFlexHoleEnv(FactoryEnv):
         obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
 
+        # Unified observation: train the dynamics model on the same tensor the policy sees.
+        self.obs_tensor = obs_tensors
+
         # Compute low dim state
-        low_dim_state = torch.cat([collect_dict[key] for key in collect_dict.keys()], dim=-1)
+        # low_dim_state = torch.cat([collect_dict[key] for key in collect_dict.keys()], dim=-1)
         # self.collect_obs = {"low_dim_state": low_dim_state,}
-        self.collect_obs = low_dim_state  # For backward compatibility with data collection code that expects tensor instead of dict
+        # self.collect_obs = low_dim_state  # For backward compatibility with data collection code that expects tensor instead of dict
 
         # TODO: make observations contained in environment, later, not now.
         # # If use rgb
