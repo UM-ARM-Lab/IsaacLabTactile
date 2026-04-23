@@ -242,10 +242,10 @@ class FactoryFlexHoleEnv(FactoryEnv):
 
         Returns all environments' observations.
         """
-        obs_dict, state_dict, collect_dict = super()._get_factory_obs_state_dict()
+        obs_dict, state_dict = super()._get_factory_obs_state_dict()
 
         # Replace quaternion keys with 6D representation
-        for d in [obs_dict, state_dict, collect_dict]:
+        for d in [obs_dict, state_dict]:
             for key in d.keys():
                 if key.endswith("_quat"):
                     d[key] = self.quat_to_6d(d[key])

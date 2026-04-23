@@ -213,17 +213,6 @@ class FactoryEnv(DirectRLEnv):
             "prev_actions": prev_actions,
         }
 
-        # Collection dict for data collection
-        collect_dict = {
-            "held_pos_rel_fixed": self.held_pos - self.fixed_pos_obs_frame,
-            "held_quat": self.held_quat,
-            "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - noisy_fixed_pos,
-            "fingertip_quat": self.fingertip_midpoint_quat,
-            "ee_linvel": self.ee_linvel_fd,
-            "ee_angvel": self.ee_angvel_fd,
-            "prev_actions": prev_actions,
-        }
-
         state_dict = {
             "fingertip_pos": self.fingertip_midpoint_pos,
             "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - self.fixed_pos_obs_frame,
@@ -241,17 +230,14 @@ class FactoryEnv(DirectRLEnv):
             "rot_threshold": self.rot_threshold,
             "prev_actions": prev_actions,
         }
-        return obs_dict, state_dict, collect_dict
+        return obs_dict, state_dict # , collect_dict
 
     def _get_observations(self):
         """Get actor/critic inputs using asymmetric critic."""
-        obs_dict, state_dict, collect_dict = self._get_factory_obs_state_dict()
+        obs_dict, state_dict = self._get_factory_obs_state_dict()
 
         obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
-
-        # Store collection observations for data collection
-        self.collect_obs = torch.cat([collect_dict[key] for key in collect_dict.keys()], dim=-1)
 
         return {"policy": obs_tensors, "critic": state_tensors}
 
