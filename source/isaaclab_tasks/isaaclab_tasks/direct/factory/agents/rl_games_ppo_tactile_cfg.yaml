@@ -105,24 +105,6 @@ params:
     # When enabled, adds held object position relative to fixed asset and held object orientation to policy observations
     include_held_asset_obs: False  # Set to true to include held_pos_rel_fixed and held_quat in observations
     
-    # Tactile transfer configuration
-    # If transfer_checkpoint is provided, observations will be transferred before being saved to replay buffer
-    # This enables training with transferred observations (e.g., simulating real data during training)
-    tactile_transfer:
-      # Path to tactile transfer model checkpoint (.pt). Set to null to disable transfer.
-      # If null, training proceeds without transfer (observations saved as-is to replay buffer).
-      # transfer_checkpoint: "/home/fanyang/github/tactile_transfer/outputs/2026-01-18_21-33-55_0059_peg_real_dynamics_small_transfer_w_peg_pose/best_model.pt"  # e.g., "/path/to/tactile_transfer/outputs/.../best_model.pt"
-      # transfer_checkpoint: null  # e.g., "/path/to/tactile_transfer/outputs/.../best_model.pt"
-      transfer_checkpoint: null
-      # transfer_checkpoint: "/home/fanyang/github/tactile_transfer/outputs/2026-01-17_15-24-42_0055_peg_real_dynamics_small_transfer_vis/best_model.pt"
-      # Direction of transfer: A_to_B (use model_A) or B_to_A (use model_B)
-      # A_to_B: Transfer from domain A to domain B (e.g., sim to real)
-      # B_to_A: Transfer from domain B to domain A (e.g., real to sim)
-      transfer_direction: A_to_B  # Options: "A_to_B" or "B_to_A"
-      # If enabled, transfer both tactile images and vector observations.
-      # Otherwise, only transfer tactile images.
-      decode_observations: False  # Set to true to transfer both tactile and vector observations
-
     # -------------------------------------------------------------------------
     # Tactile observation wrapper (refactored)
     #
@@ -134,11 +116,13 @@ params:
     # - ot        : rectified-flow latent OT (direction comes from OT checkpoint)
     #
     # Checkpoints are listed once under `checkpoints` and are shared across wrappers.
-    # `use_projection` applies when name == "point_mae", and also for name == "ot"
-    # when OT checkpoint direction is pc_to_image.
+    # `use_projection` applies when name == "point_mae", and also for name == "ot".
+    # For OT, projection is applied on whichever source latent branch the projection
+    # checkpoint was trained on ("point" or "image").
     tactile_obs_wrapper:
       name: null  # one of: null, mae, point_mae, ot
       use_projection: false
+      projection_source_latent: null  # optional override/validation: point|image; null auto-detects from projection ckpt
       checkpoints:
         # Point-MAE checkpoint (.pth) saved by tactile_transfer/script/train_point_mae.py
         point_mae: null
