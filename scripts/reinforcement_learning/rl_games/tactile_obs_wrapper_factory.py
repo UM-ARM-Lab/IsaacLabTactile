@@ -14,6 +14,7 @@ class TactileObsWrapperSpec:
     force_keys: dict[str, str]
     ot_euler_steps: int
     use_projection: bool
+    projection_source_latent: str | None
     ckpt_point_mae: str | None
     ckpt_mae: str | None
     ckpt_ot: str | None
@@ -41,6 +42,14 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
     force_keys = dict(wrapper_cfg.get("force_keys") or {})
     ot_euler_steps = int(wrapper_cfg.get("ot_euler_steps", 32))
     use_projection = bool(wrapper_cfg.get("use_projection", False))
+    projection_source_latent = wrapper_cfg.get("projection_source_latent")
+    if projection_source_latent is not None:
+        projection_source_latent = str(projection_source_latent).lower()
+        if projection_source_latent not in ("point", "image"):
+            raise ValueError(
+                "tactile_obs_wrapper.projection_source_latent must be 'point' or 'image' "
+                f"when set, got {projection_source_latent!r}"
+            )
     ckpts = dict(wrapper_cfg.get("checkpoints") or {})
     return TactileObsWrapperSpec(
         name=name,
@@ -49,6 +58,7 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         force_keys=force_keys,
         ot_euler_steps=ot_euler_steps,
         use_projection=use_projection,
+        projection_source_latent=projection_source_latent,
         ckpt_point_mae=str(ckpts.get("point_mae")) if _is_enabled_path(ckpts.get("point_mae")) else None,
         ckpt_mae=str(ckpts.get("mae")) if _is_enabled_path(ckpts.get("mae")) else None,
         ckpt_ot=str(ckpts.get("ot")) if _is_enabled_path(ckpts.get("ot")) else None,
@@ -72,8 +82,9 @@ def build_tactile_obs_wrapper(
     name = spec.name
 
     # Lazy imports to keep the train/play scripts lightweight at import time.
-    from tactile_transfer.model.point_latent_projection import (  # noqa: WPS433
+    from tactile_transfer.model import (  # noqa: WPS433
         load_point_latent_projection_from_checkpoint,
+        load_projection_input_norm,
     )
     from tactile_transfer.utils.rl_pointmae_sinkhorn_projection_wrapper import (  # noqa: WPS433
         PointMAEObsWithSinkhornProjectionWrapper,
@@ -190,8 +201,30 @@ def build_tactile_obs_wrapper(
         # Load the source encoder based on direction (checkpoint path comes from shared checkpoints).
         image_mae = None
         point_mae = None
-        point_latent_projection = None
+        latent_projection = None
+        latent_projection_source = None
         pc_gather_cfg = None
+
+        if spec.use_projection:
+            if spec.ckpt_projection is None:
+                raise ValueError(
+                    "tactile_obs_wrapper.use_projection=true requires checkpoints.projection when name='ot'"
+                )
+            latent_projection = load_point_latent_projection_from_checkpoint(
+                spec.ckpt_projection,
+                wrap_device,
+                expected_latent_dim=latent_dim,
+            )
+            projection_ckpt = torch.load(spec.ckpt_projection, map_location="cpu")
+            projection_meta = load_projection_input_norm(projection_ckpt)
+            latent_projection_source = str(projection_meta["source_latent"]).lower()
+            if spec.projection_source_latent is not None:
+                if spec.projection_source_latent != latent_projection_source:
+                    raise ValueError(
+                        "tactile_obs_wrapper.projection_source_latent does not match projection checkpoint: "
+                        f"cfg={spec.projection_source_latent!r} vs ckpt={latent_projection_source!r}"
+                    )
+                latent_projection_source = spec.projection_source_latent
 
         if direction == "image_to_pc":
             if spec.ckpt_mae is None:
@@ -221,17 +254,6 @@ def build_tactile_obs_wrapper(
             point_mae = load_pointmae_encoder_from_checkpoint(spec.ckpt_point_mae, wrap_device, point_cfg)
             if int(point_mae.cfg.embed_dim) != latent_dim:
                 raise ValueError(f"Point-MAE embed_dim={int(point_mae.cfg.embed_dim)} != OT latent_dim={latent_dim}.")
-            if spec.use_projection:
-                if spec.ckpt_projection is None:
-                    raise ValueError(
-                        "tactile_obs_wrapper.use_projection=true requires checkpoints.projection "
-                        "when name='ot' and checkpoint direction is pc_to_image"
-                    )
-                point_latent_projection = load_point_latent_projection_from_checkpoint(
-                    spec.ckpt_projection,
-                    wrap_device,
-                    expected_latent_dim=latent_dim,
-                )
             pc_gather_cfg = {"pc_keys": list(spec.pc_keys), "force_keys": dict(spec.force_keys)}
 
         # Proprio stats (source-side) for normalization.
@@ -264,7 +286,8 @@ def build_tactile_obs_wrapper(
             prediction_target=prediction_target,
             direction=direction,
             point_mae=point_mae,
-            point_latent_projection=point_latent_projection,
+            latent_projection=latent_projection,
+            latent_projection_source=latent_projection_source,
             pc_gather_cfg=pc_gather_cfg,
             proprio_src_mean=proprio_mean,
             proprio_src_std=proprio_std,
