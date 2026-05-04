@@ -147,6 +147,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # Call update_env_params() again to apply the change to obs_order
             env_cfg.update_env_params()
 
+        # Override include_prev_actions flag if specified
+        include_prev_actions = task_overrides.get("include_prev_actions", None)
+        if include_prev_actions is not None:
+            # Initialize params structure if needed
+            if env_cfg.params is None:
+                env_cfg.params = OmegaConf.create({})
+            if "env" not in env_cfg.params:
+                env_cfg.params["env"] = OmegaConf.create({})
+            env_cfg.params["env"]["include_prev_actions"] = include_prev_actions
+            print(f"[INFO] Setting include_prev_actions to {include_prev_actions}")
+            env_cfg.update_env_params()
+
     if args_cli.device is not None:
         agent_cfg["params"]["config"]["device"] = args_cli.device
     # randomly sample a seed if seed = -1

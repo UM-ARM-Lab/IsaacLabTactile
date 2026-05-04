@@ -13,7 +13,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from isaaclab.utils.math import axis_angle_from_quat
+from isaaclab.utils.math import axis_angle_from_quat, matrix_from_quat
 from isaaclab.sensors import VisuoTactileSensor
 from . import factory_utils
 from .factory_env import FactoryEnv
@@ -176,10 +176,14 @@ class TestEnv(FactoryEnv):
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic (without asset references)."""
         prev_actions = self.actions.clone()
+        fingertip_rot_mat = matrix_from_quat(self.fingertip_midpoint_quat)
+        # 6D orientation representation using the first two rotation matrix columns.
+        fingertip_orn_6d = torch.cat((fingertip_rot_mat[:, :, 0], fingertip_rot_mat[:, :, 1]), dim=-1)
 
         obs_dict = {
             "fingertip_pos": self.fingertip_midpoint_pos,
             "fingertip_quat": self.fingertip_midpoint_quat,
+            "fingertip_orn_6d": fingertip_orn_6d,
             "ee_linvel": self.ee_linvel_fd,
             "ee_angvel": self.ee_angvel_fd,
             "gripper_pos": self.joint_pos[:, 7:9],
@@ -189,6 +193,7 @@ class TestEnv(FactoryEnv):
         state_dict = {
             "fingertip_pos": self.fingertip_midpoint_pos,
             "fingertip_quat": self.fingertip_midpoint_quat,
+            "fingertip_orn_6d": fingertip_orn_6d,
             "ee_linvel": self.fingertip_midpoint_linvel,
             "ee_angvel": self.fingertip_midpoint_angvel,
             "joint_pos": self.joint_pos[:, 0:7],

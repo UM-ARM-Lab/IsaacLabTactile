@@ -116,13 +116,13 @@ params:
     # - ot        : rectified-flow latent OT (direction comes from OT checkpoint)
     #
     # Checkpoints are listed once under `checkpoints` and are shared across wrappers.
-    # `use_projection` applies when name == "point_mae", and also for name == "ot".
+    # `use_projection` applies when name == "mae", "point_mae", and also for name == "ot".
     # For OT, projection is applied on whichever source latent branch the projection
     # checkpoint was trained on ("point" or "image").
     tactile_obs_wrapper:
       name: null  # one of: null, mae, point_mae, ot
       use_projection: false
-      projection_source_latent: null  # optional override/validation: point|image; null auto-detects from projection ckpt
+      projection_source_latent: null  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
       checkpoints:
         # Point-MAE checkpoint (.pth) saved by tactile_transfer/script/train_point_mae.py
         point_mae: null

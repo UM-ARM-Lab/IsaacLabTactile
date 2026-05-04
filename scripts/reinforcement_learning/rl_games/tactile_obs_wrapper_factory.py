@@ -19,6 +19,9 @@ class TactileObsWrapperSpec:
     ckpt_mae: str | None
     ckpt_ot: str | None
     ckpt_projection: str | None
+    latent_noise_enable: bool
+    latent_noise_std_min: float
+    latent_noise_std_max: float
 
 
 def _is_enabled_path(p: Any) -> bool:
@@ -45,11 +48,17 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
     projection_source_latent = wrapper_cfg.get("projection_source_latent")
     if projection_source_latent is not None:
         projection_source_latent = str(projection_source_latent).lower()
-        if projection_source_latent not in ("point", "image"):
-            raise ValueError(
-                "tactile_obs_wrapper.projection_source_latent must be 'point' or 'image' "
-                f"when set, got {projection_source_latent!r}"
-            )
+    latent_noise_cfg = dict(wrapper_cfg.get("latent_noise") or {})
+    latent_noise_enable = bool(latent_noise_cfg.get("enable", False))
+    latent_noise_std_range = latent_noise_cfg.get("std_range")
+    if not isinstance(latent_noise_std_range, (list, tuple)) or len(latent_noise_std_range) != 2:
+        raise ValueError("tactile_obs_wrapper.latent_noise.std_range is required and must be [min, max].")
+    latent_noise_std_min = float(latent_noise_std_range[0])
+    latent_noise_std_max = float(latent_noise_std_range[1])
+    if latent_noise_std_min < 0.0 or latent_noise_std_max < 0.0:
+        raise ValueError("tactile_obs_wrapper.latent_noise std bounds must be non-negative.")
+    if latent_noise_std_min > latent_noise_std_max:
+        raise ValueError("tactile_obs_wrapper.latent_noise.std_range must satisfy min <= max.")
     ckpts = dict(wrapper_cfg.get("checkpoints") or {})
     return TactileObsWrapperSpec(
         name=name,
@@ -63,6 +72,9 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         ckpt_mae=str(ckpts.get("mae")) if _is_enabled_path(ckpts.get("mae")) else None,
         ckpt_ot=str(ckpts.get("ot")) if _is_enabled_path(ckpts.get("ot")) else None,
         ckpt_projection=str(ckpts.get("projection")) if _is_enabled_path(ckpts.get("projection")) else None,
+        latent_noise_enable=latent_noise_enable,
+        latent_noise_std_min=latent_noise_std_min,
+        latent_noise_std_max=latent_noise_std_max,
     )
 
 
@@ -80,10 +92,9 @@ def build_tactile_obs_wrapper(
     """
     spec = _parse_spec(task_overrides)
     name = spec.name
-
     # Lazy imports to keep the train/play scripts lightweight at import time.
     from tactile_transfer.model import (  # noqa: WPS433
-        load_point_latent_projection_from_checkpoint,
+        load_latent_projection_from_checkpoint,
         load_projection_input_norm,
     )
     from tactile_transfer.utils.rl_pointmae_sinkhorn_projection_wrapper import (  # noqa: WPS433
@@ -109,11 +120,27 @@ def build_tactile_obs_wrapper(
         if hasattr(env_cfg, "enable_tactile_sensor"):
             env_cfg.enable_tactile_sensor = True
         image_mae = load_tactile_image_mae_encoder_from_checkpoint(spec.ckpt_mae, wrap_device)
+        projection = None
+        if spec.use_projection:
+            if spec.ckpt_projection is None:
+                raise ValueError(
+                    "tactile_obs_wrapper.use_projection=true requires checkpoints.projection "
+                    "when name='mae'"
+                )
+            projection = load_latent_projection_from_checkpoint(
+                spec.ckpt_projection,
+                wrap_device,
+                expected_latent_dim=int(image_mae.cfg.encoder_embed_dim),
+            )
         return lambda env: TactileImageMAEObsWrapper(
             env,
             image_mae=image_mae,
             device=wrap_device,
+            projection=projection,
             tactile_obs_key=spec.tactile_obs_key,
+            latent_noise_enable=spec.latent_noise_enable,
+            latent_noise_std_min=spec.latent_noise_std_min,
+            latent_noise_std_max=spec.latent_noise_std_max,
         )
 
     if name == "point_mae":
@@ -141,7 +168,7 @@ def build_tactile_obs_wrapper(
                     "tactile_obs_wrapper.use_projection=true requires checkpoints.projection "
                     "(projection is only supported with point_mae)"
                 )
-            projection = load_point_latent_projection_from_checkpoint(
+            projection = load_latent_projection_from_checkpoint(
                 spec.ckpt_projection,
                 wrap_device,
                 expected_latent_dim=int(point_mae.cfg.embed_dim),
@@ -152,13 +179,30 @@ def build_tactile_obs_wrapper(
                 wrap_device,
                 point_cfg,
                 projection,
+                latent_noise_enable=spec.latent_noise_enable,
+                latent_noise_std_min=spec.latent_noise_std_min,
+                latent_noise_std_max=spec.latent_noise_std_max,
             )
 
-        return lambda env: PointMAEObsWrapper(env, point_mae, wrap_device, point_cfg)
+        return lambda env: PointMAEObsWrapper(
+            env,
+            point_mae,
+            wrap_device,
+            point_cfg,
+            latent_noise_enable=spec.latent_noise_enable,
+            latent_noise_std_min=spec.latent_noise_std_min,
+            latent_noise_std_max=spec.latent_noise_std_max,
+        )
 
     if name == "ot":
         if spec.ckpt_ot is None:
             raise ValueError("tactile_obs_wrapper.name='ot' requires checkpoints.ot")
+
+        if spec.projection_source_latent is not None and spec.projection_source_latent not in ("point", "image"):
+            raise ValueError(
+                "tactile_obs_wrapper.projection_source_latent must be 'point' or 'image' "
+                f"when tactile_obs_wrapper.name='ot', got {spec.projection_source_latent!r}"
+            )
 
         # OT wrapper lives in tactile_transfer and needs more modules.
         from tactile_transfer.utils.rl_latent_ot_tactile_image_to_point_latent_wrapper import (  # noqa: WPS433
@@ -210,7 +254,7 @@ def build_tactile_obs_wrapper(
                 raise ValueError(
                     "tactile_obs_wrapper.use_projection=true requires checkpoints.projection when name='ot'"
                 )
-            latent_projection = load_point_latent_projection_from_checkpoint(
+            latent_projection = load_latent_projection_from_checkpoint(
                 spec.ckpt_projection,
                 wrap_device,
                 expected_latent_dim=latent_dim,
@@ -256,24 +300,46 @@ def build_tactile_obs_wrapper(
                 raise ValueError(f"Point-MAE embed_dim={int(point_mae.cfg.embed_dim)} != OT latent_dim={latent_dim}.")
             pc_gather_cfg = {"pc_keys": list(spec.pc_keys), "force_keys": dict(spec.force_keys)}
 
-        # Proprio stats (source-side) for normalization.
-        # Avoid `a or b` here because these values are tensors and cannot be
-        # truth-tested when they contain more than one element.
-        if direction == "image_to_pc":
-            proprio_mean = payload.get("proprio_img_mean")
-            proprio_std = payload.get("proprio_img_std")
-        else:
-            proprio_mean = payload.get("proprio_pc_mean")
-            proprio_std = payload.get("proprio_pc_std")
-        if proprio_mean is None:
-            proprio_mean = payload.get("proprio_src_mean")
-        if proprio_std is None:
-            proprio_std = payload.get("proprio_src_std")
-        if proprio_mean is None or proprio_std is None:
-            raise ValueError("OT checkpoint missing source proprio mean/std (expected proprio_*_mean/std).")
+        proprio_mean = None
+        proprio_std = None
+        if int(velocity_cfg.proprio_dim) > 0:
+            expected_proprio_dim = int(velocity_cfg.proprio_dim)
+            # Proprio stats (source-side) for normalization.
+            # Avoid `a or b` here because these values are tensors and cannot be
+            # truth-tested when they contain more than one element.
+            if direction == "image_to_pc":
+                proprio_mean = payload.get("proprio_img_mean")
+                proprio_std = payload.get("proprio_img_std")
+            else:
+                proprio_mean = payload.get("proprio_pc_mean")
+                proprio_std = payload.get("proprio_pc_std")
+            if proprio_mean is None:
+                proprio_mean = payload.get("proprio_src_mean")
+            if proprio_std is None:
+                proprio_std = payload.get("proprio_src_std")
+            if proprio_mean is None or proprio_std is None:
+                raise ValueError(
+                    "OT checkpoint missing source proprio mean/std (expected proprio_*_mean/std) "
+                    "for proprio-conditioned velocity."
+                )
 
-        proprio_mean = proprio_mean.to(wrap_device).float().reshape(-1)
-        proprio_std = proprio_std.to(wrap_device).float().reshape(-1)
+            proprio_mean = proprio_mean.to(wrap_device).float().reshape(-1)
+            proprio_std = proprio_std.to(wrap_device).float().reshape(-1)
+            if int(proprio_mean.shape[0]) != int(proprio_std.shape[0]):
+                raise ValueError(
+                    f"OT checkpoint proprio mean/std dim mismatch: mean={proprio_mean.shape[0]} "
+                    f"std={proprio_std.shape[0]}."
+                )
+            if int(proprio_mean.shape[0]) < expected_proprio_dim:
+                raise ValueError(
+                    "OT checkpoint proprio stats dim is smaller than velocity proprio_dim: "
+                    f"stats={proprio_mean.shape[0]} expected={expected_proprio_dim}."
+                )
+            if int(proprio_mean.shape[0]) > expected_proprio_dim:
+                # Backward compatibility: older checkpoints may store full vector_obs stats
+                # even when training excluded trailing action dims from conditioning.
+                proprio_mean = proprio_mean[:expected_proprio_dim]
+                proprio_std = proprio_std[:expected_proprio_dim]
 
         wrapper_kwargs = dict(
             image_mae=image_mae,

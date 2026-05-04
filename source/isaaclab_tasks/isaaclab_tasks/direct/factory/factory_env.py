@@ -17,7 +17,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from isaaclab.utils.math import axis_angle_from_quat
+from isaaclab.utils.math import axis_angle_from_quat, matrix_from_quat
 from isaaclab.sensors import VisuoTactileSensor, TiledCamera
 from isaaclab.sensors.contact_sensor import ContactSensor, ContactSensorCfg
 from . import factory_control, factory_utils
@@ -103,7 +103,8 @@ class FactoryEnv(DirectRLEnv):
         # Update number of obs/states
         base_obs_space = sum([OBS_DIM_CFG[obs] for obs in cfg.obs_order])
         cfg.observation_space = base_obs_space
-        cfg.observation_space += cfg.action_space
+        if cfg.include_prev_actions:
+            cfg.observation_space += cfg.action_space
         cfg.state_space = sum([STATE_DIM_CFG[state] for state in cfg.state_order])
         
         # Add action space to both
@@ -245,11 +246,12 @@ class FactoryEnv(DirectRLEnv):
                     (self.num_envs, self.obs_history_length, obs_dim), device=self.device
                 )
             # Add history buffer for actions
-            action_dim = self.cfg.action_space
-            # Always store as (num_envs, history_length, action_dim)
-            self.obs_history_buffers["prev_actions"] = torch.zeros(
-                (self.num_envs, self.obs_history_length, action_dim), device=self.device
-            )
+            if self.cfg.include_prev_actions:
+                action_dim = self.cfg.action_space
+                # Always store as (num_envs, history_length, action_dim)
+                self.obs_history_buffers["prev_actions"] = torch.zeros(
+                    (self.num_envs, self.obs_history_length, action_dim), device=self.device
+                )
 
         # Compute body indices.
         # For non-gelsight fingers, the fingertip bodies are the panda_*finger links themselves.
@@ -612,11 +614,15 @@ class FactoryEnv(DirectRLEnv):
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
 
         prev_actions = self.actions.clone()
+        fingertip_rot_mat = matrix_from_quat(self.fingertip_midpoint_quat)
+        # 6D orientation representation using the first two rotation matrix columns.
+        fingertip_orn_6d = torch.cat((fingertip_rot_mat[:, :, 0], fingertip_rot_mat[:, :, 1]), dim=-1)
 
         obs_dict = {
             "fingertip_pos": self.fingertip_midpoint_pos,
             "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - noisy_fixed_pos,
             "fingertip_quat": self.fingertip_midpoint_quat,
+            "fingertip_orn_6d": fingertip_orn_6d,
             "ee_linvel": self.ee_linvel_fd,
             "ee_angvel": self.ee_angvel_fd,
             "prev_actions": prev_actions,
@@ -629,6 +635,7 @@ class FactoryEnv(DirectRLEnv):
             "fingertip_pos": self.fingertip_midpoint_pos,
             "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - self.fixed_pos_obs_frame,
             "fingertip_quat": self.fingertip_midpoint_quat,
+            "fingertip_orn_6d": fingertip_orn_6d,
             "ee_linvel": self.fingertip_midpoint_linvel,
             "ee_angvel": self.fingertip_midpoint_angvel,
             "joint_pos": self.joint_pos[:, 0:7],
@@ -668,11 +675,13 @@ class FactoryEnv(DirectRLEnv):
         self._update_obs_history(obs_dict)
         
         if self.obs_history_length > 0:
-            history_tensors = [self.obs_history_buffers[obs_name].reshape(self.num_envs, -1) for obs_name in self.cfg.obs_order + ["prev_actions"]]
+            obs_order = self.cfg.obs_order + (["prev_actions"] if self.cfg.include_prev_actions else [])
+            history_tensors = [self.obs_history_buffers[obs_name].reshape(self.num_envs, -1) for obs_name in obs_order]
             obs_tensors = torch.cat(history_tensors, dim=1)
         else:
             # No history: use current observations only
-            obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
+            obs_order = self.cfg.obs_order + (["prev_actions"] if self.cfg.include_prev_actions else [])
+            obs_tensors = factory_utils.collapse_obs_dict(obs_dict, obs_order)
         
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
         

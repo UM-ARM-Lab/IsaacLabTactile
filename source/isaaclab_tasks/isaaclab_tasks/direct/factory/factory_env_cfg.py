@@ -30,6 +30,7 @@ OBS_DIM_CFG = {
     "fingertip_pos": 3,
     "fingertip_pos_rel_fixed": 3,
     "fingertip_quat": 4,
+    "fingertip_orn_6d": 6,
     "held_pos": 3,
     "ee_linvel": 3,
     "ee_angvel": 3,
@@ -52,6 +53,7 @@ STATE_DIM_CFG = {
     "fingertip_pos": 3,
     "fingertip_pos_rel_fixed": 3,
     "fingertip_quat": 4,
+    "fingertip_orn_6d": 6,
     "ee_linvel": 3,
     "ee_angvel": 3,
     "joint_pos": 7,
@@ -135,7 +137,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     # num_*: will be overwritten to correspond to obs_order, state_order.
     observation_space = 21
     state_space = 72
-    obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_quat", "ee_linvel", "ee_angvel"]
+    # obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_quat", "ee_linvel", "ee_angvel"]
+    obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_orn_6d", "ee_linvel", "ee_angvel"]
     state_order: list = [
         "fingertip_pos",
         "fingertip_quat",
@@ -392,6 +395,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     enable_tactile_sensor: bool = False
     read_tactile_sensor: bool = False # this is actually not taking effect, unless we change obs_order to include tactile_taxim
     enable_tactile_sensor_right: bool = False  # Enable right finger tactile sensor (uses extra compute)
+    include_prev_actions: bool = True
     enable_obs_camera: bool = False
     use_compliant_gripper: bool = True
     use_gelsight_finger: bool = True
@@ -412,6 +416,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.read_tactile_sensor = env.read_tactile_sensor
         if env.get("enable_tactile_sensor_right", None) is not None:
             self.enable_tactile_sensor_right = env.enable_tactile_sensor_right
+        if env.get("include_prev_actions", None) is not None:
+            self.include_prev_actions = env.include_prev_actions
         if env.get("enable_obs_camera", None) is not None:
             self.enable_obs_camera = env.enable_obs_camera
         if env.get("use_compliant_gripper", None) is not None:
