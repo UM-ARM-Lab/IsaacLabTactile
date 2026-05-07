@@ -5,7 +5,10 @@
 
 """Simple test environment with Franka robot and operational space control."""
 
+import math
+import numpy as np
 import torch
+from pathlib import Path
 
 import isaacsim.core.utils.torch as torch_utils
 
@@ -16,7 +19,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import axis_angle_from_quat, matrix_from_quat
 from isaaclab.sensors import VisuoTactileSensor
 from . import factory_utils
-from .factory_env import FactoryEnv
+from .factory_env import FactoryEnv, _load_meshes_from_usd, _sample_meshes_to_points
 from .factory_env_cfg import FactoryTaskTestCfg, ASSET_DIR, OBS_DIM_CFG, STATE_DIM_CFG
 
 
@@ -40,6 +43,10 @@ class TestEnv(FactoryEnv):
     """
     
     cfg: FactoryTaskTestCfg
+    _CYLINDER_POS_ENV = (0.49, 0.0, 0.025)
+    _CYLINDER_QUAT_W = (1.0, 0.0, 0.0, 0.0)
+    _CYLINDER_RADIUS = 0.007986 / 2.0
+    _CYLINDER_HEIGHT = 0.05
 
     def __init__(self, cfg: FactoryTaskTestCfg, render_mode: str | None = None, **kwargs):
         # Update observation/state space based on obs_order and state_order
@@ -49,6 +56,18 @@ class TestEnv(FactoryEnv):
         
         # Call parent __init__ which will call _setup_scene, _init_tensors, etc.
         super().__init__(cfg, render_mode, **kwargs)
+        self.tactile_pc_cylinder_w = torch.zeros((self.num_envs, 0, 3), device=self.device)
+        self._pc_cylinder_local_points: torch.Tensor | None = None
+
+    def _sample_cylinder_points_local(self, num_points: int) -> np.ndarray:
+        """Sample side-surface points in local cylinder frame (z-axis is cylinder axis)."""
+        if num_points <= 0:
+            return np.zeros((0, 3), dtype=np.float64)
+        theta = 2.0 * math.pi * np.random.rand(num_points)
+        z = (np.random.rand(num_points) - 0.5) * self._CYLINDER_HEIGHT
+        x = self._CYLINDER_RADIUS * np.cos(theta)
+        y = self._CYLINDER_RADIUS * np.sin(theta)
+        return np.stack((x, y, z), axis=-1).astype(np.float64)
 
     def _set_default_dynamics_parameters(self):
         """Set parameters defining dynamic interactions (without assets)."""
@@ -85,12 +104,12 @@ class TestEnv(FactoryEnv):
         self.cfg.robot.spawn.usd_path = f"{ASSET_DIR}/{robot_usd_file}"
         self._robot = Articulation(self.cfg.robot)
 
-        # Spawn fixed cylinder (peg-like object) below the gripper, fixed to the table
-        # Cylinder size: radius=0.004m (8mm diameter), height=0.04m (4cm) - suitable for grasping
-        # Position: (0.55, 0.0, 0.05) - centered on table, on table surface
+        # Spawn fixed cylinder (peg-like object) below the gripper, fixed to the table.
+        # Match PegInsert held asset (Peg8mm): diameter=0.007986m, height=0.05m.
+        # For a centered cylinder resting on the table, z should be height / 2.
         cylinder_cfg = sim_utils.CylinderCfg(
-            radius=0.01,  # 8mm diameter peg
-            height=0.1,   # 4cm tall
+            radius=0.007986 / 2.0,  # PegInsert held-asset radius
+            height=0.05,   # PegInsert held-asset height
             axis="Z",      # Vertical cylinder
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True,  # Fixed to table, won't move
@@ -107,7 +126,7 @@ class TestEnv(FactoryEnv):
         cylinder_cfg.func(
             "/World/envs/env_.*/Cylinder",
             cylinder_cfg,
-            translation=(0.49, 0.0, 0.05),  # On table surface, centered below gripper
+            translation=(0.49, 0.0, 0.025),  # Centered so base rests on table
             orientation=(1.0, 0.0, 0.0, 0.0),  # Upright
         )
 
@@ -142,6 +161,15 @@ class TestEnv(FactoryEnv):
         """Get values computed from raw tensors (without asset references)."""
         # Only compute robot-related intermediate values
         self.fingertip_midpoint_pos = self._robot.data.body_pos_w[:, self.fingertip_body_idx] - self.scene.env_origins
+        # Expose fixed object pose in env frame for test env compatibility.
+        self.fixed_pos = torch.tensor(self._CYLINDER_POS_ENV, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(
+            self.num_envs, 1
+        )
+        self.fixed_quat = torch.tensor(
+            self._CYLINDER_QUAT_W, device=self.device, dtype=torch.float32
+        ).unsqueeze(0).repeat(self.num_envs, 1)
+        # Gripper position in local fixed-object (cylinder) frame.
+        self.fingertip_midpoint_pos_fixed = self.fingertip_midpoint_pos - self.fixed_pos
         self.fingertip_midpoint_quat = self._robot.data.body_quat_w[:, self.fingertip_body_idx]
         self.fingertip_midpoint_linvel = self._robot.data.body_lin_vel_w[:, self.fingertip_body_idx]
         self.fingertip_midpoint_angvel = self._robot.data.body_ang_vel_w[:, self.fingertip_body_idx]
@@ -171,6 +199,57 @@ class TestEnv(FactoryEnv):
         self.joint_vel_fd = joint_diff / dt
         self.prev_joint_pos = self.joint_pos[:, 0:7].clone()
 
+        if self.cfg.include_tactile_pointclouds:
+            if self._pc_left_meshes is None or self._pc_right_meshes is None:
+                robot_usd = Path(ASSET_DIR) / "franka_gelsight_r15_assembled.usd"
+                self._pc_left_meshes = _load_meshes_from_usd(
+                    usd_path=robot_usd,
+                    prim_path="/panda/panda_leftfinger/elastomer",
+                )
+                self._pc_right_meshes = _load_meshes_from_usd(
+                    usd_path=robot_usd,
+                    prim_path="/panda/panda_rightfinger/elastomer",
+                )
+                if not self._pc_left_meshes or not self._pc_right_meshes:
+                    meshes = _load_meshes_from_usd(
+                        usd_path=robot_usd,
+                        prim_path="/panda",
+                    )
+                    self._pc_left_meshes = meshes
+                    self._pc_right_meshes = meshes
+
+            half = max(1, self.cfg.tactile_pointcloud_gripper_points // 2)
+            left_pts_np = _sample_meshes_to_points(self._pc_left_meshes, half)
+            right_pts_np = _sample_meshes_to_points(
+                self._pc_right_meshes, self.cfg.tactile_pointcloud_gripper_points - half
+            )
+            cylinder_pts_np = self._sample_cylinder_points_local(self.cfg.tactile_pointcloud_peg_points)
+
+            if left_pts_np.size > 0 and right_pts_np.size > 0 and cylinder_pts_np.size > 0:
+                left_pts_l = torch.tensor(left_pts_np, dtype=torch.float32, device=self.device)
+                right_pts_l = torch.tensor(right_pts_np, dtype=torch.float32, device=self.device)
+                self._pc_cylinder_local_points = torch.tensor(cylinder_pts_np, dtype=torch.float32, device=self.device)
+
+                left_pos_e = self._robot.data.body_pos_w[:, self.left_finger_body_idx] - self.scene.env_origins
+                left_quat_w = self._robot.data.body_quat_w[:, self.left_finger_body_idx]
+                right_pos_e = self._robot.data.body_pos_w[:, self.right_finger_body_idx] - self.scene.env_origins
+                right_quat_w = self._robot.data.body_quat_w[:, self.right_finger_body_idx]
+                cyl_pos_e = self.fixed_pos
+                cyl_quat_w = self.fixed_quat
+
+                def _apply_pc(quat_w, pts_l, pos_e):
+                    e_count, p_count = quat_w.shape[0], pts_l.shape[0]
+                    quat_exp = quat_w.unsqueeze(1).expand(e_count, p_count, 4).reshape(-1, 4)
+                    pts_exp = pts_l.unsqueeze(0).expand(e_count, p_count, 3).reshape(-1, 3)
+                    pos_exp = pos_e.unsqueeze(1).expand(e_count, p_count, 3).reshape(-1, 3)
+                    pc = torch_utils.quat_apply(quat_exp, pts_exp) + pos_exp
+                    return pc.view(e_count, p_count, 3)
+
+                self.tactile_pc_left_w = _apply_pc(left_quat_w, left_pts_l, left_pos_e)
+                self.tactile_pc_right_w = _apply_pc(right_quat_w, right_pts_l, right_pos_e)
+                self.tactile_pc_cylinder_w = _apply_pc(cyl_quat_w, self._pc_cylinder_local_points, cyl_pos_e)
+                self.tactile_pc_peg_w = self.tactile_pc_cylinder_w
+
         self.last_update_timestamp = self._robot._data._sim_timestamp
 
     def _get_factory_obs_state_dict(self):
@@ -181,7 +260,7 @@ class TestEnv(FactoryEnv):
         fingertip_orn_6d = torch.cat((fingertip_rot_mat[:, :, 0], fingertip_rot_mat[:, :, 1]), dim=-1)
 
         obs_dict = {
-            "fingertip_pos": self.fingertip_midpoint_pos,
+            "fingertip_pos": self.fingertip_midpoint_pos_fixed,
             "fingertip_quat": self.fingertip_midpoint_quat,
             "fingertip_orn_6d": fingertip_orn_6d,
             "ee_linvel": self.ee_linvel_fd,
@@ -191,7 +270,7 @@ class TestEnv(FactoryEnv):
         }
 
         state_dict = {
-            "fingertip_pos": self.fingertip_midpoint_pos,
+            "fingertip_pos": self.fingertip_midpoint_pos_fixed,
             "fingertip_quat": self.fingertip_midpoint_quat,
             "fingertip_orn_6d": fingertip_orn_6d,
             "ee_linvel": self.fingertip_midpoint_linvel,
