@@ -13,6 +13,7 @@ class TactileObsWrapperSpec:
     pc_keys: list[str]
     force_keys: dict[str, str]
     ot_euler_steps: int
+    ot_reverse_direction: bool
     use_projection: bool
     projection_source_latent: str | None
     ckpt_point_mae: str | None
@@ -44,6 +45,7 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
     pc_keys = list(wrapper_cfg.get("pc_keys") or [])
     force_keys = dict(wrapper_cfg.get("force_keys") or {})
     ot_euler_steps = int(wrapper_cfg.get("ot_euler_steps", 32))
+    ot_reverse_direction = bool(wrapper_cfg.get("ot_reverse_direction", False))
     use_projection = bool(wrapper_cfg.get("use_projection", False))
     projection_source_latent = wrapper_cfg.get("projection_source_latent")
     if projection_source_latent is not None:
@@ -66,6 +68,7 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         pc_keys=pc_keys,
         force_keys=force_keys,
         ot_euler_steps=ot_euler_steps,
+        ot_reverse_direction=ot_reverse_direction,
         use_projection=use_projection,
         projection_source_latent=projection_source_latent,
         ckpt_point_mae=str(ckpts.get("point_mae")) if _is_enabled_path(ckpts.get("point_mae")) else None,
@@ -218,9 +221,13 @@ def build_tactile_obs_wrapper(
         if "velocity" not in payload or "latent_normalization" not in payload:
             raise ValueError("OT checkpoint missing required keys: 'velocity' and 'latent_normalization'")
 
-        direction = str(payload.get("direction", "image_to_pc"))
-        if direction not in ("image_to_pc", "pc_to_image"):
-            raise ValueError(f"OT checkpoint direction must be 'image_to_pc' or 'pc_to_image', got {direction!r}")
+        ckpt_direction = str(payload.get("direction", "image_to_pc"))
+        if ckpt_direction not in ("image_to_pc", "pc_to_image"):
+            raise ValueError(f"OT checkpoint direction must be 'image_to_pc' or 'pc_to_image', got {ckpt_direction!r}")
+        if spec.ot_reverse_direction:
+            direction = "pc_to_image" if ckpt_direction == "image_to_pc" else "image_to_pc"
+        else:
+            direction = ckpt_direction
 
         latent_dim = int(payload["latent_dim"])
         velocity_cfg_dict = payload.get("velocity_cfg", {}) or {}
@@ -239,6 +246,11 @@ def build_tactile_obs_wrapper(
         prediction_target = str(payload.get("prediction_target", "velocity"))
         if prediction_target not in ("velocity", "x0"):
             raise ValueError(f"Unsupported OT prediction_target={prediction_target!r} (expected 'velocity' or 'x0').")
+        if spec.ot_reverse_direction and prediction_target != "velocity":
+            raise ValueError(
+                "tactile_obs_wrapper.ot_reverse_direction=true requires an OT checkpoint "
+                f"with prediction_target='velocity', got {prediction_target!r}."
+            )
 
         latent_norm = LatentNormalization.from_state_dict(payload["latent_normalization"]).to(wrap_device)
 
@@ -351,6 +363,7 @@ def build_tactile_obs_wrapper(
             euler_steps=int(spec.ot_euler_steps),
             prediction_target=prediction_target,
             direction=direction,
+            reverse_training_direction=bool(spec.ot_reverse_direction),
             point_mae=point_mae,
             latent_projection=latent_projection,
             latent_projection_source=latent_projection_source,

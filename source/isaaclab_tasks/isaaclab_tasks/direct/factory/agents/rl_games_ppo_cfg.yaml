@@ -38,13 +38,13 @@ params:
       regularizer:
         name: None
 
-    rnn:
-      name: lstm
-      units: 1024
-      layers: 2
-      before_mlp: True
-      concat_input: True
-      layer_norm: True
+    # rnn:
+    #   name: lstm
+    #   units: 1024
+    #   layers: 2
+    #   before_mlp: True
+    #   concat_input: True
+    #   layer_norm: True
 
   load_checkpoint: False
   load_path: ""
@@ -87,20 +87,19 @@ params:
         std_range: [0.0, 0.1]  
         # per-episode std sampled uniformly; each step applies latent *= N(1, std)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
+      ot_euler_steps: 32
+      ot_reverse_direction: false  # true: run reverse of checkpoint training direction
       checkpoints:
         # ot: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0005_sinkhorn_eps_schedule/point_latent_projection_final.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0025_diff_dtw_img_proj/rectified_flow_latent_epoch_0300.pth
-        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0046_UOT/rectified_flow_latent_epoch_2000.pth
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0057_debug_pointmae_no_force/rectified_flow_latent_epoch_2000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0045_UOT/rectified_flow_latent_epoch_5000.pth
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0065_paired_large_test_data/rectified_flow_latent_epoch_2000.pth
         # ot: null
-        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae_pc/point_mae_epoch_0050.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae_pc_reg_separate_force_complete_very_low/point_mae_epoch_0010.pth
-        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae_new_reg/point_mae_epoch_0050.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae_pc_reg_no_force/point_mae_epoch_0005.pth
         point_mae: null
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/tactile_image_mae_epoch_0200.pth
         mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images_rand_w_reg/tactile_image_mae_epoch_0300.pth
-        # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images_reg_new/tactile_image_mae_epoch_0300.pth
         # mae: null
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0007_eps_002/point_latent_projection_final.pth
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_dtw_0044_dtw_image_proj_infonce/point_latent_projection_dtw_epoch_0050.pth
@@ -117,7 +116,6 @@ params:
         left_wrench: fingertip_wrench_left
         right_force: fingertip_force_right
         right_wrench: fingertip_wrench_right
-      ot_euler_steps: 32
 
   config:
     name: Factory
