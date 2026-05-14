@@ -74,9 +74,18 @@ class FactoryFlexHoleEnv(FactoryEnv):
 
         super().__init__(cfg, render_mode, **kwargs)
 
-        # Adjust the computed observation_space and state_space for 6D quaternions
-        self.cfg.observation_space += self._obs_quat_adjustment
-        self.cfg.state_space += self._state_quat_adjustment
+        # Adjust observation_space and state_space for 6D quaternions AND for
+        # the trailing per-env is_sim indicator (+1 dim each).
+        self.cfg.observation_space += self._obs_quat_adjustment + 1
+        self.cfg.state_space += self._state_quat_adjustment + 1
+
+        # Per-env sim/real indicator: 1.0 for sim envs, 0.0 for real envs.
+        # Constant per env (built once here, reused every step). Appended to
+        # both policy and critic obs in _get_observations so the agent can
+        # condition on domain. idx_sim / idx_real are populated by
+        # _init_partitions, which runs inside super().__init__ -> _setup_scene.
+        self.is_sim_indicator = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.float32)
+        self.is_sim_indicator[self.idx_sim] = 1.0
 
         # Update the gym observation space Dict to match new dimensions
         import numpy as np
@@ -253,8 +262,16 @@ class FactoryFlexHoleEnv(FactoryEnv):
         obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
 
-        # Unified observation: train the dynamics model on the same tensor the policy sees.
+        # Unified observation: train the dynamics model on the same tensor the
+        # policy sees, MINUS the trailing is_sim indicator. Keeping obs_tensor
+        # at the obs_order-only shape preserves the dimensionality the existing
+        # dynamics scorer checkpoints were trained on.
         self.obs_tensor = obs_tensors
+
+        # Append per-env is_sim indicator (1.0 sim, 0.0 real) to both policy
+        # and critic obs so the agent can condition on domain. Real envs get 0.
+        obs_tensors = torch.cat([obs_tensors, self.is_sim_indicator], dim=-1)
+        state_tensors = torch.cat([state_tensors, self.is_sim_indicator], dim=-1)
 
         # Compute low dim state
         # low_dim_state = torch.cat([collect_dict[key] for key in collect_dict.keys()], dim=-1)
