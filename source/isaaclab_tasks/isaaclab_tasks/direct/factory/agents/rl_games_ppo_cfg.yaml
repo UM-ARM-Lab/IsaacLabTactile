@@ -92,21 +92,23 @@ params:
       checkpoints:
         # ot: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0005_sinkhorn_eps_schedule/point_latent_projection_final.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0025_diff_dtw_img_proj/rectified_flow_latent_epoch_0300.pth
-        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0045_UOT/rectified_flow_latent_epoch_5000.pth
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0065_paired_large_test_data/rectified_flow_latent_epoch_2000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0069_paired_large_test_data/rectified_flow_latent_epoch_2500.pth
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0072_paired_large_test_data/rectified_flow_latent_epoch_2500.pth
         # ot: null
-        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae_pc_reg_separate_force_complete_very_low/point_mae_epoch_0010.pth
+        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/point_mae_w_reg_no_force_test_env_small/point_mae_epoch_0010.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae_pc_reg_no_force/point_mae_epoch_0005.pth
         point_mae: null
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/tactile_image_mae_epoch_0200.pth
-        mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images_rand_w_reg/tactile_image_mae_epoch_0300.pth
+        # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images_rand_w_reg/tactile_image_mae_epoch_0300.pth
+        mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/mae_reg_test_env_double_two_datasets/tactile_image_mae_epoch_0170.pth
         # mae: null
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0007_eps_002/point_latent_projection_final.pth
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_dtw_0044_dtw_image_proj_infonce/point_latent_projection_dtw_epoch_0050.pth
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0048_same_data/point_latent_projection_epoch_1000.pth
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0053/point_latent_projection_final.pth
         projection: null
-      tactile_obs_key: tactile
+      tactile_obs_key: [tactile, tactile_right]
+      # tactile_obs_key: [tactile]
       pc_keys:
         - tactile_pc_left_w
         - tactile_pc_right_w

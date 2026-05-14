@@ -688,27 +688,38 @@ class FactoryEnv(DirectRLEnv):
         output_dict = {"policy": obs_tensors, "critic": state_tensors}
 
         if self.cfg.enable_tactile_sensor and self.cfg.read_tactile_sensor:
-            tactile_data = self._tactile_cam.data
-            if tactile_data.taxim_tactile is not None:
-                # Convert from (B, H, W, C) to (B, C, H, W) for RL-Games CNN
-                tactile_imgs = tactile_data.taxim_tactile
+            def _normalize_tactile_obs(tactile_imgs: torch.Tensor | None) -> torch.Tensor | None:
+                if tactile_imgs is None:
+                    return None
                 if tactile_imgs.dim() == 4 and tactile_imgs.shape[-1] <= 4:
                     tactile_imgs = tactile_imgs.permute(0, 3, 1, 2)
-                
+
                 # Convert to float and normalize from [0, 255] to [-1, 1]
                 # Standard normalization for CNNs: zero-centered inputs work better with batch norm
                 tactile_imgs = tactile_imgs.float() / 255.0  # [0, 1]
                 tactile_imgs = tactile_imgs * 2.0 - 1.0  # [-1, 1]
-                
+
                 # Safety check: Replace NaN and Inf with zeros
                 if torch.isnan(tactile_imgs).any() or torch.isinf(tactile_imgs).any():
                     print(f"[WARNING] Tactile images contain NaN or Inf values")
                 tactile_imgs = torch.where(torch.isfinite(tactile_imgs), tactile_imgs, torch.zeros_like(tactile_imgs))
-                
+
                 # Clamp to ensure values are in [-1, 1] range
                 tactile_imgs = torch.clamp(tactile_imgs, -1.0, 1.0)
+                return tactile_imgs
+
+            tactile_data = self._tactile_cam.data
+            tactile_left = _normalize_tactile_obs(tactile_data.taxim_tactile)
+            if tactile_left is not None:
                 # Add to output - images are now normalized float32 in [0, 1] range
-                output_dict["tactile"] = tactile_imgs
+                output_dict["tactile"] = tactile_left
+
+            if self.cfg.enable_tactile_sensor_right and self._tactile_cam_right is not None:
+                tactile_right = _normalize_tactile_obs(self._tactile_cam_right.data.taxim_tactile)
+                if tactile_right is not None:
+                    output_dict["tactile_right"] = tactile_right
+
+            if "tactile" in output_dict or "tactile_right" in output_dict:
                 # Alias for compatibility with configs expecting "vector_obs"
                 output_dict["vector_obs"] = obs_tensors
 

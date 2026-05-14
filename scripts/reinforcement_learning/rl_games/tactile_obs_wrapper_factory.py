@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import torch
 
@@ -9,7 +9,7 @@ import torch
 @dataclass(frozen=True)
 class TactileObsWrapperSpec:
     name: str  # none|mae|point_mae|ot
-    tactile_obs_key: str
+    tactile_obs_key: str | Sequence[str]
     pc_keys: list[str]
     force_keys: dict[str, str]
     ot_euler_steps: int
@@ -41,7 +41,18 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         )
 
     name = str(wrapper_cfg.get("name", "none")).lower()
-    tactile_obs_key = str(wrapper_cfg.get("tactile_obs_key", "tactile"))
+    from tactile_transfer.utils.policy_keys import normalize_policy_keys  # noqa: WPS433
+
+    tactile_obs_key_cfg = wrapper_cfg.get("tactile_obs_key", "tactile")
+    tactile_obs_key_items = normalize_policy_keys(
+        tactile_obs_key_cfg,
+        arg_name="task_overrides.tactile_obs_wrapper.tactile_obs_key",
+    )
+    tactile_obs_key: str | Sequence[str]
+    if len(tactile_obs_key_items) == 1:
+        tactile_obs_key = tactile_obs_key_items[0]
+    else:
+        tactile_obs_key = tactile_obs_key_items
     pc_keys = list(wrapper_cfg.get("pc_keys") or [])
     force_keys = dict(wrapper_cfg.get("force_keys") or {})
     ot_euler_steps = int(wrapper_cfg.get("ot_euler_steps", 32))
@@ -95,6 +106,8 @@ def build_tactile_obs_wrapper(
     """
     spec = _parse_spec(task_overrides)
     name = spec.name
+    tactile_obs_keys = list(spec.tactile_obs_key) if isinstance(spec.tactile_obs_key, (list, tuple)) else [spec.tactile_obs_key]
+    use_right_tactile = any(str(k).strip().lower() == "tactile_right" for k in tactile_obs_keys)
     # Lazy imports to keep the train/play scripts lightweight at import time.
     from tactile_transfer.model import (  # noqa: WPS433
         load_latent_projection_from_checkpoint,
@@ -122,6 +135,8 @@ def build_tactile_obs_wrapper(
             raise ValueError("tactile_obs_wrapper.name='mae' requires checkpoints.mae")
         if hasattr(env_cfg, "enable_tactile_sensor"):
             env_cfg.enable_tactile_sensor = True
+        if use_right_tactile and hasattr(env_cfg, "enable_tactile_sensor_right"):
+            env_cfg.enable_tactile_sensor_right = True
         image_mae = load_tactile_image_mae_encoder_from_checkpoint(spec.ckpt_mae, wrap_device)
         projection = None
         if spec.use_projection:
@@ -133,7 +148,8 @@ def build_tactile_obs_wrapper(
             projection = load_latent_projection_from_checkpoint(
                 spec.ckpt_projection,
                 wrap_device,
-                expected_latent_dim=int(image_mae.cfg.encoder_embed_dim),
+                expected_latent_dim=int(image_mae.cfg.encoder_embed_dim)
+                * (len(spec.tactile_obs_key) if isinstance(spec.tactile_obs_key, (list, tuple)) else 1),
             )
         return lambda env: TactileImageMAEObsWrapper(
             env,
@@ -287,10 +303,15 @@ def build_tactile_obs_wrapper(
                 raise ValueError("OT direction=image_to_pc requires checkpoints.mae")
             if hasattr(env_cfg, "enable_tactile_sensor"):
                 env_cfg.enable_tactile_sensor = True
+            if use_right_tactile and hasattr(env_cfg, "enable_tactile_sensor_right"):
+                env_cfg.enable_tactile_sensor_right = True
             image_mae = load_tactile_image_mae_encoder_from_checkpoint(spec.ckpt_mae, wrap_device)
-            if int(image_mae.cfg.encoder_embed_dim) != latent_dim:
+            tactile_stream_count = len(spec.tactile_obs_key) if isinstance(spec.tactile_obs_key, (list, tuple)) else 1
+            expected_image_latent_dim = int(image_mae.cfg.encoder_embed_dim) * int(tactile_stream_count)
+            if expected_image_latent_dim != latent_dim:
                 raise ValueError(
-                    f"Image MAE encoder_embed_dim={int(image_mae.cfg.encoder_embed_dim)} != OT latent_dim={latent_dim}."
+                    f"Image MAE latent dim ({int(image_mae.cfg.encoder_embed_dim)} x {tactile_stream_count})="
+                    f"{expected_image_latent_dim} != OT latent_dim={latent_dim}."
                 )
         else:
             if spec.ckpt_point_mae is None:

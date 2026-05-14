@@ -554,8 +554,18 @@ class FactoryTaskTestCfg(FactoryEnvCfg):
 
         # Double the position action threshold only for the test environment
         self.ctrl.pos_action_threshold = [v * 2 for v in self.ctrl.pos_action_threshold]
+
+        # Test-env specific rotation action threshold (kept same as current default for now).
+        # This is intentionally hardcoded here so it can be tuned independently later.
+        self.ctrl.pos_action_threshold = [0.08, 0.08, 0.08]
+        self.ctrl.rot_action_threshold = [0.5, 0.5, 0.5]
+        self.ctrl.use_full_rotation = True
+        # Test env now uses absolute EE position actions; disable EMA lag on actions.
+        self.ctrl.ema_factor = 1.0
         
         # Override viewer to track robot since test environment has no fixed_asset
+        # Use world origin to avoid per-step camera re-tracking, so manual camera movement is not reset.
+        self.viewer.origin_type = "world"
         self.viewer.asset_name = "robot"
         self.viewer.eye = (1.0, 1.0, 1.3)
         self.viewer.lookat = (0.55, 0.0, 0.3)

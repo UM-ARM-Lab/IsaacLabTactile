@@ -141,17 +141,27 @@ class TestEnv(FactoryEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # Add tactile sensor if enabled
+        # Add tactile sensor(s) if enabled
         if self.cfg.enable_tactile_sensor:
             print("[INFO] Enabling tactile sensor")
             self._tactile_cam = VisuoTactileSensor(self.cfg.tactile_cam)
             self.scene.sensors["tactile_cam"] = self._tactile_cam
+            if self.cfg.enable_tactile_sensor_right:
+                self._tactile_cam_right = VisuoTactileSensor(self.cfg.tactile_cam_right)
+                self.scene.sensors["tactile_cam_right"] = self._tactile_cam_right
+                print("[INFO] Right finger tactile sensor enabled")
+            else:
+                self._tactile_cam_right = None
+                print("[INFO] Right finger tactile sensor disabled")
         else:
             print("[INFO] Disabling tactile sensor")
             self._tactile_cam = None
+            self._tactile_cam_right = None
             
         if self.cfg.use_compliant_gripper and self._tactile_cam is not None:
             VisuoTactileSensor.setup_compliant_materials(self.cfg.tactile_cam)
+            if self.cfg.enable_tactile_sensor_right and hasattr(self.cfg, "tactile_cam_right"):
+                VisuoTactileSensor.setup_compliant_materials(self.cfg.tactile_cam_right)
 
         print(f"[INFO] Test environment created with {self.scene.num_envs} environments")
         
@@ -287,14 +297,11 @@ class TestEnv(FactoryEnv):
         if self.last_update_timestamp < self._robot._data._sim_timestamp:
             self._compute_intermediate_values(dt=self.physics_dt)
 
-        # Interpret actions as target pos displacements and set pos target
-        pos_actions = self.actions[:, 0:3] * self.pos_threshold
+        # Interpret actions as absolute target end-effector position in env frame.
+        ctrl_target_fingertip_midpoint_pos = self.actions[:, 0:3]
 
         # Interpret actions as target rot (axis-angle) displacements
         rot_actions = self.actions[:, 3:6] * self.rot_threshold
-
-        # Compute target end-effector pose (no position clipping since no fixed asset)
-        ctrl_target_fingertip_midpoint_pos = self.fingertip_midpoint_pos + pos_actions
 
         # Convert rotation actions to quaternion
         angle = torch.norm(rot_actions, p=2, dim=-1)
@@ -307,15 +314,6 @@ class TestEnv(FactoryEnv):
             torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1),
         )
         ctrl_target_fingertip_midpoint_quat = torch_utils.quat_mul(rot_actions_quat, self.fingertip_midpoint_quat)
-
-        # Restrict to upright orientation (same as other factory tasks)
-        target_euler_xyz = torch.stack(torch_utils.get_euler_xyz(ctrl_target_fingertip_midpoint_quat), dim=1)
-        target_euler_xyz[:, 0] = 3.14159  # Restrict actions to be upright
-        target_euler_xyz[:, 1] = 0.0
-
-        ctrl_target_fingertip_midpoint_quat = torch_utils.quat_from_euler_xyz(
-            roll=target_euler_xyz[:, 0], pitch=target_euler_xyz[:, 1], yaw=target_euler_xyz[:, 2]
-        )
 
         # Interpret gripper action: map from [-1, 1] to [0.0, 0.04] where -1=closed, 1=open
         gripper_actions = self.actions[:, 6]  # Normalized action in [-1, 1]
@@ -489,3 +487,6 @@ class TestEnv(FactoryEnv):
             if self._tactile_cam._nominal_tactile is None:
                 self.sim.render()
                 self._tactile_cam.get_initial_render()
+            if self.cfg.enable_tactile_sensor_right and self._tactile_cam_right is not None:
+                if self._tactile_cam_right._nominal_tactile is None:
+                    self._tactile_cam_right.get_initial_render()
