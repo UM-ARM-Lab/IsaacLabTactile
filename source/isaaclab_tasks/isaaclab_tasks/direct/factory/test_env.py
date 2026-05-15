@@ -3,9 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Simple test environment with Franka robot and operational space control."""
+"""Test environment with Franka robot, operational space control, and a fixed peg."""
 
-import math
 import numpy as np
 import torch
 from pathlib import Path
@@ -13,13 +12,18 @@ from pathlib import Path
 import isaacsim.core.utils.torch as torch_utils
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import axis_angle_from_quat, matrix_from_quat
 from isaaclab.sensors import VisuoTactileSensor
 from . import factory_utils
-from .factory_env import FactoryEnv, _load_meshes_from_usd, _sample_meshes_to_points
+from .factory_env import (
+    FactoryEnv,
+    _collect_meshes_from_stage,
+    _load_meshes_from_usd,
+    _sample_meshes_to_points,
+)
 from .factory_env_cfg import FactoryTaskTestCfg, ASSET_DIR, OBS_DIM_CFG, STATE_DIM_CFG
 
 
@@ -28,7 +32,7 @@ class TestEnv(FactoryEnv):
     
     This environment provides end-effector control using operational space control (OSC),
     matching the control method used in other factory environments (PegInsert, GearMesh, NutThread).
-    No objects or manipulation tasks are included - just the robot on a table.
+    A Peg8mm asset is spawned kinematically fixed on the table (same USD as PegInsert).
     
     Action space: 7 DOF 
         - actions[0:3]: end-effector position displacement (delta from current)
@@ -43,10 +47,6 @@ class TestEnv(FactoryEnv):
     """
     
     cfg: FactoryTaskTestCfg
-    _CYLINDER_POS_ENV = (0.49, 0.0, 0.025)
-    _CYLINDER_QUAT_W = (1.0, 0.0, 0.0, 0.0)
-    _CYLINDER_RADIUS = 0.007986 / 2.0
-    _CYLINDER_HEIGHT = 0.05
 
     def __init__(self, cfg: FactoryTaskTestCfg, render_mode: str | None = None, **kwargs):
         # Update observation/state space based on obs_order and state_order
@@ -56,18 +56,20 @@ class TestEnv(FactoryEnv):
         
         # Call parent __init__ which will call _setup_scene, _init_tensors, etc.
         super().__init__(cfg, render_mode, **kwargs)
-        self.tactile_pc_cylinder_w = torch.zeros((self.num_envs, 0, 3), device=self.device)
-        self._pc_cylinder_local_points: torch.Tensor | None = None
+        self._sync_peg_pose_buffers()
 
-    def _sample_cylinder_points_local(self, num_points: int) -> np.ndarray:
-        """Sample side-surface points in local cylinder frame (z-axis is cylinder axis)."""
-        if num_points <= 0:
-            return np.zeros((0, 3), dtype=np.float64)
-        theta = 2.0 * math.pi * np.random.rand(num_points)
-        z = (np.random.rand(num_points) - 0.5) * self._CYLINDER_HEIGHT
-        x = self._CYLINDER_RADIUS * np.cos(theta)
-        y = self._CYLINDER_RADIUS * np.sin(theta)
-        return np.stack((x, y, z), axis=-1).astype(np.float64)
+    def _sync_peg_pose_buffers(self):
+        """Update fixed/held peg pose buffers from the sim (or task init pose before first step)."""
+        if self._fixed_peg is not None and hasattr(self._fixed_peg, "data"):
+            self.fixed_pos = self._fixed_peg.data.root_pos_w - self.scene.env_origins
+            self.fixed_quat = self._fixed_peg.data.root_quat_w
+        else:
+            init_pos = torch.tensor(self.cfg_task.fixed_peg_init_pos, device=self.device, dtype=torch.float32)
+            init_rot = torch.tensor(self.cfg_task.fixed_peg_init_rot, device=self.device, dtype=torch.float32)
+            self.fixed_pos = init_pos.unsqueeze(0).repeat(self.num_envs, 1)
+            self.fixed_quat = init_rot.unsqueeze(0).repeat(self.num_envs, 1)
+        self.held_pos = self.fixed_pos
+        self.held_quat = self.fixed_quat
 
     def _set_default_dynamics_parameters(self):
         """Set parameters defining dynamic interactions (without assets)."""
@@ -85,11 +87,15 @@ class TestEnv(FactoryEnv):
         )
 
         self.task_deriv_gains = factory_utils.get_deriv_gains(self.task_prop_gains)
-        
-        # Note: Skip friction setting for assets since test environment has no assets
+
+        if self._fixed_peg is not None:
+            peg_friction = self.cfg_task.gripper_peg_friction
+            if peg_friction is None:
+                peg_friction = self.cfg_task.held_asset_cfg.friction
+            factory_utils.set_friction(self._fixed_peg, peg_friction, self.scene.num_envs)
 
     def _setup_scene(self):
-        """Initialize simulation scene (without fixed/held assets)."""
+        """Initialize simulation scene with robot and a kinematically fixed peg."""
         # Spawn ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg(), translation=(0.0, 0.0, -1.05))
 
@@ -104,31 +110,8 @@ class TestEnv(FactoryEnv):
         self.cfg.robot.spawn.usd_path = f"{ASSET_DIR}/{robot_usd_file}"
         self._robot = Articulation(self.cfg.robot)
 
-        # Spawn fixed cylinder (peg-like object) below the gripper, fixed to the table.
-        # Match PegInsert held asset (Peg8mm): diameter=0.007986m, height=0.05m.
-        # For a centered cylinder resting on the table, z should be height / 2.
-        cylinder_cfg = sim_utils.CylinderCfg(
-            radius=0.007986 / 2.0,  # PegInsert held-asset radius
-            height=0.05,   # PegInsert held-asset height
-            axis="Z",      # Vertical cylinder
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True,  # Fixed to table, won't move
-                disable_gravity=False,
-                max_depenetration_velocity=5.0,
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.01),  # Small mass for collision
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                contact_offset=0.001,
-                rest_offset=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.8, 0.2)),  # Yellow color
-        )
-        cylinder_cfg.func(
-            "/World/envs/env_.*/Cylinder",
-            cylinder_cfg,
-            translation=(0.49, 0.0, 0.025),  # Centered so base rests on table
-            orientation=(1.0, 0.0, 0.0, 0.0),  # Upright
-        )
+        # Same peg USD as PegInsert, but kinematic so it stays fixed on the table.
+        self._fixed_peg = RigidObject(self.cfg_task.fixed_peg)
 
         # Clone environments
         self.scene.clone_environments(copy_from_source=False)
@@ -136,6 +119,7 @@ class TestEnv(FactoryEnv):
             self.scene.filter_collisions()
 
         self.scene.articulations["robot"] = self._robot
+        self.scene.rigid_objects["fixed_peg"] = self._fixed_peg
 
         # Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -164,21 +148,24 @@ class TestEnv(FactoryEnv):
                 VisuoTactileSensor.setup_compliant_materials(self.cfg.tactile_cam_right)
 
         print(f"[INFO] Test environment created with {self.scene.num_envs} environments")
-        
-        # Note: No fixed_asset or held_asset spawned for test environment
+
+    def _reset_fixed_peg(self, env_ids: torch.Tensor):
+        """Write the fixed peg back to its nominal pose (kinematic, env-frame init)."""
+        init_pos = torch.tensor(self.cfg_task.fixed_peg_init_pos, device=self.device, dtype=torch.float32)
+        init_rot = torch.tensor(self.cfg_task.fixed_peg_init_rot, device=self.device, dtype=torch.float32)
+        peg_state = self._fixed_peg.data.default_root_state.clone()[env_ids]
+        peg_state[:, 0:3] = init_pos.unsqueeze(0) + self.scene.env_origins[env_ids]
+        peg_state[:, 3:7] = init_rot.unsqueeze(0)
+        peg_state[:, 7:] = 0.0
+        self._fixed_peg.write_root_pose_to_sim(peg_state[:, 0:7], env_ids=env_ids)
+        self._fixed_peg.write_root_velocity_to_sim(peg_state[:, 7:], env_ids=env_ids)
+        self._fixed_peg.reset()
 
     def _compute_intermediate_values(self, dt):
-        """Get values computed from raw tensors (without asset references)."""
-        # Only compute robot-related intermediate values
+        """Get values computed from raw tensors."""
         self.fingertip_midpoint_pos = self._robot.data.body_pos_w[:, self.fingertip_body_idx] - self.scene.env_origins
-        # Expose fixed object pose in env frame for test env compatibility.
-        self.fixed_pos = torch.tensor(self._CYLINDER_POS_ENV, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(
-            self.num_envs, 1
-        )
-        self.fixed_quat = torch.tensor(
-            self._CYLINDER_QUAT_W, device=self.device, dtype=torch.float32
-        ).unsqueeze(0).repeat(self.num_envs, 1)
-        # Gripper position in local fixed-object (cylinder) frame.
+
+        self._sync_peg_pose_buffers()
         self.fingertip_midpoint_pos_fixed = self.fingertip_midpoint_pos - self.fixed_pos
         self.fingertip_midpoint_quat = self._robot.data.body_quat_w[:, self.fingertip_body_idx]
         self.fingertip_midpoint_linvel = self._robot.data.body_lin_vel_w[:, self.fingertip_body_idx]
@@ -209,43 +196,62 @@ class TestEnv(FactoryEnv):
         self.joint_vel_fd = joint_diff / dt
         self.prev_joint_pos = self.joint_pos[:, 0:7].clone()
 
+        if self.cfg.include_contact_forces:
+            left_data = self._left_finger_contact_sensor.data
+            self.left_finger_force[:, :] = left_data.net_forces_w[:, 0, :]
+            right_data = self._right_finger_contact_sensor.data
+            self.right_finger_force[:, :] = right_data.net_forces_w[:, 0, :]
+
+            link_wrenches_parent = self._robot.root_physx_view.get_link_incoming_joint_force()
+            parent_quat_w = self._robot.data.body_quat_w
+            left_wrench_p = link_wrenches_parent[:, self.left_finger_body_idx]
+            right_wrench_p = link_wrenches_parent[:, self.right_finger_body_idx]
+            left_parent_quat = parent_quat_w[:, self.left_finger_parent_body_idx]
+            right_parent_quat = parent_quat_w[:, self.right_finger_parent_body_idx]
+            self.left_finger_wrench[:, 0:3] = torch_utils.quat_apply(left_parent_quat, left_wrench_p[:, 0:3])
+            self.left_finger_wrench[:, 3:6] = torch_utils.quat_apply(left_parent_quat, left_wrench_p[:, 3:6])
+            self.right_finger_wrench[:, 0:3] = torch_utils.quat_apply(right_parent_quat, right_wrench_p[:, 0:3])
+            self.right_finger_wrench[:, 3:6] = torch_utils.quat_apply(right_parent_quat, right_wrench_p[:, 3:6])
+
         if self.cfg.include_tactile_pointclouds:
-            if self._pc_left_meshes is None or self._pc_right_meshes is None:
+            if self._pc_left_meshes is None or self._pc_right_meshes is None or self._pc_peg_meshes is None:
                 robot_usd = Path(ASSET_DIR) / "franka_gelsight_r15_assembled.usd"
-                self._pc_left_meshes = _load_meshes_from_usd(
-                    usd_path=robot_usd,
-                    prim_path="/panda/panda_leftfinger/elastomer",
-                )
-                self._pc_right_meshes = _load_meshes_from_usd(
-                    usd_path=robot_usd,
-                    prim_path="/panda/panda_rightfinger/elastomer",
-                )
+                peg_usd = Path(ASSET_DIR) / "factory_peg_8mm.usd"
+                self._pc_left_meshes = _load_meshes_from_usd(robot_usd, "/panda/panda_leftfinger/elastomer")
+                self._pc_right_meshes = _load_meshes_from_usd(robot_usd, "/panda/panda_rightfinger/elastomer")
                 if not self._pc_left_meshes or not self._pc_right_meshes:
-                    meshes = _load_meshes_from_usd(
-                        usd_path=robot_usd,
-                        prim_path="/panda",
-                    )
+                    meshes = _load_meshes_from_usd(robot_usd, "/panda")
                     self._pc_left_meshes = meshes
                     self._pc_right_meshes = meshes
+
+                if peg_usd.exists():
+                    from pxr import Usd
+
+                    stage = Usd.Stage.Open(str(peg_usd))  # pyright: ignore[reportAttributeAccessIssue]
+                    default_prim = stage.GetDefaultPrim()
+                    root = default_prim.GetPath().pathString if default_prim else "/"
+                    self._pc_peg_meshes = _collect_meshes_from_stage(stage, root)
+                else:
+                    self._pc_peg_meshes = []
 
             half = max(1, self.cfg.tactile_pointcloud_gripper_points // 2)
             left_pts_np = _sample_meshes_to_points(self._pc_left_meshes, half)
             right_pts_np = _sample_meshes_to_points(
                 self._pc_right_meshes, self.cfg.tactile_pointcloud_gripper_points - half
             )
-            cylinder_pts_np = self._sample_cylinder_points_local(self.cfg.tactile_pointcloud_peg_points)
+            peg_pts_np = _sample_meshes_to_points(self._pc_peg_meshes, self.cfg.tactile_pointcloud_peg_points)
 
-            if left_pts_np.size > 0 and right_pts_np.size > 0 and cylinder_pts_np.size > 0:
+            if left_pts_np.size > 0 and right_pts_np.size > 0 and peg_pts_np.size > 0:
                 left_pts_l = torch.tensor(left_pts_np, dtype=torch.float32, device=self.device)
                 right_pts_l = torch.tensor(right_pts_np, dtype=torch.float32, device=self.device)
-                self._pc_cylinder_local_points = torch.tensor(cylinder_pts_np, dtype=torch.float32, device=self.device)
+                peg_pts_l = torch.tensor(peg_pts_np, dtype=torch.float32, device=self.device)
 
                 left_pos_e = self._robot.data.body_pos_w[:, self.left_finger_body_idx] - self.scene.env_origins
                 left_quat_w = self._robot.data.body_quat_w[:, self.left_finger_body_idx]
                 right_pos_e = self._robot.data.body_pos_w[:, self.right_finger_body_idx] - self.scene.env_origins
                 right_quat_w = self._robot.data.body_quat_w[:, self.right_finger_body_idx]
-                cyl_pos_e = self.fixed_pos
-                cyl_quat_w = self.fixed_quat
+                peg_pos_e = self.fixed_pos
+                peg_quat_w = self.fixed_quat
 
                 def _apply_pc(quat_w, pts_l, pos_e):
                     e_count, p_count = quat_w.shape[0], pts_l.shape[0]
@@ -257,8 +263,7 @@ class TestEnv(FactoryEnv):
 
                 self.tactile_pc_left_w = _apply_pc(left_quat_w, left_pts_l, left_pos_e)
                 self.tactile_pc_right_w = _apply_pc(right_quat_w, right_pts_l, right_pos_e)
-                self.tactile_pc_cylinder_w = _apply_pc(cyl_quat_w, self._pc_cylinder_local_points, cyl_pos_e)
-                self.tactile_pc_peg_w = self.tactile_pc_cylinder_w
+                self.tactile_pc_peg_w = _apply_pc(peg_quat_w, peg_pts_l, peg_pos_e)
 
         self.last_update_timestamp = self._robot._data._sim_timestamp
 
@@ -481,7 +486,9 @@ class TestEnv(FactoryEnv):
         # Zero initial velocity
         self.ee_angvel_fd[env_ids] = 0.0
         self.ee_linvel_fd[env_ids] = 0.0
-        
+
+        self._reset_fixed_peg(env_ids)
+
         # Get initial tactile render if enabled
         if self.cfg.enable_tactile_sensor and self._tactile_cam is not None:
             if self._tactile_cam._nominal_tactile is None:

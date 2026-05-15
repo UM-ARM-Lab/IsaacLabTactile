@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg
+from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.utils import configclass
 from pathlib import Path
 
@@ -469,13 +469,45 @@ class NutThread(FactoryTask):
 
 @configclass
 class TestTask(FactoryTask):
-    """Simple test environment with just a Franka robot and no objects."""
+    """Test environment with Franka robot and a fixed peg (same asset as PegInsert, kinematic)."""
     name = "test"
     duration_s = 5.0
-    
-    # No assets needed for test environment
+
+    held_asset_cfg = Peg8mm()
     fixed_asset_cfg = FixedAssetCfg()
-    held_asset_cfg = HeldAssetCfg()
+
+    # Fixed peg pose in env frame (upright peg resting on table).
+    fixed_peg_init_pos: tuple = (0.49, 0.0, 0.0)
+    fixed_peg_init_rot: tuple = (1.0, 0.0, 0.0, 0.0)
+
+    fixed_peg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/FixedPeg",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=held_asset_cfg.usd_path,
+            activate_contact_sensors=True,
+            # Peg USD ships with ArticulationRootAPI; disable for a single kinematic rigid body.
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(articulation_enabled=False),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=False,
+                max_depenetration_velocity=5.0,
+                linear_damping=0.0,
+                angular_damping=0.0,
+                max_linear_velocity=1000.0,
+                max_angular_velocity=3666.0,
+                enable_gyroscopic_forces=True,
+                solver_position_iteration_count=192,
+                solver_velocity_iteration_count=1,
+                max_contact_impulse=1e32,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=held_asset_cfg.mass),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=fixed_peg_init_pos,
+            rot=fixed_peg_init_rot,
+        ),
+    )
     
     # Robot initial end-effector pose (in world coordinates, relative to robot base at origin)
     # If hand_init_pos is [0, 0, 0], default joint positions will be used instead of IK
