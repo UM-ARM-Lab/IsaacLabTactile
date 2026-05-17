@@ -538,8 +538,9 @@ class FactoryTaskTestCfg(FactoryEnvCfg):
     observation_space = 20  # Placeholder; auto-computed in TestEnv.__init__
     state_space = 27  # Placeholder: 3 pos + 4 quat + 3 linvel + 3 angvel + 7 joint_pos + 7 prev_actions = 27
     
-    obs_order: list = ["fingertip_pos", "fingertip_quat", "ee_linvel", "ee_angvel", "gripper_pos"]
-    state_order: list = ["fingertip_pos", "fingertip_quat", "ee_linvel", "ee_angvel", "joint_pos"]
+    obs_order: list = ["fingertip_pos", "gripper_pos","fingertip_orn_6d", "ee_linvel", "ee_angvel"]
+    # obs_order: list = ["fingertip_pos", "fingertip_quat", "ee_linvel", "ee_angvel", "gripper_pos"]
+    state_order: list = ["fingertip_pos", "fingertip_orn_6d", "ee_linvel", "ee_angvel", "joint_pos"]
     
     def __post_init__(self):
         """Post initialization - override viewer to track robot instead of fixed_asset."""
@@ -549,8 +550,8 @@ class FactoryTaskTestCfg(FactoryEnvCfg):
         # No need to override actuators - use default torque control from FactoryEnvCfg
         
         # Lower gripper stiffness for more compliant gripper control
-        self.robot.actuators["panda_hand"].stiffness = 50.0  # Reduced from 7500.0
-        self.robot.actuators["panda_hand"].damping = 5.0  # Reduced from 173.0 (proportional to stiffness reduction)
+        self.robot.actuators["panda_hand"].stiffness = 500.0  # Reduced from 7500.0
+        self.robot.actuators["panda_hand"].damping = 40.0  # Reduced from 173.0 (proportional to stiffness reduction)
 
         # Double the position action threshold only for the test environment
         self.ctrl.pos_action_threshold = [v * 2 for v in self.ctrl.pos_action_threshold]
@@ -567,5 +568,5 @@ class FactoryTaskTestCfg(FactoryEnvCfg):
         # Use world origin to avoid per-step camera re-tracking, so manual camera movement is not reset.
         self.viewer.origin_type = "world"
         self.viewer.asset_name = "robot"
-        self.viewer.eye = (1.0, 1.0, 1.3)
-        self.viewer.lookat = (0.55, 0.0, 0.3)
+        self.viewer.eye = (1.0, 0.6, 0.6)
+        self.viewer.lookat = (0.5, 0.0, 0.2)
