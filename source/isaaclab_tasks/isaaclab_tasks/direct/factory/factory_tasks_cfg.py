@@ -467,9 +467,44 @@ class NutThread(FactoryTask):
     )
 
 
+TEST_HELD_OBJECT_PRESETS: dict[str, dict] = {
+    "peg": {
+        "held_asset_cfg_cls": Peg8mm,
+        "fixed_init_pos": (0.49, 0.0, 0.0),
+        "fixed_init_rot": (1.0, 0.0, 0.0, 0.0),
+    },
+    "gear": {
+        "held_asset_cfg_cls": MediumGear,
+        "fixed_init_pos": (0.49, 0.0, 0.0),
+        "fixed_init_rot": (1.0, 0.0, 0.0, 0.0),
+    },
+    "nut": {
+        "held_asset_cfg_cls": NutM16,
+        "fixed_init_pos": (0.49, 0.0, 0.0),
+        "fixed_init_rot": (1.0, 0.0, 0.0, 0.0),
+    },
+}
+
+
+def apply_test_held_object_preset(env_cfg) -> None:
+    """Set TestTask held-asset USD and fixed spawn pose from ``env_cfg.held_object`` (peg|gear|nut)."""
+    key = str(getattr(env_cfg, "held_object", "peg")).lower()
+    if key not in TEST_HELD_OBJECT_PRESETS:
+        raise ValueError(f"Unknown test held_object '{key}'. Choose from: {list(TEST_HELD_OBJECT_PRESETS)}")
+
+    preset = TEST_HELD_OBJECT_PRESETS[key]
+    held_cfg = preset["held_asset_cfg_cls"]()
+    task = env_cfg.task
+    task.held_asset_cfg = held_cfg
+    task.fixed_peg_init_pos = preset["fixed_init_pos"]
+    task.fixed_peg_init_rot = preset["fixed_init_rot"]
+    task.fixed_peg.spawn.usd_path = held_cfg.usd_path
+    task.fixed_peg.spawn.mass_props = sim_utils.MassPropertiesCfg(mass=held_cfg.mass)
+
+
 @configclass
 class TestTask(FactoryTask):
-    """Test environment with Franka robot and a fixed peg (same asset as PegInsert, kinematic)."""
+    """Test environment with Franka robot and a kinematically fixed held object on the table."""
     name = "test"
     duration_s = 5.0
 

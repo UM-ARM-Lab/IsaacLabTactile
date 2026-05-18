@@ -23,7 +23,15 @@ from isaaclab.sensors import TiledCameraCfg, VisuoTactileSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.utils import configclass
 
-from .factory_tasks_cfg import ASSET_DIR, FactoryTask, GearMesh, NutThread, PegInsert, TestTask
+from .factory_tasks_cfg import (
+    ASSET_DIR,
+    FactoryTask,
+    GearMesh,
+    NutThread,
+    PegInsert,
+    TestTask,
+    apply_test_held_object_preset,
+)
 from omegaconf import OmegaConf
 
 OBS_DIM_CFG = {
@@ -159,7 +167,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     ctrl: CtrlCfg = CtrlCfg()
     # Whether to include fingertip contact forces (left/right) in observations and critic states
     include_contact_forces: bool = False
-    # Whether to maintain per-step fingertip + peg point clouds as an additional tactile representation.
+    # Whether to maintain per-step fingertip + held-object point clouds as an additional tactile representation.
     # Point clouds are treated like sensor readings: they are always kept on the environment (when enabled),
     # and can optionally be added to observations if future configs desire.
     include_tactile_pointclouds: bool = False
@@ -528,6 +536,8 @@ class FactoryTaskTestCfg(FactoryEnvCfg):
     """Configuration for test environment with operational space control (end-effector control)."""
     task_name = "test"
     task = TestTask()
+    # Kinematic object on the table: peg, gear (medium), or nut.
+    held_object: str = "peg"
     episode_length_s = 10.0
     
     # Operational space control: 6 DOF end-effector control (3 pos + 3 rot) + 1 DOF gripper
@@ -541,9 +551,18 @@ class FactoryTaskTestCfg(FactoryEnvCfg):
     obs_order: list = ["fingertip_pos", "gripper_pos","fingertip_orn_6d", "ee_linvel", "ee_angvel"]
     # obs_order: list = ["fingertip_pos", "fingertip_quat", "ee_linvel", "ee_angvel", "gripper_pos"]
     state_order: list = ["fingertip_pos", "fingertip_orn_6d", "ee_linvel", "ee_angvel", "joint_pos"]
-    
+
+    def update_env_params(self):
+        super().update_env_params()
+        if self.params is not None:
+            env = self.params.get("env", OmegaConf.create({}))
+            if env.get("held_object", None) is not None:
+                self.held_object = str(env.held_object).lower()
+        apply_test_held_object_preset(self)
+
     def __post_init__(self):
         """Post initialization - override viewer to track robot instead of fixed_asset."""
+        apply_test_held_object_preset(self)
         super().__post_init__()
         
         # Keep torque control (stiffness=0) since we use operational space control

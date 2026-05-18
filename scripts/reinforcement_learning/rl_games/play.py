@@ -34,7 +34,7 @@ parser.add_argument(
 parser.add_argument(
     "--use_last_checkpoint",
     action="store_true",
-    help="When no checkpoint provided, use the last saved model. Otherwise use the best saved model.",
+    help="When --checkpoint is not set, load the latest checkpoint from the experiment log directory.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to run for evaluation.")
@@ -174,26 +174,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.join("logs", "rl_games", agent_cfg["params"]["config"]["name"])
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
-    # find checkpoint
+    # resolve policy checkpoint (optional)
+    resume_path = None
     if args_cli.use_pretrained_checkpoint:
         resume_path = get_published_pretrained_checkpoint("rl_games", train_task_name)
         if not resume_path:
             print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
             return
-    elif args_cli.checkpoint is None:
-        # specify directory for logging runs
-        run_dir = agent_cfg["params"]["config"].get("full_experiment_name", ".*")
-        # specify name of checkpoint
-        if args_cli.use_last_checkpoint:
-            checkpoint_file = ".*"
-        else:
-            # this loads the best checkpoint
-            checkpoint_file = f"{agent_cfg['params']['config']['name']}.pth"
-        # get path to previous checkpoint
-        resume_path = get_checkpoint_path(log_root_path, run_dir, checkpoint_file, other_dirs=["nn"])
-    else:
+    elif args_cli.checkpoint is not None:
         resume_path = retrieve_file_path(args_cli.checkpoint)
-    log_dir = os.path.dirname(os.path.dirname(resume_path))
+    elif args_cli.use_last_checkpoint:
+        run_dir = agent_cfg["params"]["config"].get("full_experiment_name", ".*")
+        resume_path = get_checkpoint_path(log_root_path, run_dir, ".*", other_dirs=["nn"])
+    else:
+        print(
+            "[INFO] No policy checkpoint provided; rolling out with a randomly initialized policy "
+            "(stochastic actions)."
+        )
+
+    load_policy_checkpoint = resume_path is not None
+    log_dir = os.path.dirname(os.path.dirname(resume_path)) if load_policy_checkpoint else log_root_path
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
@@ -221,7 +221,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
-            "video_folder": os.path.join(log_root_path, log_dir, "videos", "play"),
+            "video_folder": os.path.join(log_dir, "videos", "play"),
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
@@ -240,10 +240,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     )
     env_configurations.register("rlgpu", {"vecenv_type": "IsaacRlgWrapper", "env_creator": lambda **kwargs: env})
 
-    # load previously trained model
-    agent_cfg["params"]["load_checkpoint"] = True
-    agent_cfg["params"]["load_path"] = resume_path
-    print(f"[INFO]: Loading model checkpoint from: {agent_cfg['params']['load_path']}")
+    agent_cfg["params"]["load_checkpoint"] = load_policy_checkpoint
+    if load_policy_checkpoint:
+        agent_cfg["params"]["load_path"] = resume_path
+        print(f"[INFO]: Loading model checkpoint from: {resume_path}")
 
     # set number of actors into agent config
     agent_cfg["params"]["config"]["num_actors"] = env.unwrapped.num_envs
@@ -252,7 +252,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     runner.load(agent_cfg)
     # obtain the agent from the runner
     agent: BasePlayer = runner.create_player()
-    agent.restore(resume_path)
+    if load_policy_checkpoint:
+        agent.restore(resume_path)
     agent.reset()
     dt = env.unwrapped.step_dt
 
@@ -286,7 +287,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # convert obs to agent format
             obs = agent.obs_to_torch(obs)
             # agent stepping
-            actions = agent.get_action(obs, is_deterministic=agent.is_deterministic)
+            is_deterministic = agent.is_deterministic if load_policy_checkpoint else False
+            actions = agent.get_action(obs, is_deterministic=is_deterministic)
             # env stepping
             obs, _, dones, infos = env.step(actions)
 

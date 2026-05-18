@@ -80,6 +80,18 @@ def _load_meshes_from_usd(usd_path: Path, prim_path: str) -> list:
     return _collect_meshes_from_stage(stage, prim_path)
 
 
+def _load_meshes_from_usd_file(usd_path: Path) -> list:
+    """Collect all meshes from a USD asset file (default prim or stage root)."""
+    if not usd_path.exists():
+        return []
+    from pxr import Usd
+
+    stage = Usd.Stage.Open(str(usd_path))  # pyright: ignore[reportAttributeAccessIssue]
+    default_prim = stage.GetDefaultPrim()
+    root = default_prim.GetPath().pathString if default_prim else "/"
+    return _collect_meshes_from_stage(stage, root)
+
+
 def _sample_meshes_to_points(meshes: list, num_points: int) -> np.ndarray:
     if not meshes or num_points <= 0:
         return np.zeros((0, 3), dtype=np.float64)
@@ -292,7 +304,7 @@ class FactoryEnv(DirectRLEnv):
         self.ep_succeeded = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.ep_success_times = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
 
-        # Optional tactile point-cloud buffers (gripper fingertips + peg) in world frame.
+        # Optional tactile point-cloud buffers (gripper fingertips + held object) in world frame.
         # When enabled via cfg.include_tactile_pointclouds, these are updated every physics step
         # to behave like sensor readings. External scripts can always access them directly from
         # the environment, regardless of whether they are included in the observation vector.
@@ -303,7 +315,7 @@ class FactoryEnv(DirectRLEnv):
         # Local-frame meshes for point-cloud sampling (loaded lazily from USD assets).
         self._pc_left_meshes: list | None = None
         self._pc_right_meshes: list | None = None
-        self._pc_peg_meshes: list | None = None
+        self._pc_held_meshes: list | None = None
 
     def _setup_scene(self):
         """Initialize simulation scene."""
@@ -460,9 +472,12 @@ class FactoryEnv(DirectRLEnv):
         # Optional tactile point clouds (treated as sensor-like data).
         if self.cfg.include_tactile_pointclouds:
             # Lazily load meshes from USD assets if not already loaded.
-            if self._pc_left_meshes is None or self._pc_right_meshes is None or self._pc_peg_meshes is None:
-                robot_usd = Path(ASSET_DIR) / "franka_gelsight_r15_assembled.usd"
-                peg_usd = Path(ASSET_DIR) / "factory_peg_8mm.usd"
+            if self._pc_left_meshes is None or self._pc_right_meshes is None or self._pc_held_meshes is None:
+                robot_usd_file = (
+                    "franka_gelsight_r15_assembled.usd" if self.cfg.use_gelsight_finger else "franka_mimic.usd"
+                )
+                robot_usd = Path(ASSET_DIR) / robot_usd_file
+                held_usd = Path(self.cfg_task.held_asset_cfg.usd_path)
                 self._pc_left_meshes = _load_meshes_from_usd(robot_usd, "/panda/panda_leftfinger/elastomer")
                 self._pc_right_meshes = _load_meshes_from_usd(robot_usd, "/panda/panda_rightfinger/elastomer")
                 if not self._pc_left_meshes or not self._pc_right_meshes:
@@ -470,29 +485,21 @@ class FactoryEnv(DirectRLEnv):
                     self._pc_left_meshes = meshes
                     self._pc_right_meshes = meshes
 
-                if peg_usd.exists():
-                    from pxr import Usd  # local import for USD
-
-                    stage = Usd.Stage.Open(str(peg_usd))  # pyright: ignore[reportAttributeAccessIssue]
-                    default_prim = stage.GetDefaultPrim()
-                    root = default_prim.GetPath().pathString if default_prim else "/"
-                    self._pc_peg_meshes = _collect_meshes_from_stage(stage, root)
-                else:
-                    self._pc_peg_meshes = []
+                self._pc_held_meshes = _load_meshes_from_usd_file(held_usd)
 
             # Resample local-frame point clouds for this timestep.
             half = max(1, self.cfg.tactile_pointcloud_gripper_points // 2)
             left_pts_np = _sample_meshes_to_points(self._pc_left_meshes, half)
             right_pts_np = _sample_meshes_to_points(self._pc_right_meshes, self.cfg.tactile_pointcloud_gripper_points - half)
-            peg_pts_np = _sample_meshes_to_points(self._pc_peg_meshes, self.cfg.tactile_pointcloud_peg_points)
+            held_pts_np = _sample_meshes_to_points(self._pc_held_meshes, self.cfg.tactile_pointcloud_peg_points)
 
-            if left_pts_np.size == 0 or right_pts_np.size == 0 or peg_pts_np.size == 0:
+            if left_pts_np.size == 0 or right_pts_np.size == 0 or held_pts_np.size == 0:
                 # Keep previous buffers (or zeros) if sampling failed.
                 pass
             else:
                 left_pts_l = torch.tensor(left_pts_np, dtype=torch.float32, device=self.device)
                 right_pts_l = torch.tensor(right_pts_np, dtype=torch.float32, device=self.device)
-                peg_pts_l = torch.tensor(peg_pts_np, dtype=torch.float32, device=self.device)
+                held_pts_l = torch.tensor(held_pts_np, dtype=torch.float32, device=self.device)
 
                 # Use environment-frame positions (subtract env_origins) so point clouds for
                 # different envs are centered consistently, matching other obs like held_pos.
@@ -500,8 +507,8 @@ class FactoryEnv(DirectRLEnv):
                 left_quat_w = self._robot.data.body_quat_w[:, self.left_finger_body_idx]
                 right_pos_e = self._robot.data.body_pos_w[:, self.right_finger_body_idx] - self.scene.env_origins
                 right_quat_w = self._robot.data.body_quat_w[:, self.right_finger_body_idx]
-                peg_pos_e = self._held_asset.data.root_pos_w - self.scene.env_origins
-                peg_quat_w = self._held_asset.data.root_quat_w
+                held_pos_e = self._held_asset.data.root_pos_w - self.scene.env_origins
+                held_quat_w = self._held_asset.data.root_quat_w
 
                 # The torch_utils.quat_apply helper expects the quaternion and point tensors
                 # to have the same leading dimension (no implicit broadcasting). To obtain a
@@ -521,7 +528,7 @@ class FactoryEnv(DirectRLEnv):
 
                 self.tactile_pc_left_w = _apply_pc(left_quat_w, left_pts_l, left_pos_e)
                 self.tactile_pc_right_w = _apply_pc(right_quat_w, right_pts_l, right_pos_e)
-                self.tactile_pc_peg_w = _apply_pc(peg_quat_w, peg_pts_l, peg_pos_e)
+                self.tactile_pc_peg_w = _apply_pc(held_quat_w, held_pts_l, held_pos_e)
 
         self.last_update_timestamp = self._robot._data._sim_timestamp
 

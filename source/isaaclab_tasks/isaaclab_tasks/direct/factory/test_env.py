@@ -20,8 +20,8 @@ from isaaclab.sensors import VisuoTactileSensor
 from . import factory_utils
 from .factory_env import (
     FactoryEnv,
-    _collect_meshes_from_stage,
     _load_meshes_from_usd,
+    _load_meshes_from_usd_file,
     _sample_meshes_to_points,
 )
 from .factory_env_cfg import FactoryTaskTestCfg, ASSET_DIR, OBS_DIM_CFG, STATE_DIM_CFG
@@ -32,7 +32,8 @@ class TestEnv(FactoryEnv):
     
     This environment provides end-effector control using operational space control (OSC),
     matching the control method used in other factory environments (PegInsert, GearMesh, NutThread).
-    A Peg8mm asset is spawned kinematically fixed on the table (same USD as PegInsert).
+    A held object (peg, gear, or nut) is spawned kinematically fixed on the table
+    (selected via ``FactoryTaskTestCfg.held_object``).
     
     Action space: 7 DOF 
         - actions[0:3]: end-effector position displacement (delta from current)
@@ -110,7 +111,7 @@ class TestEnv(FactoryEnv):
         self.cfg.robot.spawn.usd_path = f"{ASSET_DIR}/{robot_usd_file}"
         self._robot = Articulation(self.cfg.robot)
 
-        # Same peg USD as PegInsert, but kinematic so it stays fixed on the table.
+        # Held-object USD (peg/gear/nut), kinematic so it stays fixed on the table.
         self._fixed_peg = RigidObject(self.cfg_task.fixed_peg)
 
         # Clone environments
@@ -147,7 +148,11 @@ class TestEnv(FactoryEnv):
             if self.cfg.enable_tactile_sensor_right and hasattr(self.cfg, "tactile_cam_right"):
                 VisuoTactileSensor.setup_compliant_materials(self.cfg.tactile_cam_right)
 
-        print(f"[INFO] Test environment created with {self.scene.num_envs} environments")
+        held = getattr(self.cfg, "held_object", "peg")
+        print(
+            f"[INFO] Test environment created with {self.scene.num_envs} environments "
+            f"(held_object={held}, usd={self.cfg_task.held_asset_cfg.usd_path})"
+        )
 
     def _reset_fixed_peg(self, env_ids: torch.Tensor):
         """Write the fixed peg back to its nominal pose (kinematic, env-frame init)."""
@@ -214,9 +219,12 @@ class TestEnv(FactoryEnv):
             self.right_finger_wrench[:, 3:6] = torch_utils.quat_apply(right_parent_quat, right_wrench_p[:, 3:6])
 
         if self.cfg.include_tactile_pointclouds:
-            if self._pc_left_meshes is None or self._pc_right_meshes is None or self._pc_peg_meshes is None:
-                robot_usd = Path(ASSET_DIR) / "franka_gelsight_r15_assembled.usd"
-                peg_usd = Path(ASSET_DIR) / "factory_peg_8mm.usd"
+            if self._pc_left_meshes is None or self._pc_right_meshes is None or self._pc_held_meshes is None:
+                robot_usd_file = (
+                    "franka_gelsight_r15_assembled.usd" if self.cfg.use_gelsight_finger else "franka_mimic.usd"
+                )
+                robot_usd = Path(ASSET_DIR) / robot_usd_file
+                held_usd = Path(self.cfg_task.held_asset_cfg.usd_path)
                 self._pc_left_meshes = _load_meshes_from_usd(robot_usd, "/panda/panda_leftfinger/elastomer")
                 self._pc_right_meshes = _load_meshes_from_usd(robot_usd, "/panda/panda_rightfinger/elastomer")
                 if not self._pc_left_meshes or not self._pc_right_meshes:
@@ -224,34 +232,26 @@ class TestEnv(FactoryEnv):
                     self._pc_left_meshes = meshes
                     self._pc_right_meshes = meshes
 
-                if peg_usd.exists():
-                    from pxr import Usd
-
-                    stage = Usd.Stage.Open(str(peg_usd))  # pyright: ignore[reportAttributeAccessIssue]
-                    default_prim = stage.GetDefaultPrim()
-                    root = default_prim.GetPath().pathString if default_prim else "/"
-                    self._pc_peg_meshes = _collect_meshes_from_stage(stage, root)
-                else:
-                    self._pc_peg_meshes = []
+                self._pc_held_meshes = _load_meshes_from_usd_file(held_usd)
 
             half = max(1, self.cfg.tactile_pointcloud_gripper_points // 2)
             left_pts_np = _sample_meshes_to_points(self._pc_left_meshes, half)
             right_pts_np = _sample_meshes_to_points(
                 self._pc_right_meshes, self.cfg.tactile_pointcloud_gripper_points - half
             )
-            peg_pts_np = _sample_meshes_to_points(self._pc_peg_meshes, self.cfg.tactile_pointcloud_peg_points)
+            held_pts_np = _sample_meshes_to_points(self._pc_held_meshes, self.cfg.tactile_pointcloud_peg_points)
 
-            if left_pts_np.size > 0 and right_pts_np.size > 0 and peg_pts_np.size > 0:
+            if left_pts_np.size > 0 and right_pts_np.size > 0 and held_pts_np.size > 0:
                 left_pts_l = torch.tensor(left_pts_np, dtype=torch.float32, device=self.device)
                 right_pts_l = torch.tensor(right_pts_np, dtype=torch.float32, device=self.device)
-                peg_pts_l = torch.tensor(peg_pts_np, dtype=torch.float32, device=self.device)
+                held_pts_l = torch.tensor(held_pts_np, dtype=torch.float32, device=self.device)
 
                 left_pos_e = self._robot.data.body_pos_w[:, self.left_finger_body_idx] - self.scene.env_origins
                 left_quat_w = self._robot.data.body_quat_w[:, self.left_finger_body_idx]
                 right_pos_e = self._robot.data.body_pos_w[:, self.right_finger_body_idx] - self.scene.env_origins
                 right_quat_w = self._robot.data.body_quat_w[:, self.right_finger_body_idx]
-                peg_pos_e = self.fixed_pos
-                peg_quat_w = self.fixed_quat
+                held_pos_e = self.fixed_pos
+                held_quat_w = self.fixed_quat
 
                 def _apply_pc(quat_w, pts_l, pos_e):
                     e_count, p_count = quat_w.shape[0], pts_l.shape[0]
@@ -263,7 +263,7 @@ class TestEnv(FactoryEnv):
 
                 self.tactile_pc_left_w = _apply_pc(left_quat_w, left_pts_l, left_pos_e)
                 self.tactile_pc_right_w = _apply_pc(right_quat_w, right_pts_l, right_pos_e)
-                self.tactile_pc_peg_w = _apply_pc(peg_quat_w, peg_pts_l, peg_pos_e)
+                self.tactile_pc_peg_w = _apply_pc(held_quat_w, held_pts_l, held_pos_e)
 
         self.last_update_timestamp = self._robot._data._sim_timestamp
 
