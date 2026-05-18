@@ -155,12 +155,27 @@ class TestEnv(FactoryEnv):
         )
 
     def _reset_fixed_peg(self, env_ids: torch.Tensor):
-        """Write the fixed peg back to its nominal pose (kinematic, env-frame init)."""
+        """Write the fixed peg pose. Randomize yaw about world +Z when range > 0."""
         init_pos = torch.tensor(self.cfg_task.fixed_peg_init_pos, device=self.device, dtype=torch.float32)
         init_rot = torch.tensor(self.cfg_task.fixed_peg_init_rot, device=self.device, dtype=torch.float32)
         peg_state = self._fixed_peg.data.default_root_state.clone()[env_ids]
         peg_state[:, 0:3] = init_pos.unsqueeze(0) + self.scene.env_origins[env_ids]
-        peg_state[:, 3:7] = init_rot.unsqueeze(0)
+        n = len(env_ids)
+        base_rot = init_rot.unsqueeze(0).expand(n, 4)
+
+        yaw_range_deg = float(self.cfg_task.fixed_asset_init_orn_range_deg)
+        if yaw_range_deg > 0.0:
+            init_yaw = np.deg2rad(self.cfg_task.fixed_asset_init_orn_deg)
+            yaw_range = np.deg2rad(yaw_range_deg)
+            yaw = init_yaw + yaw_range * torch.rand((n,), dtype=torch.float32, device=self.device)
+            yaw_quat = torch_utils.quat_from_euler_xyz(
+                torch.zeros(n, dtype=torch.float32, device=self.device),
+                torch.zeros(n, dtype=torch.float32, device=self.device),
+                yaw,
+            )
+            peg_state[:, 3:7] = torch_utils.quat_mul(yaw_quat, base_rot)
+        else:
+            peg_state[:, 3:7] = base_rot
         peg_state[:, 7:] = 0.0
         self._fixed_peg.write_root_pose_to_sim(peg_state[:, 0:7], env_ids=env_ids)
         self._fixed_peg.write_root_velocity_to_sim(peg_state[:, 7:], env_ids=env_ids)
@@ -346,7 +361,7 @@ class TestEnv(FactoryEnv):
         # Call DirectRLEnv._reset_idx directly (skipping FactoryEnv._reset_idx which handles assets)
         from isaaclab.envs import DirectRLEnv
         DirectRLEnv._reset_idx(self, env_ids)
-        
+
         # Check if we should use IK-based initialization
         hand_init_pos = torch.tensor(self.cfg_task.hand_init_pos, device=self.device)
         use_ik_init = torch.any(torch.abs(hand_init_pos) > 1e-6)  # Check if not all zeros

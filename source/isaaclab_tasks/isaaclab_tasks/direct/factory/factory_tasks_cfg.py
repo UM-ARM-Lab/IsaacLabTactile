@@ -217,9 +217,9 @@ class MediumGear(HeldAssetCfg):
     mass = 0.012
     # Gear is 0.025 height, but center at 0.05, and another 0.05 for gear
     # 0.010 gear, 0.015 grab-able
-    height_above_center = 0.020
-    center_x_offset = -0.020
-    center_y_offset = 0.0
+    # height_above_center = 0.020
+    # center_x_offset = -0.020
+    # center_y_offset = 0.0
 
 @configclass
 class GearMesh(FactoryTask):
