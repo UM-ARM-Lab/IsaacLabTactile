@@ -155,7 +155,7 @@ class TestEnv(FactoryEnv):
         )
 
     def _reset_fixed_peg(self, env_ids: torch.Tensor):
-        """Write the fixed peg pose. Randomize yaw about world +Z when range > 0."""
+        """Write the fixed peg pose with optional fixed yaw offset about world +Z."""
         init_pos = torch.tensor(self.cfg_task.fixed_peg_init_pos, device=self.device, dtype=torch.float32)
         init_rot = torch.tensor(self.cfg_task.fixed_peg_init_rot, device=self.device, dtype=torch.float32)
         peg_state = self._fixed_peg.data.default_root_state.clone()[env_ids]
@@ -163,11 +163,9 @@ class TestEnv(FactoryEnv):
         n = len(env_ids)
         base_rot = init_rot.unsqueeze(0).expand(n, 4)
 
-        yaw_range_deg = float(self.cfg_task.fixed_asset_init_orn_range_deg)
-        if yaw_range_deg > 0.0:
-            init_yaw = np.deg2rad(self.cfg_task.fixed_asset_init_orn_deg)
-            yaw_range = np.deg2rad(yaw_range_deg)
-            yaw = init_yaw + yaw_range * torch.rand((n,), dtype=torch.float32, device=self.device)
+        init_yaw_deg = float(self.cfg_task.fixed_asset_init_orn_deg)
+        if init_yaw_deg != 0.0:
+            yaw = torch.full((n,), np.deg2rad(init_yaw_deg), dtype=torch.float32, device=self.device)
             yaw_quat = torch_utils.quat_from_euler_xyz(
                 torch.zeros(n, dtype=torch.float32, device=self.device),
                 torch.zeros(n, dtype=torch.float32, device=self.device),

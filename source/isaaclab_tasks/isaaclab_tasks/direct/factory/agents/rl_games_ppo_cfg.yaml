@@ -82,25 +82,26 @@ params:
       # name: mae  # one of: null, mae, point_mae, ot
       # name: point_mae  # one of: null, mae, point_mae, ot
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
-      latent_noise:
-        enable: false  # applies to the final latent token when name == "mae" or "point_mae"
-        std_range: [0.0, 0.1]  
-        # per-episode std sampled uniformly; each step applies latent *= N(1, std)
+      gaussian_dropout:
+        enable: false  # multiplicative N(1, sigma) on final policy latent; applies when name == mae|point_mae|ot
+        std_range: [0.0, 0.1]
+        # per-episode sigma sampled uniformly from std_range; each step applies latent *= N(1, sigma)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
-      ot_euler_steps: 32
+      ot_euler_steps: 4
       ot_reverse_direction: false  # true: run reverse of checkpoint training direction
       checkpoints:
         # ot: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0005_sinkhorn_eps_schedule/point_latent_projection_final.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0025_diff_dtw_img_proj/rectified_flow_latent_epoch_0300.pth
-        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0069_paired_large_test_data/rectified_flow_latent_epoch_2500.pth
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0072_paired_large_test_data/rectified_flow_latent_epoch_2500.pth
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0118_ot_nut/rectified_flow_latent_epoch_1000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0113_ot_test_env/rectified_flow_latent_epoch_1000.pth
         # ot: null
-        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/point_mae_w_reg_no_force_test_env_small/point_mae_epoch_0010.pth
-        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae_pc_reg_no_force/point_mae_epoch_0005.pth
+        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0010/point_mae_epoch_0010.pth
+        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0020_nut/point_mae_epoch_0005.pth
+        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0016_gear/point_mae_epoch_0010.pth
         point_mae: null
-        # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/tactile_image_mae_epoch_0200.pth
-        # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images_rand_w_reg/tactile_image_mae_epoch_0300.pth
-        mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/mae_reg_test_env_double_two_datasets/tactile_image_mae_epoch_0170.pth
+        # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0019_peg/tactile_image_mae_epoch_0300.pth
+        # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0009/tactile_image_mae_epoch_0300.pth
+        mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0014_nut/tactile_image_mae_epoch_0300.pth
         # mae: null
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0007_eps_002/point_latent_projection_final.pth
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_dtw_0044_dtw_image_proj_infonce/point_latent_projection_dtw_epoch_0050.pth
@@ -140,7 +141,7 @@ params:
     schedule_type: standard
     kl_threshold: 0.008
     score_to_win: 20000
-    max_epochs: 300
+    max_epochs: 100
     save_best_after: 10
     save_frequency: 20
     print_stats: True

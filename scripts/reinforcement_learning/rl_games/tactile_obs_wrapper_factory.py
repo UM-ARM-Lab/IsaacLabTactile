@@ -61,17 +61,19 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
     projection_source_latent = wrapper_cfg.get("projection_source_latent")
     if projection_source_latent is not None:
         projection_source_latent = str(projection_source_latent).lower()
-    latent_noise_cfg = dict(wrapper_cfg.get("latent_noise") or {})
+    latent_noise_cfg = dict(wrapper_cfg.get("gaussian_dropout") or wrapper_cfg.get("latent_noise") or {})
     latent_noise_enable = bool(latent_noise_cfg.get("enable", False))
-    latent_noise_std_range = latent_noise_cfg.get("std_range")
+    latent_noise_std_range = latent_noise_cfg.get("std_range", [0.0, 0.0])
     if not isinstance(latent_noise_std_range, (list, tuple)) or len(latent_noise_std_range) != 2:
-        raise ValueError("tactile_obs_wrapper.latent_noise.std_range is required and must be [min, max].")
+        raise ValueError(
+            "tactile_obs_wrapper.gaussian_dropout.std_range is required and must be [min, max]."
+        )
     latent_noise_std_min = float(latent_noise_std_range[0])
     latent_noise_std_max = float(latent_noise_std_range[1])
     if latent_noise_std_min < 0.0 or latent_noise_std_max < 0.0:
-        raise ValueError("tactile_obs_wrapper.latent_noise std bounds must be non-negative.")
+        raise ValueError("tactile_obs_wrapper.gaussian_dropout std bounds must be non-negative.")
     if latent_noise_std_min > latent_noise_std_max:
-        raise ValueError("tactile_obs_wrapper.latent_noise.std_range must satisfy min <= max.")
+        raise ValueError("tactile_obs_wrapper.gaussian_dropout.std_range must satisfy min <= max.")
     ckpts = dict(wrapper_cfg.get("checkpoints") or {})
     return TactileObsWrapperSpec(
         name=name,
@@ -391,6 +393,9 @@ def build_tactile_obs_wrapper(
             pc_gather_cfg=pc_gather_cfg,
             proprio_src_mean=proprio_mean,
             proprio_src_std=proprio_std,
+            latent_noise_enable=spec.latent_noise_enable,
+            latent_noise_std_min=spec.latent_noise_std_min,
+            latent_noise_std_max=spec.latent_noise_std_max,
         )
 
         return lambda env: TactileLatentFlowObsWrapper(env, **wrapper_kwargs)

@@ -147,6 +147,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     state_space = 72
     # obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_quat", "ee_linvel", "ee_angvel"]
     obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_orn_6d", "ee_linvel", "ee_angvel"]
+    # obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_orn_6d"]
     state_order: list = [
         "fingertip_pos",
         "fingertip_quat",

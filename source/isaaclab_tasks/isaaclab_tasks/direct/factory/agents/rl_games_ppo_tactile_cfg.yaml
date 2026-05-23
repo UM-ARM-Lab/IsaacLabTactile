@@ -122,6 +122,10 @@ params:
     tactile_obs_wrapper:
       name: null  # one of: null, mae, point_mae, ot
       use_projection: false
+      gaussian_dropout:
+        enable: false  # multiplicative N(1, sigma) on final policy latent; applies when name == mae|point_mae|ot
+        std_range: [0.0, 0.1]
+        # per-episode sigma sampled uniformly from std_range; each step applies latent *= N(1, sigma)
       projection_source_latent: null  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
       checkpoints:
         # Point-MAE checkpoint (.pth) saved by tactile_transfer/script/train_point_mae.py
