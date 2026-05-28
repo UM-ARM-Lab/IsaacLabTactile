@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import math
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.utils import configclass
@@ -134,7 +135,8 @@ class PegInsert(FactoryTask):
 
     # Held Asset (applies to all tasks)
     held_asset_pos_noise: list = [0.003, 0.0, 0.003]  # noise level of the held asset in gripper
-    held_asset_rot_noise: list = [0.0, 0.0, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
+    # held_asset_rot_noise: list = [0.0, 0.0, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
+    held_asset_rot_noise: list = [0.0, 0.1, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     # held_asset_rot_noise: list = [0.0, 0.3, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     # held_asset_rot_noise: list = [0.0, 0.628318, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     held_asset_rot_init: float = 0.0
@@ -481,9 +483,45 @@ TEST_HELD_OBJECT_PRESETS: dict[str, dict] = {
     "nut": {
         "held_asset_cfg_cls": NutM16,
         "fixed_init_pos": (0.49, 0.0, 0.0),
-        "fixed_init_rot": (1.0, 0.0, 0.0, 0.0),
+        # 30 deg about +X so the nut rests on a flat face for grasping.
+        "fixed_init_rot": (0.9659, 0.0, 0.0, 0.2588),
     },
 }
+
+
+def _quat_mul_wxyz(q1: tuple[float, float, float, float], q2: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return (
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    )
+
+
+def sync_fixed_peg_spawn_state(task) -> None:
+    """Mirror ``fixed_peg_init_pos`` / ``fixed_peg_init_rot`` into ``fixed_peg.init_state``.
+
+    ``TestTask.fixed_peg.init_state`` is captured when the configclass is built. The kinematic
+    held object is spawned from ``init_state`` in USD, so overrides to ``fixed_peg_init_rot``
+    must be copied here before ``gym.make()`` (see ``TestEnv._reset_fixed_peg`` for runtime).
+
+    Optional fixed yaw about world +Z uses ``fixed_asset_init_orn_deg``.
+    """
+    pos = tuple(task.fixed_peg_init_pos)
+    base_rot = tuple(task.fixed_peg_init_rot)
+
+    yaw_deg = float(task.fixed_asset_init_orn_deg)
+    if yaw_deg != 0.0:
+        half_yaw = math.radians(yaw_deg) * 0.5
+        yaw_quat = (math.cos(half_yaw), 0.0, 0.0, math.sin(half_yaw))
+        rot = _quat_mul_wxyz(yaw_quat, base_rot)
+    else:
+        rot = base_rot
+
+    task.fixed_peg.init_state.pos = pos
+    task.fixed_peg.init_state.rot = rot
 
 
 def apply_test_held_object_preset(env_cfg) -> None:
@@ -500,6 +538,7 @@ def apply_test_held_object_preset(env_cfg) -> None:
     task.fixed_peg_init_rot = preset["fixed_init_rot"]
     task.fixed_peg.spawn.usd_path = held_cfg.usd_path
     task.fixed_peg.spawn.mass_props = sim_utils.MassPropertiesCfg(mass=held_cfg.mass)
+    sync_fixed_peg_spawn_state(task)
 
 
 @configclass

@@ -23,6 +23,7 @@ class TactileObsWrapperSpec:
     latent_noise_enable: bool
     latent_noise_std_min: float
     latent_noise_std_max: float
+    ot_debug_gt_force: bool
 
 
 def _is_enabled_path(p: Any) -> bool:
@@ -57,6 +58,7 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
     force_keys = dict(wrapper_cfg.get("force_keys") or {})
     ot_euler_steps = int(wrapper_cfg.get("ot_euler_steps", 32))
     ot_reverse_direction = bool(wrapper_cfg.get("ot_reverse_direction", False))
+    ot_debug_gt_force = bool(wrapper_cfg.get("debug_gt_force", False))
     use_projection = bool(wrapper_cfg.get("use_projection", False))
     projection_source_latent = wrapper_cfg.get("projection_source_latent")
     if projection_source_latent is not None:
@@ -91,6 +93,7 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         latent_noise_enable=latent_noise_enable,
         latent_noise_std_min=latent_noise_std_min,
         latent_noise_std_max=latent_noise_std_max,
+        ot_debug_gt_force=ot_debug_gt_force,
     )
 
 
@@ -315,6 +318,36 @@ def build_tactile_obs_wrapper(
                     f"Image MAE latent dim ({int(image_mae.cfg.encoder_embed_dim)} x {tactile_stream_count})="
                     f"{expected_image_latent_dim} != OT latent_dim={latent_dim}."
                 )
+            if spec.ot_debug_gt_force:
+                if spec.ckpt_point_mae is None:
+                    raise ValueError(
+                        "tactile_obs_wrapper.debug_gt_force=true requires checkpoints.point_mae"
+                    )
+                if not spec.pc_keys:
+                    raise ValueError(
+                        "tactile_obs_wrapper.debug_gt_force=true requires non-empty pc_keys"
+                    )
+                if hasattr(env_cfg, "include_contact_forces"):
+                    env_cfg.include_contact_forces = True
+                else:
+                    raise ValueError(
+                        "include_contact_forces must exist in env_cfg for OT debug_gt_force"
+                    )
+                if hasattr(env_cfg, "include_tactile_pointclouds"):
+                    env_cfg.include_tactile_pointclouds = True
+                else:
+                    raise ValueError(
+                        "include_tactile_pointclouds must exist in env_cfg for OT debug_gt_force"
+                    )
+                point_cfg = {"pc_keys": spec.pc_keys, "force_keys": spec.force_keys}
+                point_mae = load_pointmae_encoder_from_checkpoint(
+                    spec.ckpt_point_mae, wrap_device, point_cfg
+                )
+                if int(point_mae.cfg.embed_dim) != latent_dim:
+                    raise ValueError(
+                        f"Point-MAE embed_dim={int(point_mae.cfg.embed_dim)} != OT latent_dim={latent_dim}."
+                    )
+                pc_gather_cfg = {"pc_keys": list(spec.pc_keys), "force_keys": dict(spec.force_keys)}
         else:
             if spec.ckpt_point_mae is None:
                 raise ValueError("OT direction=pc_to_image requires checkpoints.point_mae")
@@ -396,6 +429,7 @@ def build_tactile_obs_wrapper(
             latent_noise_enable=spec.latent_noise_enable,
             latent_noise_std_min=spec.latent_noise_std_min,
             latent_noise_std_max=spec.latent_noise_std_max,
+            debug_gt_force=spec.ot_debug_gt_force,
         )
 
         return lambda env: TactileLatentFlowObsWrapper(env, **wrapper_kwargs)

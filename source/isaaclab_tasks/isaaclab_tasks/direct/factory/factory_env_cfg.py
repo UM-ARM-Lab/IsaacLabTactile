@@ -87,6 +87,7 @@ STATE_DIM_CFG = {
 @configclass
 class ObsRandCfg:
     fixed_asset_pos = [0.001, 0.001, 0.001]
+    # fixed_asset_pos = [0.003, 0.003, 0.003]
     
     # Observation noise parameters for domain randomization
     # Each parameter is a list of standard deviations for Gaussian noise
@@ -135,7 +136,15 @@ class CtrlCfg:
     default_dof_pos_tensor = [-1.3003, -0.4015, 1.1791, -2.1493, 0.4001, 1.9425, 0.4754]
     kp_null = 10.0
     kd_null = 6.3246
-    use_full_rotation: bool = False
+    use_full_rotation: bool = True
+
+
+@configclass
+class ForceFilterCfg:
+    # Enable temporal filtering for fingertip forces/wrenches used by wrappers.
+    enable: bool = True
+    # EMA coefficient in [0, 1]. 1.0 -> no smoothing, 0.0 -> frozen.
+    alpha: float = 0.2
 
 
 @configclass
@@ -146,8 +155,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     observation_space = 21
     state_space = 72
     # obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_quat", "ee_linvel", "ee_angvel"]
-    obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_orn_6d", "ee_linvel", "ee_angvel"]
-    # obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_orn_6d"]
+    # obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_orn_6d", "ee_linvel", "ee_angvel"]
+    obs_order: list = ["fingertip_pos_rel_fixed", "fingertip_orn_6d"]
     state_order: list = [
         "fingertip_pos",
         "fingertip_quat",
@@ -166,6 +175,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     obs_rand: ObsRandCfg = ObsRandCfg()
     obs_history: ObsHistoryCfg = ObsHistoryCfg()
     ctrl: CtrlCfg = CtrlCfg()
+    force_filter: ForceFilterCfg = ForceFilterCfg()
     # Whether to include fingertip contact forces (left/right) in observations and critic states
     include_contact_forces: bool = False
     # Whether to maintain per-step fingertip + held-object point clouds as an additional tactile representation.
@@ -495,6 +505,11 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         use_full_rotation = ctrl.get("use_full_rotation", None)
         if use_full_rotation is not None:
             self.ctrl.use_full_rotation = use_full_rotation
+        force_filter = env.get("force_filter", OmegaConf.create({}))
+        if force_filter.get("enable", None) is not None:
+            self.force_filter.enable = bool(force_filter.enable)
+        if force_filter.get("alpha", None) is not None:
+            self.force_filter.alpha = float(force_filter.alpha)
 
     def __post_init__(self):
         """Post initialization."""

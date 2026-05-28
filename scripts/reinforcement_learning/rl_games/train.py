@@ -179,6 +179,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env_cfg.params["env"]["include_prev_actions"] = include_prev_actions
             print(f"[INFO] Setting include_prev_actions to {include_prev_actions}")
             env_cfg.update_env_params()
+
+        # Override force filter settings (used by FactoryEnv contact-force EMA filtering).
+        force_filter = task_overrides.get("force_filter", None)
+        if force_filter is not None:
+            if not isinstance(force_filter, dict):
+                raise ValueError("task_overrides.force_filter must be a dictionary with keys like enable/alpha.")
+            if env_cfg.params is None:
+                env_cfg.params = OmegaConf.create({})
+            if "env" not in env_cfg.params:
+                env_cfg.params["env"] = OmegaConf.create({})
+            env_cfg.params["env"]["force_filter"] = OmegaConf.create(force_filter)
+            print(f"[INFO] Setting force_filter to {force_filter}")
+            env_cfg.update_env_params()
     
     # update agent device configuration to match environment device
     if args_cli.device is not None:

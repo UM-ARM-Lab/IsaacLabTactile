@@ -287,11 +287,16 @@ class FactoryEnv(DirectRLEnv):
         # Each force is 3D: (Fx, Fy, Fz)
         self.left_finger_force = torch.zeros((self.num_envs, 3), device=self.device)
         self.right_finger_force = torch.zeros((self.num_envs, 3), device=self.device)
+        self.left_finger_force_filtered = torch.zeros((self.num_envs, 3), device=self.device)
+        self.right_finger_force_filtered = torch.zeros((self.num_envs, 3), device=self.device)
 
         # Net wrench buffers at individual fingertips, derived from incoming joint forces.
         # Each wrench is 6D: (Fx, Fy, Fz, Tx, Ty, Tz) in the parent link frame.
         self.left_finger_wrench = torch.zeros((self.num_envs, 6), device=self.device)
         self.right_finger_wrench = torch.zeros((self.num_envs, 6), device=self.device)
+        self.left_finger_wrench_filtered = torch.zeros((self.num_envs, 6), device=self.device)
+        self.right_finger_wrench_filtered = torch.zeros((self.num_envs, 6), device=self.device)
+        self._force_filter_initialized = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -452,6 +457,7 @@ class FactoryEnv(DirectRLEnv):
             right_torque_w = torch_utils.quat_apply(right_parent_quat, right_torque_p)
             self.right_finger_wrench[:, 0:3] = right_force_w
             self.right_finger_wrench[:, 3:6] = right_torque_w
+            self._update_filtered_forces()
         # Finite-differencing results in more reliable velocity estimates.
         self.ee_linvel_fd = (self.fingertip_midpoint_pos - self.prev_fingertip_pos) / dt
         self.prev_fingertip_pos = self.fingertip_midpoint_pos.clone()
@@ -531,6 +537,47 @@ class FactoryEnv(DirectRLEnv):
                 self.tactile_pc_peg_w = _apply_pc(held_quat_w, held_pts_l, held_pos_e)
 
         self.last_update_timestamp = self._robot._data._sim_timestamp
+
+    def _update_filtered_forces(self) -> None:
+        """Apply per-env EMA to fingertip force/wrench tensors."""
+        alpha = float(self.cfg.force_filter.alpha)
+        if alpha < 0.0 or alpha > 1.0:
+            raise ValueError(f"force_filter.alpha must be in [0, 1], got {alpha}.")
+
+        if not bool(self.cfg.force_filter.enable):
+            self.left_finger_force_filtered.copy_(self.left_finger_force)
+            self.right_finger_force_filtered.copy_(self.right_finger_force)
+            self.left_finger_wrench_filtered.copy_(self.left_finger_wrench)
+            self.right_finger_wrench_filtered.copy_(self.right_finger_wrench)
+            self._force_filter_initialized[:] = True
+            return
+
+        init_mask = ~self._force_filter_initialized
+        if torch.any(init_mask):
+            self.left_finger_force_filtered[init_mask] = self.left_finger_force[init_mask]
+            self.right_finger_force_filtered[init_mask] = self.right_finger_force[init_mask]
+            self.left_finger_wrench_filtered[init_mask] = self.left_finger_wrench[init_mask]
+            self.right_finger_wrench_filtered[init_mask] = self.right_finger_wrench[init_mask]
+            self._force_filter_initialized[init_mask] = True
+
+        run_mask = self._force_filter_initialized
+        if torch.any(run_mask):
+            self.left_finger_force_filtered[run_mask] = (
+                alpha * self.left_finger_force[run_mask]
+                + (1.0 - alpha) * self.left_finger_force_filtered[run_mask]
+            )
+            self.right_finger_force_filtered[run_mask] = (
+                alpha * self.right_finger_force[run_mask]
+                + (1.0 - alpha) * self.right_finger_force_filtered[run_mask]
+            )
+            self.left_finger_wrench_filtered[run_mask] = (
+                alpha * self.left_finger_wrench[run_mask]
+                + (1.0 - alpha) * self.left_finger_wrench_filtered[run_mask]
+            )
+            self.right_finger_wrench_filtered[run_mask] = (
+                alpha * self.right_finger_wrench[run_mask]
+                + (1.0 - alpha) * self.right_finger_wrench_filtered[run_mask]
+            )
 
     def _update_obs_history(self, obs_dict):
         """Update observation history buffers with current observations.
@@ -746,6 +793,7 @@ class FactoryEnv(DirectRLEnv):
         if self.cfg.include_contact_forces:
             self._left_finger_contact_sensor.reset(env_ids)
             self._right_finger_contact_sensor.reset(env_ids)
+            self._force_filter_initialized[env_ids] = False
 
     def _pre_physics_step(self, action):
         """Apply policy actions with smoothing."""
