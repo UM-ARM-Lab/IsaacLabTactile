@@ -88,9 +88,7 @@ params:
         enable: false  # multiplicative N(1, sigma) on final policy latent; applies when name == mae|point_mae|ot
         std_range: [0.0, 0.5]
         # per-episode sigma sampled uniformly from std_range; each step applies latent *= N(1, sigma)
-      force_input_noise: # NOTE only for poine mae
-        enable: false  # additive N(0, std) on forces before PointMAE encoder (eval/inference only)
-        std: 0.0  # e.g. 0.05; requires enable=true; applies when point_mae is loaded (point_mae|ot debug_*|ot pc_to_image)
+      force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
       ot_euler_steps: 4
       ot_reverse_direction: false  # true: run reverse of checkpoint training direction

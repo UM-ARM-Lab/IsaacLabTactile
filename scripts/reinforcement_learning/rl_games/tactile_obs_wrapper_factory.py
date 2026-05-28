@@ -23,7 +23,6 @@ class TactileObsWrapperSpec:
     latent_noise_enable: bool
     latent_noise_std_min: float
     latent_noise_std_max: float
-    force_input_noise_enable: bool
     force_input_noise_std: float
     ot_debug_gt_force: bool
     ot_debug_pred_force: bool
@@ -85,16 +84,17 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         raise ValueError("tactile_obs_wrapper.gaussian_dropout std bounds must be non-negative.")
     if latent_noise_std_min > latent_noise_std_max:
         raise ValueError("tactile_obs_wrapper.gaussian_dropout.std_range must satisfy min <= max.")
-    force_noise_cfg = dict(wrapper_cfg.get("force_input_noise") or {})
-    force_input_noise_enable = bool(force_noise_cfg.get("enable", False))
-    force_input_noise_std = float(force_noise_cfg.get("std", 0.0))
-    if force_input_noise_enable and force_input_noise_std <= 0.0:
+    force_input_noise_raw = wrapper_cfg.get(
+        "force_input_noise_std", wrapper_cfg.get("force_input_noise", 0.0)
+    )
+    if isinstance(force_input_noise_raw, dict):
+        force_input_noise_std = float(force_input_noise_raw.get("std", 0.0))
+    else:
+        force_input_noise_std = float(force_input_noise_raw)
+    if force_input_noise_std < 0.0:
         raise ValueError(
-            "tactile_obs_wrapper.force_input_noise.enable=true requires std > 0."
-        )
-    if not force_input_noise_enable and force_input_noise_std > 0.0:
-        raise ValueError(
-            "tactile_obs_wrapper.force_input_noise.std > 0 requires enable=true."
+            "tactile_obs_wrapper.force_input_noise_std must be non-negative, "
+            f"got {force_input_noise_std}."
         )
     ckpts = dict(wrapper_cfg.get("checkpoints") or {})
     return TactileObsWrapperSpec(
@@ -113,7 +113,6 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         latent_noise_enable=latent_noise_enable,
         latent_noise_std_min=latent_noise_std_min,
         latent_noise_std_max=latent_noise_std_max,
-        force_input_noise_enable=force_input_noise_enable,
         force_input_noise_std=force_input_noise_std,
         ot_debug_gt_force=ot_debug_gt_force,
         ot_debug_pred_force=ot_debug_pred_force,
@@ -206,10 +205,7 @@ def build_tactile_obs_wrapper(
             raise ValueError("include_tactile_pointclouds must exist in env_cfg for Point-MAE wrapper")
 
         point_cfg = build_pointmae_rl_override_cfg(
-            spec.pc_keys,
-            spec.force_keys,
-            force_input_noise_enable=spec.force_input_noise_enable,
-            force_input_noise_std=spec.force_input_noise_std,
+            spec.pc_keys, spec.force_keys, force_input_noise_std=spec.force_input_noise_std
         )
         point_mae = load_pointmae_encoder_from_checkpoint(spec.ckpt_point_mae, wrap_device, point_cfg)
 
@@ -370,10 +366,7 @@ def build_tactile_obs_wrapper(
                         "debug_gt_force/debug_pred_force"
                     )
                 point_cfg = build_pointmae_rl_override_cfg(
-                    spec.pc_keys,
-                    spec.force_keys,
-                    force_input_noise_enable=spec.force_input_noise_enable,
-                    force_input_noise_std=spec.force_input_noise_std,
+                    spec.pc_keys, spec.force_keys, force_input_noise_std=spec.force_input_noise_std
                 )
                 point_mae = load_pointmae_encoder_from_checkpoint(
                     spec.ckpt_point_mae, wrap_device, point_cfg
@@ -398,10 +391,7 @@ def build_tactile_obs_wrapper(
                 raise ValueError("include_tactile_pointclouds must exist in env_cfg for OT pc_to_image")
 
             point_cfg = build_pointmae_rl_override_cfg(
-                spec.pc_keys,
-                spec.force_keys,
-                force_input_noise_enable=spec.force_input_noise_enable,
-                force_input_noise_std=spec.force_input_noise_std,
+                spec.pc_keys, spec.force_keys, force_input_noise_std=spec.force_input_noise_std
             )
             point_mae = load_pointmae_encoder_from_checkpoint(spec.ckpt_point_mae, wrap_device, point_cfg)
             if int(point_mae.cfg.embed_dim) != latent_dim:
