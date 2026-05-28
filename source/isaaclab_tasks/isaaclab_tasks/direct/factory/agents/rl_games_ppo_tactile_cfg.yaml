@@ -126,6 +126,9 @@ params:
         enable: false  # multiplicative N(1, sigma) on final policy latent; applies when name == mae|point_mae|ot
         std_range: [0.0, 0.1]
         # per-episode sigma sampled uniformly from std_range; each step applies latent *= N(1, sigma)
+      force_input_noise:
+        enable: false  # additive N(0, std) on forces before PointMAE encoder (eval/inference only)
+        std: 0.0
       projection_source_latent: null  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
       checkpoints:
         # Point-MAE checkpoint (.pth) saved by tactile_transfer/script/train_point_mae.py

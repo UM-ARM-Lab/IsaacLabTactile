@@ -73,9 +73,6 @@ params:
     # Include previous action vector in policy observations.
     # Assumes obs history is disabled (history_length == 0).
     include_prev_actions: false  # Set to false to drop prev_actions from policy observation
-    force_filter:
-      enable: true
-      alpha: 0.2
 
     # Tactile observation wrapper (refactored).
     # Choose ONE wrapper to append a latent token to policy vector observations.
@@ -85,16 +82,20 @@ params:
       # name: mae  # one of: null, mae, point_mae, ot
       # name: point_mae  # one of: null, mae, point_mae, ot
       debug_gt_force: false
+      debug_pred_force: false  # image latent -> force probe -> PointMAE force subspace (needs checkpoints.force_probe)
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
       gaussian_dropout:
         enable: false  # multiplicative N(1, sigma) on final policy latent; applies when name == mae|point_mae|ot
         std_range: [0.0, 0.5]
         # per-episode sigma sampled uniformly from std_range; each step applies latent *= N(1, sigma)
+      force_input_noise: # NOTE only for poine mae
+        enable: false  # additive N(0, std) on forces before PointMAE encoder (eval/inference only)
+        std: 0.0  # e.g. 0.05; requires enable=true; applies when point_mae is loaded (point_mae|ot debug_*|ot pc_to_image)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
       ot_euler_steps: 4
-      ot_reverse_direction: true  # true: run reverse of checkpoint training direction
+      ot_reverse_direction: false  # true: run reverse of checkpoint training direction
       checkpoints:
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0123_paired_peg/rectified_flow_latent_epoch_0600.pth
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0130_paired_peg/rectified_flow_latent_epoch_0600.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0121_ot_peg/rectified_flow_latent_epoch_1000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0117_ot_test_env_nut/rectified_flow_latent_epoch_1000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0113_ot_test_env/rectified_flow_latent_epoch_1000.pth
@@ -102,9 +103,9 @@ params:
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0010/point_mae_epoch_0010.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0015_nut/point_mae_epoch_0005.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0016_gear/point_mae_epoch_0010.pth
-        point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0023_peg/point_mae_epoch_0005.pth
+        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0023_peg/point_mae_epoch_0005.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0025_peg_no_force/point_mae_epoch_0005.pth
-        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0026_peg_no_wrench/point_mae_epoch_0005.pth
+        point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0026_peg_no_wrench/point_mae_epoch_0005.pth
         # point_mae: null
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0019_peg/tactile_image_mae_epoch_0300.pth
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0009/tactile_image_mae_epoch_0300.pth
@@ -117,6 +118,8 @@ params:
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0048_same_data/point_latent_projection_epoch_1000.pth
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0053/point_latent_projection_final.pth
         projection: null
+        force_probe: /home/fanyang/github/tactile_transfer/outputs/probe_img_latent_force/dataset_img_latent_to_both_fingertip_force_with_wrench/probe_force_mlp_best.pth  # required when debug_pred_force: true
+        # force_probe: null
       tactile_obs_key: [tactile, tactile_right]
       # tactile_obs_key: [tactile]
       pc_keys:
@@ -124,10 +127,10 @@ params:
         - tactile_pc_right_w
         - tactile_pc_peg_w
       force_keys:
-        left_force: left_finger_force_filtered
-        left_wrench: left_finger_wrench_filtered
-        right_force: right_finger_force_filtered
-        right_wrench: right_finger_wrench_filtered
+        left_force: left_finger_force
+        left_wrench: left_finger_wrench
+        right_force: right_finger_force
+        right_wrench: right_finger_wrench
 
   config:
     name: Factory

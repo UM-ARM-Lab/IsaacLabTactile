@@ -140,14 +140,6 @@ class CtrlCfg:
 
 
 @configclass
-class ForceFilterCfg:
-    # Enable temporal filtering for fingertip forces/wrenches used by wrappers.
-    enable: bool = True
-    # EMA coefficient in [0, 1]. 1.0 -> no smoothing, 0.0 -> frozen.
-    alpha: float = 0.2
-
-
-@configclass
 class FactoryEnvCfg(DirectRLEnvCfg):
     decimation = 8
     action_space = 6
@@ -175,7 +167,6 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     obs_rand: ObsRandCfg = ObsRandCfg()
     obs_history: ObsHistoryCfg = ObsHistoryCfg()
     ctrl: CtrlCfg = CtrlCfg()
-    force_filter: ForceFilterCfg = ForceFilterCfg()
     # Whether to include fingertip contact forces (left/right) in observations and critic states
     include_contact_forces: bool = False
     # Whether to maintain per-step fingertip + held-object point clouds as an additional tactile representation.
@@ -505,12 +496,6 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         use_full_rotation = ctrl.get("use_full_rotation", None)
         if use_full_rotation is not None:
             self.ctrl.use_full_rotation = use_full_rotation
-        force_filter = env.get("force_filter", OmegaConf.create({}))
-        if force_filter.get("enable", None) is not None:
-            self.force_filter.enable = bool(force_filter.enable)
-        if force_filter.get("alpha", None) is not None:
-            self.force_filter.alpha = float(force_filter.alpha)
-
     def __post_init__(self):
         """Post initialization."""
         self.update_env_params()
