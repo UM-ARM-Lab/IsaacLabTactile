@@ -8,7 +8,7 @@ import torch
 
 @dataclass(frozen=True)
 class TactileObsWrapperSpec:
-    name: str  # none|mae|point_mae|ot
+    name: str  # none|mae|point_mae|ot|double_ot
     tactile_obs_key: str | Sequence[str]
     pc_keys: list[str]
     force_keys: dict[str, str]
@@ -21,8 +21,7 @@ class TactileObsWrapperSpec:
     ckpt_ot: str | None
     ckpt_projection: str | None
     latent_noise_enable: bool
-    latent_noise_std_min: float
-    latent_noise_std_max: float
+    latent_noise_std: float
     force_input_noise_std: float
     ot_debug_gt_force: bool
     ot_debug_pred_force: bool
@@ -73,17 +72,12 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         projection_source_latent = str(projection_source_latent).lower()
     latent_noise_cfg = dict(wrapper_cfg.get("gaussian_dropout") or wrapper_cfg.get("latent_noise") or {})
     latent_noise_enable = bool(latent_noise_cfg.get("enable", False))
-    latent_noise_std_range = latent_noise_cfg.get("std_range", [0.0, 0.0])
-    if not isinstance(latent_noise_std_range, (list, tuple)) or len(latent_noise_std_range) != 2:
+    latent_noise_std = float(latent_noise_cfg.get("std", 0.0))
+    if latent_noise_std < 0.0:
         raise ValueError(
-            "tactile_obs_wrapper.gaussian_dropout.std_range is required and must be [min, max]."
+            "tactile_obs_wrapper.gaussian_dropout.std must be non-negative, "
+            f"got {latent_noise_std}."
         )
-    latent_noise_std_min = float(latent_noise_std_range[0])
-    latent_noise_std_max = float(latent_noise_std_range[1])
-    if latent_noise_std_min < 0.0 or latent_noise_std_max < 0.0:
-        raise ValueError("tactile_obs_wrapper.gaussian_dropout std bounds must be non-negative.")
-    if latent_noise_std_min > latent_noise_std_max:
-        raise ValueError("tactile_obs_wrapper.gaussian_dropout.std_range must satisfy min <= max.")
     force_input_noise_raw = wrapper_cfg.get(
         "force_input_noise_std", wrapper_cfg.get("force_input_noise", 0.0)
     )
@@ -111,8 +105,7 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         ckpt_ot=str(ckpts.get("ot")) if _is_enabled_path(ckpts.get("ot")) else None,
         ckpt_projection=str(ckpts.get("projection")) if _is_enabled_path(ckpts.get("projection")) else None,
         latent_noise_enable=latent_noise_enable,
-        latent_noise_std_min=latent_noise_std_min,
-        latent_noise_std_max=latent_noise_std_max,
+        latent_noise_std=latent_noise_std,
         force_input_noise_std=force_input_noise_std,
         ot_debug_gt_force=ot_debug_gt_force,
         ot_debug_pred_force=ot_debug_pred_force,
@@ -187,8 +180,7 @@ def build_tactile_obs_wrapper(
             projection=projection,
             tactile_obs_key=spec.tactile_obs_key,
             latent_noise_enable=spec.latent_noise_enable,
-            latent_noise_std_min=spec.latent_noise_std_min,
-            latent_noise_std_max=spec.latent_noise_std_max,
+            latent_noise_std=spec.latent_noise_std,
         )
 
     if name == "point_mae":
@@ -227,8 +219,7 @@ def build_tactile_obs_wrapper(
                 point_cfg,
                 projection,
                 latent_noise_enable=spec.latent_noise_enable,
-                latent_noise_std_min=spec.latent_noise_std_min,
-                latent_noise_std_max=spec.latent_noise_std_max,
+                latent_noise_std=spec.latent_noise_std,
             )
 
         return lambda env: PointMAEObsWrapper(
@@ -237,8 +228,7 @@ def build_tactile_obs_wrapper(
             wrap_device,
             point_cfg,
             latent_noise_enable=spec.latent_noise_enable,
-            latent_noise_std_min=spec.latent_noise_std_min,
-            latent_noise_std_max=spec.latent_noise_std_max,
+            latent_noise_std=spec.latent_noise_std,
         )
 
     if name == "ot":
@@ -487,8 +477,7 @@ def build_tactile_obs_wrapper(
             proprio_src_mean=proprio_mean,
             proprio_src_std=proprio_std,
             latent_noise_enable=spec.latent_noise_enable,
-            latent_noise_std_min=spec.latent_noise_std_min,
-            latent_noise_std_max=spec.latent_noise_std_max,
+            latent_noise_std=spec.latent_noise_std,
             debug_gt_force=spec.ot_debug_gt_force,
             debug_pred_force=spec.ot_debug_pred_force,
             force_probe=force_probe,
@@ -496,5 +485,171 @@ def build_tactile_obs_wrapper(
 
         return lambda env: TactileLatentFlowObsWrapper(env, **wrapper_kwargs)
 
-    raise ValueError(f"Unsupported tactile_obs_wrapper.name={name!r}. Expected null|mae|point_mae|ot.")
+    if name == "double_ot":
+        if spec.ckpt_ot is None:
+            raise ValueError("tactile_obs_wrapper.name='double_ot' requires checkpoints.ot")
+
+        from tactile_transfer.utils.rl_latent_ot_tactile_image_to_point_latent_wrapper import (  # noqa: WPS433
+            TactileLatentFlowObsWrapper,
+        )
+        from tactile_transfer.model import (  # noqa: WPS433
+            LatentNormalization,
+            RectifiedFlowVelocityConfig,
+            VelocityMLP,
+        )
+
+        payload = torch.load(spec.ckpt_ot, map_location="cpu")
+        if "velocity" not in payload or "latent_normalization" not in payload:
+            raise ValueError("OT checkpoint missing required keys: 'velocity' and 'latent_normalization'")
+
+        ckpt_direction = str(payload.get("direction", "image_to_pc"))
+        if ckpt_direction != "image_to_pc":
+            raise ValueError(
+                "double_ot requires a rectified-flow checkpoint trained with direction='image_to_pc', "
+                f"got {ckpt_direction!r}."
+            )
+
+        latent_dim = int(payload["latent_dim"])
+        velocity_cfg_dict = payload.get("velocity_cfg", {}) or {}
+        hidden_dims = velocity_cfg_dict.get("hidden_dims", (1024, 1024))
+        if isinstance(hidden_dims, list):
+            hidden_dims = tuple(hidden_dims)
+        velocity_cfg = RectifiedFlowVelocityConfig(
+            time_dim=int(velocity_cfg_dict.get("time_dim", 256)),
+            proprio_dim=int(velocity_cfg_dict.get("proprio_dim", payload.get("proprio_dim", 0))),
+            hidden_dims=tuple(hidden_dims),
+        )
+        velocity = VelocityMLP(latent_dim=latent_dim, cfg=velocity_cfg).to(wrap_device)
+        velocity.load_state_dict(payload["velocity"], strict=True)
+        velocity.eval()
+
+        prediction_target = str(payload.get("prediction_target", "velocity"))
+        if prediction_target != "velocity":
+            raise ValueError(
+                "double_ot requires prediction_target='velocity' in the OT checkpoint, "
+                f"got {prediction_target!r}."
+            )
+
+        latent_norm = LatentNormalization.from_state_dict(payload["latent_normalization"]).to(wrap_device)
+
+        if spec.ckpt_point_mae is None:
+            raise ValueError("tactile_obs_wrapper.name='double_ot' requires checkpoints.point_mae")
+        if not spec.pc_keys:
+            raise ValueError("tactile_obs_wrapper.name='double_ot' requires non-empty pc_keys")
+        if hasattr(env_cfg, "include_contact_forces"):
+            env_cfg.include_contact_forces = True
+        else:
+            raise ValueError("include_contact_forces must exist in env_cfg for double_ot")
+        if hasattr(env_cfg, "include_tactile_pointclouds"):
+            env_cfg.include_tactile_pointclouds = True
+        else:
+            raise ValueError("include_tactile_pointclouds must exist in env_cfg for double_ot")
+
+        point_cfg = build_pointmae_rl_override_cfg(
+            spec.pc_keys, spec.force_keys, force_input_noise_std=spec.force_input_noise_std
+        )
+        point_mae = load_pointmae_encoder_from_checkpoint(spec.ckpt_point_mae, wrap_device, point_cfg)
+        if int(point_mae.cfg.embed_dim) != latent_dim:
+            raise ValueError(
+                f"Point-MAE embed_dim={int(point_mae.cfg.embed_dim)} != OT latent_dim={latent_dim}."
+            )
+        pc_gather_cfg = {"pc_keys": list(spec.pc_keys), "force_keys": dict(spec.force_keys)}
+
+        latent_projection = None
+        latent_projection_source = None
+        if spec.use_projection:
+            if spec.ckpt_projection is None:
+                raise ValueError(
+                    "tactile_obs_wrapper.use_projection=true requires checkpoints.projection when name='double_ot'"
+                )
+            latent_projection = load_latent_projection_from_checkpoint(
+                spec.ckpt_projection,
+                wrap_device,
+                expected_latent_dim=latent_dim,
+            )
+            projection_ckpt = torch.load(spec.ckpt_projection, map_location="cpu")
+            projection_meta = load_projection_input_norm(projection_ckpt)
+            latent_projection_source = str(projection_meta["source_latent"]).lower()
+            if spec.projection_source_latent is not None:
+                if spec.projection_source_latent != latent_projection_source:
+                    raise ValueError(
+                        "tactile_obs_wrapper.projection_source_latent does not match projection checkpoint: "
+                        f"cfg={spec.projection_source_latent!r} vs ckpt={latent_projection_source!r}"
+                    )
+                latent_projection_source = spec.projection_source_latent
+            if latent_projection_source != "point":
+                raise ValueError(
+                    "double_ot only supports projection on the point branch; "
+                    f"projection checkpoint source_latent={latent_projection_source!r}."
+                )
+
+        proprio_img_mean = None
+        proprio_img_std = None
+        proprio_pc_mean = None
+        proprio_pc_std = None
+        if int(velocity_cfg.proprio_dim) > 0:
+            expected_proprio_dim = int(velocity_cfg.proprio_dim)
+            proprio_img_mean = payload.get("proprio_img_mean")
+            proprio_img_std = payload.get("proprio_img_std")
+            proprio_pc_mean = payload.get("proprio_pc_mean")
+            proprio_pc_std = payload.get("proprio_pc_std")
+            if proprio_img_mean is None or proprio_img_std is None:
+                raise ValueError(
+                    "double_ot OT checkpoint missing proprio_img_mean/proprio_img_std for forward integration."
+                )
+            if proprio_pc_mean is None or proprio_pc_std is None:
+                raise ValueError(
+                    "double_ot OT checkpoint missing proprio_pc_mean/proprio_pc_std for reverse integration."
+                )
+            for label, mean_t, std_t in (
+                ("proprio_img", proprio_img_mean, proprio_img_std),
+                ("proprio_pc", proprio_pc_mean, proprio_pc_std),
+            ):
+                mean_t = mean_t.to(wrap_device).float().reshape(-1)
+                std_t = std_t.to(wrap_device).float().reshape(-1)
+                if int(mean_t.shape[0]) != int(std_t.shape[0]):
+                    raise ValueError(
+                        f"OT checkpoint {label} mean/std dim mismatch: "
+                        f"mean={mean_t.shape[0]} std={std_t.shape[0]}."
+                    )
+                if int(mean_t.shape[0]) < expected_proprio_dim:
+                    raise ValueError(
+                        f"OT checkpoint {label} stats dim is smaller than velocity proprio_dim: "
+                        f"stats={mean_t.shape[0]} expected={expected_proprio_dim}."
+                    )
+                if int(mean_t.shape[0]) > expected_proprio_dim:
+                    mean_t = mean_t[:expected_proprio_dim]
+                    std_t = std_t[:expected_proprio_dim]
+                if label == "proprio_img":
+                    proprio_img_mean, proprio_img_std = mean_t, std_t
+                else:
+                    proprio_pc_mean, proprio_pc_std = mean_t, std_t
+
+        return lambda env: TactileLatentFlowObsWrapper(
+            env,
+            image_mae=None,
+            velocity=velocity,
+            latent_norm=latent_norm,
+            device=wrap_device,
+            latent_dim=latent_dim,
+            euler_steps=int(spec.ot_euler_steps),
+            prediction_target=prediction_target,
+            direction="image_to_pc",
+            reverse_training_direction=False,
+            point_mae=point_mae,
+            latent_projection=latent_projection,
+            latent_projection_source=latent_projection_source,
+            pc_gather_cfg=pc_gather_cfg,
+            proprio_src_mean=proprio_img_mean,
+            proprio_src_std=proprio_img_std,
+            latent_noise_enable=spec.latent_noise_enable,
+            latent_noise_std=spec.latent_noise_std,
+            double_ot=True,
+            proprio_pc_mean=proprio_pc_mean,
+            proprio_pc_std=proprio_pc_std,
+        )
+
+    raise ValueError(
+        f"Unsupported tactile_obs_wrapper.name={name!r}. Expected null|mae|point_mae|ot|double_ot."
+    )
 

@@ -77,26 +77,27 @@ params:
     # Tactile observation wrapper (refactored).
     # Choose ONE wrapper to append a latent token to policy vector observations.
     tactile_obs_wrapper:
-      name: ot  # one of: null, mae, point_mae, ot
-      # name: null  # one of: null, mae, point_mae, ot
-      # name: mae  # one of: null, mae, point_mae, ot
-      # name: point_mae  # one of: null, mae, point_mae, ot
+      name: ot  # one of: null, mae, point_mae, ot, double_ot
+      # name: null  # one of: null, mae, point_mae, ot, double_ot
+      # name: mae  # one of: null, mae, point_mae, ot, double_ot
+      # name: point_mae  # one of: null, mae, point_mae, ot, double_ot
+      # name: double_ot  # sim point MAE -> reverse RF (point->image) -> forward RF (image->point); needs checkpoints.ot (image_to_pc) + point_mae only
       debug_gt_force: false
       debug_pred_force: false  # image latent -> force probe -> PointMAE force subspace (needs checkpoints.force_probe)
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
       gaussian_dropout:
-        enable: false  # multiplicative N(1, sigma) on final policy latent; applies when name == mae|point_mae|ot
-        std_range: [0.0, 0.5]
-        # per-episode sigma sampled uniformly from std_range; each step applies latent *= N(1, sigma)
+        enable: false  # multiplicative N(1, std) on final policy latent; applies when name == mae|point_mae|ot
+        std: 0.5  # each step: latent *= N(1, std)
       force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
       ot_euler_steps: 4
       ot_reverse_direction: false  # true: run reverse of checkpoint training direction
       checkpoints:
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0130_paired_peg/rectified_flow_latent_epoch_0600.pth
-        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0121_ot_peg/rectified_flow_latent_epoch_1000.pth
-        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0117_ot_test_env_nut/rectified_flow_latent_epoch_1000.pth
-        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0113_ot_test_env/rectified_flow_latent_epoch_1000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0136_paired_peg/rectified_flow_latent_epoch_1000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0122_paired_peg/rectified_flow_latent_epoch_1000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0131_ot_peg/rectified_flow_latent_epoch_1000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0130_paired_peg/rectified_flow_latent_epoch_1000.pth
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0137_ot_peg/rectified_flow_latent_epoch_5000.pth
         # ot: null
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0010/point_mae_epoch_0010.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0015_nut/point_mae_epoch_0005.pth
@@ -116,8 +117,8 @@ params:
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0048_same_data/point_latent_projection_epoch_1000.pth
         # projection: /home/fanyang/github/tactile_transfer/outputs/point_latent_projection_sinkhorn_0053/point_latent_projection_final.pth
         projection: null
-        force_probe: /home/fanyang/github/tactile_transfer/outputs/probe_img_latent_force/dataset_img_latent_to_both_fingertip_force_with_wrench/probe_force_mlp_best.pth  # required when debug_pred_force: true
-        # force_probe: null
+        # force_probe: /home/fanyang/github/tactile_transfer/outputs/probe_img_latent_force/dataset_img_latent_to_both_fingertip_force_with_wrench/probe_force_mlp_best.pth  # required when debug_pred_force: true
+        force_probe: null
       tactile_obs_key: [tactile, tactile_right]
       # tactile_obs_key: [tactile]
       pc_keys:
@@ -151,7 +152,7 @@ params:
     schedule_type: standard
     kl_threshold: 0.008
     score_to_win: 20000
-    max_epochs: 100
+    max_epochs: 250
     save_best_after: 10
     save_frequency: 20
     print_stats: True
