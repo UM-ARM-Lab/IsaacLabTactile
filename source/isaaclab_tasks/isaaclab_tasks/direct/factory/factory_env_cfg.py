@@ -136,7 +136,7 @@ class CtrlCfg:
     default_dof_pos_tensor = [-1.3003, -0.4015, 1.1791, -2.1493, 0.4001, 1.9425, 0.4754]
     kp_null = 10.0
     kd_null = 6.3246
-    use_full_rotation: bool = True
+    use_full_rotation: bool = False
 
 
 @configclass
@@ -517,6 +517,10 @@ class FactoryTaskPegInsertCfg(FactoryEnvCfg):
     task = PegInsert()
     episode_length_s = 10.0
 
+    def __post_init__(self):
+        super().__post_init__()
+        self.ctrl.use_full_rotation = True
+
 
 @configclass
 class FactoryTaskGearMeshCfg(FactoryEnvCfg):
@@ -580,7 +584,6 @@ class FactoryTaskTestCfg(FactoryEnvCfg):
         # This is intentionally hardcoded here so it can be tuned independently later.
         self.ctrl.pos_action_threshold = [0.08, 0.08, 0.08]
         self.ctrl.rot_action_threshold = [0.5, 0.5, 0.5]
-        self.ctrl.use_full_rotation = True
         # Test env now uses absolute EE position actions; disable EMA lag on actions.
         self.ctrl.ema_factor = 1.0
         
