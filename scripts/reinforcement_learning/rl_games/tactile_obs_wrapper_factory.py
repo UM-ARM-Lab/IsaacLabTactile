@@ -13,6 +13,7 @@ class TactileObsWrapperSpec:
     pc_keys: list[str]
     force_keys: dict[str, str]
     ot_euler_steps: int
+    ot_noise_scale: float
     ot_reverse_direction: bool
     use_projection: bool
     projection_source_latent: str | None
@@ -59,6 +60,17 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
     pc_keys = list(wrapper_cfg.get("pc_keys") or [])
     force_keys = dict(wrapper_cfg.get("force_keys") or {})
     ot_euler_steps = int(wrapper_cfg.get("ot_euler_steps", 32))
+    ot_noise_scale = float(
+        wrapper_cfg.get(
+            "ot_noise_scale",
+            wrapper_cfg.get("rectified_flow_noise_scale", 0.0),
+        )
+    )
+    if ot_noise_scale < 0.0:
+        raise ValueError(
+            "tactile_obs_wrapper.ot_noise_scale must be non-negative, "
+            f"got {ot_noise_scale}."
+        )
     ot_reverse_direction = bool(wrapper_cfg.get("ot_reverse_direction", False))
     ot_debug_gt_force = bool(wrapper_cfg.get("debug_gt_force", False))
     ot_debug_pred_force = bool(wrapper_cfg.get("debug_pred_force", False))
@@ -97,6 +109,7 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         pc_keys=pc_keys,
         force_keys=force_keys,
         ot_euler_steps=ot_euler_steps,
+        ot_noise_scale=ot_noise_scale,
         ot_reverse_direction=ot_reverse_direction,
         use_projection=use_projection,
         projection_source_latent=projection_source_latent,
@@ -467,6 +480,7 @@ def build_tactile_obs_wrapper(
             latent_dim=latent_dim,
             tactile_obs_key=spec.tactile_obs_key,
             euler_steps=int(spec.ot_euler_steps),
+            noise_scale=float(spec.ot_noise_scale),
             prediction_target=prediction_target,
             direction=direction,
             reverse_training_direction=bool(spec.ot_reverse_direction),
@@ -633,6 +647,7 @@ def build_tactile_obs_wrapper(
             device=wrap_device,
             latent_dim=latent_dim,
             euler_steps=int(spec.ot_euler_steps),
+            noise_scale=float(spec.ot_noise_scale),
             prediction_target=prediction_target,
             direction="image_to_pc",
             reverse_training_direction=False,
