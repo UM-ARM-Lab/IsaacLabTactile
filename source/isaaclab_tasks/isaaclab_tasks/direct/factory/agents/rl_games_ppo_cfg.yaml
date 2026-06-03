@@ -90,15 +90,16 @@ params:
         std: 0.1  # each step: latent *= N(1, std)
       force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
-      ot_euler_steps: 4
-      ot_noise_scale: 0.05  # σ for Euler–Maruyama RF integration (ot|double_ot); score(t)=σ*sqrt(t*(1-t)); 0=deterministic Euler
+      ot_euler_steps: 64  # hop 1 (reverse point->image); also hop 2 default unless ot_euler_steps_hop2 is set
+      ot_euler_steps_hop2: null  # hop 2 forward RF (image->point); null = use ot_euler_steps
+      ot_noise_scale: 0.0  # σ for Euler–Maruyama; double_ot: noisy hop 1 only (reverse point->image), clean hop 2 (forward image->point); single ot: both use σ when >0
       ot_reverse_direction: false  # true: run reverse of checkpoint training direction
       checkpoints:
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0143_paired_peg/rectified_flow_latent_epoch_1000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0143_paired_peg/rectified_flow_latent_epoch_1000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0122_paired_peg/rectified_flow_latent_epoch_1000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0146_ot_gear/rectified_flow_latent_epoch_3000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0130_paired_peg/rectified_flow_latent_epoch_1000.pth
-        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0144_ot_peg/rectified_flow_latent_epoch_2000.pth
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0144_ot_peg/rectified_flow_latent_epoch_2000.pth
         # ot: null
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0010/point_mae_epoch_0010.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0015_nut/point_mae_epoch_0005.pth

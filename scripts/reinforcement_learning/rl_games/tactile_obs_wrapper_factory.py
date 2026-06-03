@@ -13,6 +13,7 @@ class TactileObsWrapperSpec:
     pc_keys: list[str]
     force_keys: dict[str, str]
     ot_euler_steps: int
+    ot_euler_steps_hop2: int | None
     ot_noise_scale: float
     ot_reverse_direction: bool
     use_projection: bool
@@ -60,6 +61,10 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
     pc_keys = list(wrapper_cfg.get("pc_keys") or [])
     force_keys = dict(wrapper_cfg.get("force_keys") or {})
     ot_euler_steps = int(wrapper_cfg.get("ot_euler_steps", 32))
+    ot_euler_steps_hop2_raw = wrapper_cfg.get("ot_euler_steps_hop2")
+    ot_euler_steps_hop2 = (
+        None if ot_euler_steps_hop2_raw is None else int(ot_euler_steps_hop2_raw)
+    )
     ot_noise_scale = float(
         wrapper_cfg.get(
             "ot_noise_scale",
@@ -109,6 +114,7 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         pc_keys=pc_keys,
         force_keys=force_keys,
         ot_euler_steps=ot_euler_steps,
+        ot_euler_steps_hop2=ot_euler_steps_hop2,
         ot_noise_scale=ot_noise_scale,
         ot_reverse_direction=ot_reverse_direction,
         use_projection=use_projection,
@@ -647,6 +653,7 @@ def build_tactile_obs_wrapper(
             device=wrap_device,
             latent_dim=latent_dim,
             euler_steps=int(spec.ot_euler_steps),
+            euler_steps_hop2=spec.ot_euler_steps_hop2,
             noise_scale=float(spec.ot_noise_scale),
             prediction_target=prediction_target,
             direction="image_to_pc",
