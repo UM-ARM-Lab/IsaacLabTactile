@@ -77,11 +77,11 @@ params:
     # Tactile observation wrapper (refactored).
     # Choose ONE wrapper to append a latent token to policy vector observations.
     tactile_obs_wrapper:
-      # name: ot  # one of: null, mae, point_mae, ot, double_ot
+      name: ot  # one of: null, mae, point_mae, ot, double_ot
       # name: null  # one of: null, mae, point_mae, ot, double_ot
       # name: mae  # one of: null, mae, point_mae, ot, double_ot
       # name: point_mae  # one of: null, mae, point_mae, ot, double_ot
-      name: double_ot  # sim point MAE -> reverse RF (point->image) -> forward RF (image->point); needs checkpoints.ot (image_to_pc) + point_mae only
+      # name: double_ot  # sim point MAE -> reverse RF hop1 (point->image) -> forward RF hop2 (image->point); checkpoints.ot (image_to_pc, velocity) + point_mae; optional checkpoints.ot_2 for hop 2 (e.g. x0 pc_to_image)
       debug_gt_force: false
       debug_pred_force: false  # image latent -> force probe -> PointMAE force subspace (needs checkpoints.force_probe)
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
@@ -90,17 +90,21 @@ params:
         std: 0.1  # each step: latent *= N(1, std)
       force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
-      ot_euler_steps: 64  # hop 1 (reverse point->image); also hop 2 default unless ot_euler_steps_hop2 is set
+      ot_euler_steps: 4  # hop 1 (reverse point->image); also hop 2 default unless ot_euler_steps_hop2 is set
       ot_euler_steps_hop2: null  # hop 2 forward RF (image->point); null = use ot_euler_steps
-      ot_noise_scale: 0.0  # σ for Euler–Maruyama; double_ot: noisy hop 1 only (reverse point->image), clean hop 2 (forward image->point); single ot: both use σ when >0
+      ot_noise_scale: 0.0  # σ for Euler–Maruyama on all RF hops (ot and double_ot); 0 = deterministic Euler
+      # double_ot: checkpoints.ot = hop 1 (velocity, image_to_pc, reverse). checkpoints.ot_2 = optional hop 2; null reuses ot. Hop 2 may use x0 if integrated forward (e.g. pc_to_image ckpt).
       ot_reverse_direction: false  # true: run reverse of checkpoint training direction
       checkpoints:
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0143_paired_peg/rectified_flow_latent_epoch_1000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0122_paired_peg/rectified_flow_latent_epoch_1000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0146_ot_gear/rectified_flow_latent_epoch_3000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0130_paired_peg/rectified_flow_latent_epoch_1000.pth
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0144_ot_peg/rectified_flow_latent_epoch_2000.pth
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0147_ot_peg/rectified_flow_latent_epoch_2000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0150_ot_peg/rectified_flow_latent_epoch_0200.pth
         # ot: null
+        ot_2: null  # optional hop-2 RF for double_ot; null = reuse checkpoints.ot
+        # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_paired_0147/rectified_flow_latent_epoch_1000.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0010/point_mae_epoch_0010.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0015_nut/point_mae_epoch_0005.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0022_gear_no_wrench/point_mae_epoch_0005.pth
