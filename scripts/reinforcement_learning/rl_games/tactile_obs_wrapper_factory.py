@@ -521,16 +521,18 @@ def build_tactile_obs_wrapper(
         )
 
         hop1 = load_rectified_flow_checkpoint(spec.ckpt_ot, wrap_device)
-        if hop1["train_direction"] != "image_to_pc":
-            raise ValueError(
-                "double_ot hop 1 requires direction='image_to_pc', "
-                f"got {hop1['train_direction']!r}."
-            )
-        if hop1["prediction_target"] != "velocity":
-            raise ValueError(
-                "double_ot hop 1 (reverse point->image) requires prediction_target='velocity', "
-                f"got {hop1['prediction_target']!r}."
-            )
+        hop1_direction = str(hop1["train_direction"])
+        hop1_sign = hop_spec_for_transition(
+            train_direction=hop1_direction,
+            src_modality="point",
+            dst_modality="image",
+        )[1]
+        check_rectified_flow_integration_direction(
+            prediction_target=hop1["prediction_target"],
+            integration_sign=hop1_sign,
+            ckpt_path=hop1["path"],
+            hop_label="double_ot hop 1",
+        )
 
         latent_dim = int(hop1["latent_dim"])
         velocity = hop1["velocity"]
@@ -567,9 +569,14 @@ def build_tactile_obs_wrapper(
             direction_hop2 = hop2["train_direction"]
             ckpt_path_hop2 = str(hop2["path"])
         else:
+            hop2_sign = hop_spec_for_transition(
+                train_direction=hop1_direction,
+                src_modality="image",
+                dst_modality="point",
+            )[1]
             check_rectified_flow_integration_direction(
                 prediction_target=prediction_target,
-                integration_sign=1.0,
+                integration_sign=hop2_sign,
                 ckpt_path=hop1["path"],
                 hop_label="double_ot hop 2",
             )
@@ -637,11 +644,11 @@ def build_tactile_obs_wrapper(
             proprio_pc_std = payload.get("proprio_pc_std")
             if proprio_img_mean is None or proprio_img_std is None:
                 raise ValueError(
-                    "double_ot OT checkpoint missing proprio_img_mean/proprio_img_std for forward integration."
+                    "double_ot hop-1 checkpoint missing proprio_img_mean/proprio_img_std."
                 )
             if proprio_pc_mean is None or proprio_pc_std is None:
                 raise ValueError(
-                    "double_ot OT checkpoint missing proprio_pc_mean/proprio_pc_std for reverse integration."
+                    "double_ot hop-1 checkpoint missing proprio_pc_mean/proprio_pc_std."
                 )
             for label, mean_t, std_t in (
                 ("proprio_img", proprio_img_mean, proprio_img_std),
@@ -678,7 +685,7 @@ def build_tactile_obs_wrapper(
             euler_steps_hop2=spec.ot_euler_steps_hop2,
             noise_scale=float(spec.ot_noise_scale),
             prediction_target=prediction_target,
-            direction="image_to_pc",
+            direction=hop1_direction,
             reverse_training_direction=False,
             point_mae=point_mae,
             latent_projection=latent_projection,
