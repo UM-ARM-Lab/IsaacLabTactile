@@ -21,14 +21,10 @@ class TactileObsWrapperSpec:
     ckpt_point_mae: str | None
     ckpt_mae: str | None
     ckpt_ot: str | None
-    ckpt_ot_2: str | None
     ckpt_projection: str | None
     latent_noise_enable: bool
     latent_noise_std: float
     force_input_noise_std: float
-    ot_debug_gt_force: bool
-    ot_debug_pred_force: bool
-    ckpt_force_probe: str | None
 
 
 def _is_enabled_path(p: Any) -> bool:
@@ -78,12 +74,6 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
             f"got {ot_noise_scale}."
         )
     ot_reverse_direction = bool(wrapper_cfg.get("ot_reverse_direction", False))
-    ot_debug_gt_force = bool(wrapper_cfg.get("debug_gt_force", False))
-    ot_debug_pred_force = bool(wrapper_cfg.get("debug_pred_force", False))
-    if ot_debug_gt_force and ot_debug_pred_force:
-        raise ValueError(
-            "tactile_obs_wrapper.debug_gt_force and debug_pred_force cannot both be true."
-        )
     use_projection = bool(wrapper_cfg.get("use_projection", False))
     projection_source_latent = wrapper_cfg.get("projection_source_latent")
     if projection_source_latent is not None:
@@ -123,14 +113,10 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         ckpt_point_mae=str(ckpts.get("point_mae")) if _is_enabled_path(ckpts.get("point_mae")) else None,
         ckpt_mae=str(ckpts.get("mae")) if _is_enabled_path(ckpts.get("mae")) else None,
         ckpt_ot=str(ckpts.get("ot")) if _is_enabled_path(ckpts.get("ot")) else None,
-        ckpt_ot_2=str(ckpts.get("ot_2")) if _is_enabled_path(ckpts.get("ot_2")) else None,
         ckpt_projection=str(ckpts.get("projection")) if _is_enabled_path(ckpts.get("projection")) else None,
         latent_noise_enable=latent_noise_enable,
         latent_noise_std=latent_noise_std,
         force_input_noise_std=force_input_noise_std,
-        ot_debug_gt_force=ot_debug_gt_force,
-        ot_debug_pred_force=ot_debug_pred_force,
-        ckpt_force_probe=str(ckpts.get("force_probe")) if _is_enabled_path(ckpts.get("force_probe")) else None,
     )
 
 
@@ -352,41 +338,6 @@ def build_tactile_obs_wrapper(
                     f"Image MAE latent dim ({int(image_mae.cfg.encoder_embed_dim)} x {tactile_stream_count})="
                     f"{expected_image_latent_dim} != OT latent_dim={latent_dim}."
                 )
-            if spec.ot_debug_gt_force or spec.ot_debug_pred_force:
-                if spec.ckpt_point_mae is None:
-                    raise ValueError(
-                        "tactile_obs_wrapper.debug_gt_force/debug_pred_force=true requires "
-                        "checkpoints.point_mae"
-                    )
-                if not spec.pc_keys:
-                    raise ValueError(
-                        "tactile_obs_wrapper.debug_gt_force/debug_pred_force=true requires non-empty pc_keys"
-                    )
-                if spec.ot_debug_gt_force:
-                    if hasattr(env_cfg, "include_contact_forces"):
-                        env_cfg.include_contact_forces = True
-                    else:
-                        raise ValueError(
-                            "include_contact_forces must exist in env_cfg for OT debug_gt_force"
-                        )
-                if hasattr(env_cfg, "include_tactile_pointclouds"):
-                    env_cfg.include_tactile_pointclouds = True
-                else:
-                    raise ValueError(
-                        "include_tactile_pointclouds must exist in env_cfg for OT "
-                        "debug_gt_force/debug_pred_force"
-                    )
-                point_cfg = build_pointmae_rl_override_cfg(
-                    spec.pc_keys, spec.force_keys, force_input_noise_std=spec.force_input_noise_std
-                )
-                point_mae = load_pointmae_encoder_from_checkpoint(
-                    spec.ckpt_point_mae, wrap_device, point_cfg
-                )
-                if int(point_mae.cfg.embed_dim) != latent_dim:
-                    raise ValueError(
-                        f"Point-MAE embed_dim={int(point_mae.cfg.embed_dim)} != OT latent_dim={latent_dim}."
-                    )
-                pc_gather_cfg = {"pc_keys": list(spec.pc_keys), "force_keys": dict(spec.force_keys)}
         else:
             if spec.ckpt_point_mae is None:
                 raise ValueError("OT direction=pc_to_image requires checkpoints.point_mae")
@@ -450,36 +401,6 @@ def build_tactile_obs_wrapper(
                 proprio_mean = proprio_mean[:expected_proprio_dim]
                 proprio_std = proprio_std[:expected_proprio_dim]
 
-        force_probe = None
-        if spec.ot_debug_pred_force:
-            if spec.ckpt_force_probe is None:
-                raise ValueError(
-                    "tactile_obs_wrapper.debug_pred_force=true requires checkpoints.force_probe"
-                )
-            from tactile_transfer.utils.image_latent_force_probe import (  # noqa: WPS433
-                load_image_latent_force_probe_from_checkpoint,
-            )
-
-            force_probe = load_image_latent_force_probe_from_checkpoint(
-                spec.ckpt_force_probe, wrap_device
-            )
-            if direction != "image_to_pc":
-                raise ValueError("debug_pred_force is only supported for OT direction=image_to_pc")
-            if image_mae is None:
-                raise ValueError("debug_pred_force requires checkpoints.mae")
-            tactile_stream_count = (
-                len(spec.tactile_obs_key)
-                if isinstance(spec.tactile_obs_key, (list, tuple))
-                else 1
-            )
-            expected_image_latent_dim = int(image_mae.cfg.encoder_embed_dim) * int(tactile_stream_count)
-            probe_in_dim = int(force_probe.mu_img.shape[0])
-            if probe_in_dim != expected_image_latent_dim:
-                raise ValueError(
-                    f"Force-probe in_dim={probe_in_dim} does not match image MAE latent dim "
-                    f"{expected_image_latent_dim} (embed_dim x tactile streams)."
-                )
-
         wrapper_kwargs = dict(
             image_mae=image_mae,
             velocity=velocity,
@@ -500,9 +421,6 @@ def build_tactile_obs_wrapper(
             proprio_src_std=proprio_std,
             latent_noise_enable=spec.latent_noise_enable,
             latent_noise_std=spec.latent_noise_std,
-            debug_gt_force=spec.ot_debug_gt_force,
-            debug_pred_force=spec.ot_debug_pred_force,
-            force_probe=force_probe,
         )
 
         return lambda env: TactileLatentFlowObsWrapper(env, **wrapper_kwargs)
@@ -541,45 +459,17 @@ def build_tactile_obs_wrapper(
         payload = hop1["payload"]
         velocity_cfg = hop1["velocity_cfg"]
 
-        velocity_hop2 = None
-        latent_norm_hop2 = None
-        prediction_target_hop2 = None
-        direction_hop2 = None
-        ckpt_path_hop2 = None
-        if spec.ckpt_ot_2 is not None:
-            hop2 = load_rectified_flow_checkpoint(spec.ckpt_ot_2, wrap_device, expected_latent_dim=latent_dim)
-            if int(hop2["latent_dim"]) != latent_dim:
-                raise ValueError(
-                    f"checkpoints.ot_2 latent_dim={hop2['latent_dim']} != hop-1 latent_dim={latent_dim}."
-                )
-            hop2_sign = hop_spec_for_transition(
-                train_direction=hop2["train_direction"],
-                src_modality="image",
-                dst_modality="point",
-            )[1]
-            check_rectified_flow_integration_direction(
-                prediction_target=hop2["prediction_target"],
-                integration_sign=hop2_sign,
-                ckpt_path=hop2["path"],
-                hop_label="double_ot hop 2",
-            )
-            velocity_hop2 = hop2["velocity"]
-            latent_norm_hop2 = hop2["latent_norm"]
-            prediction_target_hop2 = hop2["prediction_target"]
-            direction_hop2 = hop2["train_direction"]
-            ckpt_path_hop2 = str(hop2["path"])
-        else:
-            hop2_sign = hop_spec_for_transition(
-                train_direction=hop1_direction,
-                src_modality="image",
-                dst_modality="point",
-            )[1]
-            check_rectified_flow_integration_direction(
-                prediction_target=prediction_target,
-                integration_sign=hop2_sign,
-                ckpt_path=hop1["path"],
-                hop_label="double_ot hop 2",
-            )
+        hop2_sign = hop_spec_for_transition(
+            train_direction=hop1_direction,
+            src_modality="image",
+            dst_modality="point",
+        )[1]
+        check_rectified_flow_integration_direction(
+            prediction_target=prediction_target,
+            integration_sign=hop2_sign,
+            ckpt_path=hop1["path"],
+            hop_label="double_ot hop 2",
+        )
 
         if spec.ckpt_point_mae is None:
             raise ValueError("tactile_obs_wrapper.name='double_ot' requires checkpoints.point_mae")
@@ -698,11 +588,6 @@ def build_tactile_obs_wrapper(
             double_ot=True,
             proprio_pc_mean=proprio_pc_mean,
             proprio_pc_std=proprio_pc_std,
-            velocity_hop2=velocity_hop2,
-            latent_norm_hop2=latent_norm_hop2,
-            prediction_target_hop2=prediction_target_hop2,
-            direction_hop2=direction_hop2,
-            ckpt_path_hop2=ckpt_path_hop2,
         )
 
     raise ValueError(

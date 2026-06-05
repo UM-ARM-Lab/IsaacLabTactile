@@ -137,7 +137,7 @@ class PegInsert(FactoryTask):
     held_asset_pos_noise: list = [0.003, 0.0, 0.003]  # noise level of the held asset in gripper
     # held_asset_rot_noise: list = [0.0, 0.0, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     # held_asset_rot_noise: list = [0.0, 0.1, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
-    held_asset_rot_noise: list = [0.0, 0.3, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
+    held_asset_rot_noise: list = [0.0, 0.2, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     # held_asset_rot_noise: list = [0.0, 0.628318, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     held_asset_rot_init: float = 0.0
 
@@ -483,7 +483,7 @@ TEST_HELD_OBJECT_PRESETS: dict[str, dict] = {
     },
     "nut": {
         "held_asset_cfg_cls": NutM16,
-        "fixed_init_pos": (0.49, 0.0, 0.0),
+        "fixed_init_pos": (0.49, 0.0, 0.005),
         # 30 deg about +X so the nut rests on a flat face for grasping.
         "fixed_init_rot": (0.9659, 0.0, 0.0, 0.2588),
     },
