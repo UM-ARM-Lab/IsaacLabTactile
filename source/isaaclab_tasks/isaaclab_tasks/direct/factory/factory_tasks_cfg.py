@@ -483,7 +483,7 @@ TEST_HELD_OBJECT_PRESETS: dict[str, dict] = {
     },
     "nut": {
         "held_asset_cfg_cls": NutM16,
-        "fixed_init_pos": (0.49, 0.0, 0.005),
+        "fixed_init_pos": (0.49, 0.0, 0.009),
         # 30 deg about +X so the nut rests on a flat face for grasping.
         "fixed_init_rot": (0.9659, 0.0, 0.0, 0.2588),
     },
