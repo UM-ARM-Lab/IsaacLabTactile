@@ -14,7 +14,6 @@ class TactileObsWrapperSpec:
     force_keys: dict[str, str]
     ot_euler_steps: int
     ot_euler_steps_hop2: int | None
-    ot_noise_scale: float
     hop1_latent_noise_std: float
     ot_reverse_direction: bool
     use_projection: bool
@@ -22,6 +21,7 @@ class TactileObsWrapperSpec:
     ckpt_point_mae: str | None
     ckpt_mae: str | None
     ckpt_ot: str | None
+    ckpt_ot_2: str | None
     ckpt_projection: str | None
     latent_noise_enable: bool
     latent_noise_std: float
@@ -63,17 +63,6 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
     ot_euler_steps_hop2 = (
         None if ot_euler_steps_hop2_raw is None else int(ot_euler_steps_hop2_raw)
     )
-    ot_noise_scale = float(
-        wrapper_cfg.get(
-            "ot_noise_scale",
-            wrapper_cfg.get("rectified_flow_noise_scale", 0.0),
-        )
-    )
-    if ot_noise_scale < 0.0:
-        raise ValueError(
-            "tactile_obs_wrapper.ot_noise_scale must be non-negative, "
-            f"got {ot_noise_scale}."
-        )
     hop1_latent_noise_std = float(wrapper_cfg.get("hop1_latent_noise_std", 0.0))
     if hop1_latent_noise_std < 0.0:
         raise ValueError(
@@ -113,7 +102,6 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         force_keys=force_keys,
         ot_euler_steps=ot_euler_steps,
         ot_euler_steps_hop2=ot_euler_steps_hop2,
-        ot_noise_scale=ot_noise_scale,
         hop1_latent_noise_std=hop1_latent_noise_std,
         ot_reverse_direction=ot_reverse_direction,
         use_projection=use_projection,
@@ -121,6 +109,7 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         ckpt_point_mae=str(ckpts.get("point_mae")) if _is_enabled_path(ckpts.get("point_mae")) else None,
         ckpt_mae=str(ckpts.get("mae")) if _is_enabled_path(ckpts.get("mae")) else None,
         ckpt_ot=str(ckpts.get("ot")) if _is_enabled_path(ckpts.get("ot")) else None,
+        ckpt_ot_2=str(ckpts.get("ot_2")) if _is_enabled_path(ckpts.get("ot_2")) else None,
         ckpt_projection=str(ckpts.get("projection")) if _is_enabled_path(ckpts.get("projection")) else None,
         latent_noise_enable=latent_noise_enable,
         latent_noise_std=latent_noise_std,
@@ -283,9 +272,28 @@ def build_tactile_obs_wrapper(
         hidden_dims = velocity_cfg_dict.get("hidden_dims", (1024, 1024))
         if isinstance(hidden_dims, list):
             hidden_dims = tuple(hidden_dims)
+        from tactile_transfer.utils.latent_flow_training import (  # noqa: WPS433
+            cond_dim_from_checkpoint,
+            flow_mode_from_checkpoint,
+        )
+
+        flow_mode = flow_mode_from_checkpoint(payload)
+        model_cond_dim = cond_dim_from_checkpoint(velocity_cfg_dict, payload)
+        if flow_mode == "noise_to_data_latent_cond":
+            if model_cond_dim != latent_dim:
+                raise ValueError(
+                    "noise_to_data_latent_cond OT checkpoint requires cond_dim == latent_dim, "
+                    f"got cond_dim={model_cond_dim}, latent_dim={latent_dim}."
+                )
+            if spec.ot_reverse_direction:
+                raise ValueError(
+                    "tactile_obs_wrapper.ot_reverse_direction=true is incompatible with "
+                    "flow_mode='noise_to_data_latent_cond' (source latent must match train direction)."
+                )
+
         velocity_cfg = RectifiedFlowVelocityConfig(
             time_dim=int(velocity_cfg_dict.get("time_dim", 256)),
-            proprio_dim=int(velocity_cfg_dict.get("proprio_dim", payload.get("proprio_dim", 0))),
+            cond_dim=model_cond_dim,
             hidden_dims=tuple(hidden_dims),
         )
         velocity = VelocityMLP(latent_dim=latent_dim, cfg=velocity_cfg).to(wrap_device)
@@ -370,8 +378,8 @@ def build_tactile_obs_wrapper(
 
         proprio_mean = None
         proprio_std = None
-        if int(velocity_cfg.proprio_dim) > 0:
-            expected_proprio_dim = int(velocity_cfg.proprio_dim)
+        if int(velocity_cfg.cond_dim) > 0 and flow_mode != "noise_to_data_latent_cond":
+            expected_proprio_dim = int(velocity_cfg.cond_dim)
             # Proprio stats (source-side) for normalization.
             # Avoid `a or b` here because these values are tensors and cannot be
             # truth-tested when they contain more than one element.
@@ -400,7 +408,7 @@ def build_tactile_obs_wrapper(
                 )
             if int(proprio_mean.shape[0]) < expected_proprio_dim:
                 raise ValueError(
-                    "OT checkpoint proprio stats dim is smaller than velocity proprio_dim: "
+                    "OT checkpoint proprio stats dim is smaller than velocity cond_dim: "
                     f"stats={proprio_mean.shape[0]} expected={expected_proprio_dim}."
                 )
             if int(proprio_mean.shape[0]) > expected_proprio_dim:
@@ -417,7 +425,6 @@ def build_tactile_obs_wrapper(
             latent_dim=latent_dim,
             tactile_obs_key=spec.tactile_obs_key,
             euler_steps=int(spec.ot_euler_steps),
-            noise_scale=float(spec.ot_noise_scale),
             prediction_target=prediction_target,
             direction=direction,
             reverse_training_direction=bool(spec.ot_reverse_direction),
@@ -429,6 +436,7 @@ def build_tactile_obs_wrapper(
             proprio_src_std=proprio_std,
             latent_noise_enable=spec.latent_noise_enable,
             latent_noise_std=spec.latent_noise_std,
+            flow_mode=flow_mode,
         )
 
         return lambda env: TactileLatentFlowObsWrapper(env, **wrapper_kwargs)
@@ -447,18 +455,27 @@ def build_tactile_obs_wrapper(
         )
 
         hop1 = load_rectified_flow_checkpoint(spec.ckpt_ot, wrap_device)
+        flow_mode_hop1 = str(hop1["flow_mode"])
         hop1_direction = str(hop1["train_direction"])
-        hop1_sign = hop_spec_for_transition(
-            train_direction=hop1_direction,
-            src_modality="point",
-            dst_modality="image",
-        )[1]
-        check_rectified_flow_integration_direction(
-            prediction_target=hop1["prediction_target"],
-            integration_sign=hop1_sign,
-            ckpt_path=hop1["path"],
-            hop_label="double_ot hop 1",
-        )
+        if flow_mode_hop1 == "noise_to_data_latent_cond":
+            if hop1_direction != "pc_to_image":
+                raise ValueError(
+                    "double_ot hop-1 with flow_mode='noise_to_data_latent_cond' requires "
+                    f"train_direction='pc_to_image', got {hop1_direction!r}."
+                )
+            hop1_sign = 1.0
+        else:
+            hop1_sign = hop_spec_for_transition(
+                train_direction=hop1_direction,
+                src_modality="point",
+                dst_modality="image",
+            )[1]
+            check_rectified_flow_integration_direction(
+                prediction_target=hop1["prediction_target"],
+                integration_sign=hop1_sign,
+                ckpt_path=hop1["path"],
+                hop_label="double_ot hop 1",
+            )
 
         latent_dim = int(hop1["latent_dim"])
         velocity = hop1["velocity"]
@@ -467,17 +484,62 @@ def build_tactile_obs_wrapper(
         payload = hop1["payload"]
         velocity_cfg = hop1["velocity_cfg"]
 
-        hop2_sign = hop_spec_for_transition(
-            train_direction=hop1_direction,
-            src_modality="image",
-            dst_modality="point",
-        )[1]
-        check_rectified_flow_integration_direction(
-            prediction_target=prediction_target,
-            integration_sign=hop2_sign,
-            ckpt_path=hop1["path"],
-            hop_label="double_ot hop 2",
-        )
+        velocity_hop2 = None
+        latent_norm_hop2 = None
+        prediction_target_hop2 = None
+        hop2_train_direction = None
+        flow_mode_hop2 = flow_mode_hop1
+        if spec.ckpt_ot_2 is not None:
+            hop2 = load_rectified_flow_checkpoint(spec.ckpt_ot_2, wrap_device)
+            flow_mode_hop2 = str(hop2["flow_mode"])
+            if int(hop2["latent_dim"]) != latent_dim:
+                raise ValueError(
+                    f"double_ot hop-2 latent_dim={int(hop2['latent_dim'])} != hop-1 latent_dim={latent_dim}."
+                )
+            hop2_train_direction = str(hop2["train_direction"])
+            if flow_mode_hop2 == "noise_to_data_latent_cond":
+                if hop2_train_direction != "image_to_pc":
+                    raise ValueError(
+                        "double_ot hop-2 with flow_mode='noise_to_data_latent_cond' requires "
+                        f"train_direction='image_to_pc', got {hop2_train_direction!r}."
+                    )
+                hop2_sign = 1.0
+            else:
+                hop2_sign = hop_spec_for_transition(
+                    train_direction=hop2_train_direction,
+                    src_modality="image",
+                    dst_modality="point",
+                )[1]
+                check_rectified_flow_integration_direction(
+                    prediction_target=hop2["prediction_target"],
+                    integration_sign=hop2_sign,
+                    ckpt_path=hop2["path"],
+                    hop_label="double_ot hop 2",
+                )
+            velocity_hop2 = hop2["velocity"]
+            latent_norm_hop2 = hop2["latent_norm"]
+            prediction_target_hop2 = hop2["prediction_target"]
+            hop2_payload = hop2["payload"]
+            hop2_velocity_cfg = hop2["velocity_cfg"]
+        else:
+            if flow_mode_hop1 == "noise_to_data_latent_cond":
+                raise ValueError(
+                    "tactile_obs_wrapper.name='double_ot' with flow_mode='noise_to_data_latent_cond' on hop 1 "
+                    "requires checkpoints.ot_2 (reverse integration is not supported)."
+                )
+            hop2_sign = hop_spec_for_transition(
+                train_direction=hop1_direction,
+                src_modality="image",
+                dst_modality="point",
+            )[1]
+            check_rectified_flow_integration_direction(
+                prediction_target=prediction_target,
+                integration_sign=hop2_sign,
+                ckpt_path=hop1["path"],
+                hop_label="double_ot hop 2",
+            )
+            hop2_payload = payload
+            hop2_velocity_cfg = velocity_cfg
 
         if spec.ckpt_point_mae is None:
             raise ValueError("tactile_obs_wrapper.name='double_ot' requires checkpoints.point_mae")
@@ -530,47 +592,76 @@ def build_tactile_obs_wrapper(
                     f"projection checkpoint source_latent={latent_projection_source!r}."
                 )
 
+        hop1_proprio_cond_dim = (
+            0 if flow_mode_hop1 == "noise_to_data_latent_cond" else int(velocity_cfg.cond_dim)
+        )
+        hop2_proprio_cond_dim = (
+            0 if flow_mode_hop2 == "noise_to_data_latent_cond" else int(hop2_velocity_cfg.cond_dim)
+        )
+        if flow_mode_hop2 == "noise_to_data_latent_cond" and spec.ckpt_ot_2 is None:
+            raise ValueError(
+                "double_ot hop 2 with flow_mode='noise_to_data_latent_cond' requires checkpoints.ot_2."
+            )
+        if (
+            hop1_proprio_cond_dim > 0
+            and hop2_proprio_cond_dim > 0
+            and hop1_proprio_cond_dim != hop2_proprio_cond_dim
+        ):
+            raise ValueError(
+                "double_ot hop-1 and hop-2 proprio cond_dim must match when both use data_to_data proprio "
+                f"conditioning: hop1={hop1_proprio_cond_dim}, hop2={hop2_proprio_cond_dim}."
+            )
+
         proprio_img_mean = None
         proprio_img_std = None
         proprio_pc_mean = None
         proprio_pc_std = None
-        if int(velocity_cfg.proprio_dim) > 0:
-            expected_proprio_dim = int(velocity_cfg.proprio_dim)
-            proprio_img_mean = payload.get("proprio_img_mean")
-            proprio_img_std = payload.get("proprio_img_std")
+        if hop1_proprio_cond_dim > 0:
             proprio_pc_mean = payload.get("proprio_pc_mean")
             proprio_pc_std = payload.get("proprio_pc_std")
-            if proprio_img_mean is None or proprio_img_std is None:
-                raise ValueError(
-                    "double_ot hop-1 checkpoint missing proprio_img_mean/proprio_img_std."
-                )
             if proprio_pc_mean is None or proprio_pc_std is None:
                 raise ValueError(
                     "double_ot hop-1 checkpoint missing proprio_pc_mean/proprio_pc_std."
                 )
-            for label, mean_t, std_t in (
-                ("proprio_img", proprio_img_mean, proprio_img_std),
-                ("proprio_pc", proprio_pc_mean, proprio_pc_std),
-            ):
-                mean_t = mean_t.to(wrap_device).float().reshape(-1)
-                std_t = std_t.to(wrap_device).float().reshape(-1)
-                if int(mean_t.shape[0]) != int(std_t.shape[0]):
-                    raise ValueError(
-                        f"OT checkpoint {label} mean/std dim mismatch: "
-                        f"mean={mean_t.shape[0]} std={std_t.shape[0]}."
-                    )
-                if int(mean_t.shape[0]) < expected_proprio_dim:
-                    raise ValueError(
-                        f"OT checkpoint {label} stats dim is smaller than velocity proprio_dim: "
-                        f"stats={mean_t.shape[0]} expected={expected_proprio_dim}."
-                    )
-                if int(mean_t.shape[0]) > expected_proprio_dim:
-                    mean_t = mean_t[:expected_proprio_dim]
-                    std_t = std_t[:expected_proprio_dim]
-                if label == "proprio_img":
-                    proprio_img_mean, proprio_img_std = mean_t, std_t
-                else:
-                    proprio_pc_mean, proprio_pc_std = mean_t, std_t
+            proprio_pc_mean = proprio_pc_mean.to(wrap_device).float().reshape(-1)
+            proprio_pc_std = proprio_pc_std.to(wrap_device).float().reshape(-1)
+            if int(proprio_pc_mean.shape[0]) != int(proprio_pc_std.shape[0]):
+                raise ValueError(
+                    "OT checkpoint proprio_pc mean/std dim mismatch: "
+                    f"mean={proprio_pc_mean.shape[0]} std={proprio_pc_std.shape[0]}."
+                )
+            if int(proprio_pc_mean.shape[0]) < hop1_proprio_cond_dim:
+                raise ValueError(
+                    "OT checkpoint proprio_pc stats dim is smaller than hop-1 velocity cond_dim: "
+                    f"stats={proprio_pc_mean.shape[0]} expected={hop1_proprio_cond_dim}."
+                )
+            if int(proprio_pc_mean.shape[0]) > hop1_proprio_cond_dim:
+                proprio_pc_mean = proprio_pc_mean[:hop1_proprio_cond_dim]
+                proprio_pc_std = proprio_pc_std[:hop1_proprio_cond_dim]
+
+        if hop2_proprio_cond_dim > 0:
+            proprio_img_mean = hop2_payload.get("proprio_img_mean")
+            proprio_img_std = hop2_payload.get("proprio_img_std")
+            if proprio_img_mean is None or proprio_img_std is None:
+                raise ValueError(
+                    "double_ot hop-2 checkpoint missing proprio_img_mean/proprio_img_std "
+                    f"({'checkpoints.ot_2' if spec.ckpt_ot_2 is not None else 'checkpoints.ot'})."
+                )
+            proprio_img_mean = proprio_img_mean.to(wrap_device).float().reshape(-1)
+            proprio_img_std = proprio_img_std.to(wrap_device).float().reshape(-1)
+            if int(proprio_img_mean.shape[0]) != int(proprio_img_std.shape[0]):
+                raise ValueError(
+                    "OT checkpoint proprio_img mean/std dim mismatch: "
+                    f"mean={proprio_img_mean.shape[0]} std={proprio_img_std.shape[0]}."
+                )
+            if int(proprio_img_mean.shape[0]) < hop2_proprio_cond_dim:
+                raise ValueError(
+                    "OT checkpoint proprio_img stats dim is smaller than hop-2 velocity cond_dim: "
+                    f"stats={proprio_img_mean.shape[0]} expected={hop2_proprio_cond_dim}."
+                )
+            if int(proprio_img_mean.shape[0]) > hop2_proprio_cond_dim:
+                proprio_img_mean = proprio_img_mean[:hop2_proprio_cond_dim]
+                proprio_img_std = proprio_img_std[:hop2_proprio_cond_dim]
 
         return lambda env: TactileLatentFlowObsWrapper(
             env,
@@ -581,7 +672,6 @@ def build_tactile_obs_wrapper(
             latent_dim=latent_dim,
             euler_steps=int(spec.ot_euler_steps),
             euler_steps_hop2=spec.ot_euler_steps_hop2,
-            noise_scale=float(spec.ot_noise_scale),
             prediction_target=prediction_target,
             direction=hop1_direction,
             reverse_training_direction=False,
@@ -597,7 +687,56 @@ def build_tactile_obs_wrapper(
             hop1_latent_noise_std=float(spec.hop1_latent_noise_std),
             proprio_pc_mean=proprio_pc_mean,
             proprio_pc_std=proprio_pc_std,
+            flow_mode=flow_mode_hop1,
+            flow_mode_hop2=flow_mode_hop2,
+            velocity_hop2=velocity_hop2,
+            latent_norm_hop2=latent_norm_hop2,
+            prediction_target_hop2=prediction_target_hop2,
+            hop2_train_direction=hop2_train_direction,
         )
+
+    raise ValueError(
+        f"Unsupported tactile_obs_wrapper.name={name!r}. Expected null|mae|point_mae|ot|double_ot."
+    )
+
+
+def resolve_policy_latent_dim(task_overrides: dict) -> tuple[int, str]:
+    """Return ``(appended_latent_dim, wrapper_name)`` for the active tactile obs wrapper.
+
+    When the wrapper is disabled (``name: null``), returns ``(0, name)``.
+    """
+    from tactile_transfer.model.point_mae import point_mae_config_from_checkpoint_dict  # noqa: WPS433
+    from tactile_transfer.utils.policy_keys import normalize_policy_keys  # noqa: WPS433
+
+    spec = _parse_spec(task_overrides)
+    name = spec.name
+    if name in ("none", "null", ""):
+        return 0, name
+
+    if name == "mae":
+        if spec.ckpt_mae is None:
+            raise ValueError("tactile_obs_wrapper.name='mae' requires checkpoints.mae")
+        ckpt = torch.load(spec.ckpt_mae, map_location="cpu", weights_only=False)
+        embed_dim = int(ckpt["config"]["encoder_embed_dim"])
+        stream_count = len(
+            normalize_policy_keys(spec.tactile_obs_key, arg_name="tactile_obs_wrapper.tactile_obs_key")
+        )
+        return embed_dim * stream_count, name
+
+    if name == "point_mae":
+        if spec.ckpt_point_mae is None:
+            raise ValueError("tactile_obs_wrapper.name='point_mae' requires checkpoints.point_mae")
+        ckpt = torch.load(spec.ckpt_point_mae, map_location="cpu", weights_only=False)
+        embed_dim = int(point_mae_config_from_checkpoint_dict(ckpt["config"]).embed_dim)
+        return embed_dim, name
+
+    if name in ("ot", "double_ot"):
+        if spec.ckpt_ot is None:
+            raise ValueError(f"tactile_obs_wrapper.name={name!r} requires checkpoints.ot")
+        payload = torch.load(spec.ckpt_ot, map_location="cpu", weights_only=False)
+        if "latent_dim" not in payload:
+            raise ValueError(f"OT checkpoint missing 'latent_dim': {spec.ckpt_ot}")
+        return int(payload["latent_dim"]), name
 
     raise ValueError(
         f"Unsupported tactile_obs_wrapper.name={name!r}. Expected null|mae|point_mae|ot|double_ot."
