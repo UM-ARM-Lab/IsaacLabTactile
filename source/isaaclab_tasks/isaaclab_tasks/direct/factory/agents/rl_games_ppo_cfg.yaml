@@ -79,16 +79,16 @@ params:
     tactile_obs_wrapper:
       # name: ot  # one of: null, mae, point_mae, ot, double_ot
       # name: null  # one of: null, mae, point_mae, ot, double_ot
-      # name: mae  # one of: null, mae, point_mae, ot, double_ot
+      name: mae  # one of: null, mae, point_mae, ot, double_ot
       # name: point_mae  # one of: null, mae, point_mae, ot, double_ot
-      name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
+      # name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
       gaussian_dropout:
-        enable: false  # multiplicative N(1, std) on final policy latent; applies when name == mae|point_mae|ot
-        std: 0.1  # each step: latent *= N(1, std)
+        enable: false  # additive N(0, std) on final policy latent; applies when name == mae|point_mae|ot
+        std: 0.1  # each step: latent += N(0, std)
       force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
-      ot_euler_steps: 4  # double_ot hop 1 (point->image); also hop 2 default unless ot_euler_steps_hop2 is set
+      ot_euler_steps: 1  # double_ot hop 1 (point->image); also hop 2 default unless ot_euler_steps_hop2 is set
       ot_euler_steps_hop2: null  # double_ot hop 2 (image->point); null = use ot_euler_steps
       hop1_latent_noise_std: 0.00  # double_ot: i.i.d. Gaussian noise on hop-1 output latent before hop 2; 0 = off
       # double_ot: checkpoints.ot is hop 1 (point->image). Set checkpoints.ot_2 for hop 2 (image->point).
@@ -101,17 +101,21 @@ params:
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0158_ot_nut/rectified_flow_latent_epoch_2000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0144_ot_peg/rectified_flow_latent_epoch_2000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0147_ot_peg/rectified_flow_latent_epoch_2000.pth
-        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0163_ot_peg_image_to_pc/rectified_flow_latent_epoch_10000.pth
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0164_ot_peg_pc_to_image/rectified_flow_latent_epoch_10000.pth
-        ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0163_ot_peg_image_to_pc/rectified_flow_latent_epoch_10000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0164_ot_peg_pc_to_image/rectified_flow_latent_epoch_10000.pth
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0167_ot_peg_image_to_pc/rectified_flow_latent_epoch_10000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0168_ot_peg_pc_to_image/rectified_flow_latent_epoch_10000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0169_ot_peg_image_to_pc/rectified_flow_latent_epoch_7000.pth
+        ot_2: null
+        # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0163_ot_peg_image_to_pc/rectified_flow_latent_epoch_10000.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0027_nut_no_wrench/point_mae_epoch_0005.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0022_gear_no_wrench/point_mae_epoch_0005.pth
-        point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0026_peg_no_wrench/point_mae_epoch_0005.pth
-        # point_mae: null
+        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0026_peg_no_wrench/point_mae_epoch_0005.pth
+        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0025_peg_no_force/point_mae_epoch_0005.pth
+        point_mae: null
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0028_nut/tactile_image_mae_epoch_0300.pth
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0012_gear/tactile_image_mae_epoch_0300.pth
-        # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0024_peg/tactile_image_mae_epoch_0300.pth
-        mae: null
+        mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0024_peg/tactile_image_mae_epoch_0300.pth
+        # mae: null
         projection: null
       tactile_obs_key: [tactile, tactile_right]
       # tactile_obs_key: [tactile]

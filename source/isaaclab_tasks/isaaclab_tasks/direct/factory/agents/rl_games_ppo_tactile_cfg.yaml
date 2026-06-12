@@ -123,8 +123,8 @@ params:
       name: null  # one of: null, mae, point_mae, ot, double_ot
       use_projection: false
       gaussian_dropout:
-        enable: false  # multiplicative N(1, std) on final policy latent; applies when name == mae|point_mae|ot
-        std: 0.1  # each step: latent *= N(1, std)
+        enable: false  # additive N(0, std) on final policy latent; applies when name == mae|point_mae|ot
+        std: 0.1  # each step: latent += N(0, std)
       force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off
       projection_source_latent: null  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
       checkpoints:
