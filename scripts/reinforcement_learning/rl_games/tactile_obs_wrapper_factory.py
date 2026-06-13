@@ -15,6 +15,7 @@ class TactileObsWrapperSpec:
     ot_euler_steps: int
     ot_euler_steps_hop2: int | None
     hop1_latent_noise_std: float
+    double_ot_num_cycles: int
     ot_reverse_direction: bool
     use_projection: bool
     projection_source_latent: str | None
@@ -69,6 +70,17 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
             "tactile_obs_wrapper.hop1_latent_noise_std must be non-negative, "
             f"got {hop1_latent_noise_std}."
         )
+    double_ot_num_cycles = int(wrapper_cfg.get("num_cycles", 1))
+    if double_ot_num_cycles < 1:
+        raise ValueError(
+            "tactile_obs_wrapper.num_cycles must be >= 1, "
+            f"got {double_ot_num_cycles}."
+        )
+    if double_ot_num_cycles != 1 and name != "double_ot":
+        raise ValueError(
+            "tactile_obs_wrapper.num_cycles > 1 requires name='double_ot', "
+            f"got name={name!r}, num_cycles={double_ot_num_cycles}."
+        )
     ot_reverse_direction = bool(wrapper_cfg.get("ot_reverse_direction", False))
     use_projection = bool(wrapper_cfg.get("use_projection", False))
     projection_source_latent = wrapper_cfg.get("projection_source_latent")
@@ -103,6 +115,7 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         ot_euler_steps=ot_euler_steps,
         ot_euler_steps_hop2=ot_euler_steps_hop2,
         hop1_latent_noise_std=hop1_latent_noise_std,
+        double_ot_num_cycles=double_ot_num_cycles,
         ot_reverse_direction=ot_reverse_direction,
         use_projection=use_projection,
         projection_source_latent=projection_source_latent,
@@ -684,6 +697,7 @@ def build_tactile_obs_wrapper(
             latent_noise_enable=spec.latent_noise_enable,
             latent_noise_std=spec.latent_noise_std,
             double_ot=True,
+            num_cycles=int(spec.double_ot_num_cycles),
             hop1_latent_noise_std=float(spec.hop1_latent_noise_std),
             proprio_pc_mean=proprio_pc_mean,
             proprio_pc_std=proprio_pc_std,
