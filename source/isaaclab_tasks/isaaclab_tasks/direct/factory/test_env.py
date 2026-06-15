@@ -20,6 +20,8 @@ from isaaclab.sensors import VisuoTactileSensor
 from . import factory_utils
 from .factory_env import (
     FactoryEnv,
+    _held_pos_for_tactile_pc,
+    _held_quat_for_tactile_pc,
     _load_meshes_from_usd,
     _load_meshes_from_usd_file,
     _sample_meshes_to_points,
@@ -263,8 +265,14 @@ class TestEnv(FactoryEnv):
                 left_quat_w = self._robot.data.body_quat_w[:, self.left_finger_body_idx]
                 right_pos_e = self._robot.data.body_pos_w[:, self.right_finger_body_idx] - self.scene.env_origins
                 right_quat_w = self._robot.data.body_quat_w[:, self.right_finger_body_idx]
-                held_pos_e = self.fixed_pos
-                held_quat_w = self.fixed_quat
+                held_pos_e = _held_pos_for_tactile_pc(
+                    self.fixed_pos,
+                    self.cfg.tactile_pointcloud_held_pos_noise_std,
+                )
+                held_quat_w = _held_quat_for_tactile_pc(
+                    self.fixed_quat,
+                    self.cfg.tactile_pointcloud_held_rot_noise_std,
+                )
 
                 def _apply_pc(quat_w, pts_l, pos_e):
                     e_count, p_count = quat_w.shape[0], pts_l.shape[0]

@@ -100,6 +100,13 @@ params:
     # Individual noise parameters are configured in factory_env_cfg.py (ObsRandCfg)
     obs_noise:
       enable_obs_noise: False  # Set to true to enable observation noise
+
+    # Tactile point cloud domain randomization (held object only).
+    # Adds Gaussian noise to held-object pose before rendering tactile_pc_peg_w.
+    # Finger point clouds are unchanged. std=0 uses clean ground-truth pose.
+    tactile_pointcloud_dr:
+      held_pos_noise_std: 0.0   # meters
+      held_rot_noise_std: 0.0   # radians (axis-angle components)
     
     # Include held asset observations (held_pos_rel_fixed and held_quat) in obs_order
     # When enabled, adds held object position relative to fixed asset and held object orientation to policy observations

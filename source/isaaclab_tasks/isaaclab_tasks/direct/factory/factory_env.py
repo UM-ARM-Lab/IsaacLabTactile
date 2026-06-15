@@ -108,6 +108,31 @@ def _sample_meshes_to_points(meshes: list, num_points: int) -> np.ndarray:
         all_points.append(np.asarray(points, dtype=np.float64))
     return np.vstack(all_points) if all_points else np.zeros((0, 3), dtype=np.float64)
 
+
+def _held_pos_for_tactile_pc(held_pos_e: torch.Tensor, noise_std: float) -> torch.Tensor:
+    """Held-object env-frame position for peg tactile PC rendering (optional DR noise)."""
+    std = float(noise_std)
+    if std <= 0.0:
+        return held_pos_e
+    return held_pos_e + torch.randn_like(held_pos_e) * std
+
+
+def _held_quat_for_tactile_pc(held_quat_w: torch.Tensor, noise_std: float) -> torch.Tensor:
+    """Held-object world quaternion for peg tactile PC rendering (optional DR noise).
+
+    Applies a small axis-angle perturbation in the body frame (right multiply), matching
+    ``_apply_observation_noise`` for ``*_quat`` observations.
+    """
+    std = float(noise_std)
+    if std <= 0.0:
+        return held_quat_w
+    angle_noise = torch.randn((held_quat_w.shape[0], 3), dtype=held_quat_w.dtype, device=held_quat_w.device) * std
+    angle = torch.norm(angle_noise, p=2, dim=-1, keepdim=True)
+    axis = angle_noise / (angle + 1e-8)
+    quat_delta = torch_utils.quat_from_angle_axis(angle.squeeze(-1), axis)
+    return torch_utils.quat_mul(held_quat_w, quat_delta)
+
+
 class FactoryEnv(DirectRLEnv):
     cfg: FactoryEnvCfg
 
@@ -507,8 +532,14 @@ class FactoryEnv(DirectRLEnv):
                 left_quat_w = self._robot.data.body_quat_w[:, self.left_finger_body_idx]
                 right_pos_e = self._robot.data.body_pos_w[:, self.right_finger_body_idx] - self.scene.env_origins
                 right_quat_w = self._robot.data.body_quat_w[:, self.right_finger_body_idx]
-                held_pos_e = self._held_asset.data.root_pos_w - self.scene.env_origins
-                held_quat_w = self._held_asset.data.root_quat_w
+                held_pos_e = _held_pos_for_tactile_pc(
+                    self._held_asset.data.root_pos_w - self.scene.env_origins,
+                    self.cfg.tactile_pointcloud_held_pos_noise_std,
+                )
+                held_quat_w = _held_quat_for_tactile_pc(
+                    self._held_asset.data.root_quat_w,
+                    self.cfg.tactile_pointcloud_held_rot_noise_std,
+                )
 
                 # The torch_utils.quat_apply helper expects the quaternion and point tensors
                 # to have the same leading dimension (no implicit broadcasting). To obtain a

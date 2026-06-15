@@ -133,6 +133,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print(f"[INFO] Setting enable_obs_noise to {obs_noise['enable_obs_noise']}")
             else:
                 print("[WARNING] obs_noise must be a dictionary with 'enable_obs_noise' key")
+
+        tactile_pc_dr = task_overrides.get("tactile_pointcloud_dr", None)
+        if isinstance(tactile_pc_dr, dict):
+            if "held_pos_noise_std" in tactile_pc_dr and hasattr(env_cfg, "tactile_pointcloud_held_pos_noise_std"):
+                env_cfg.tactile_pointcloud_held_pos_noise_std = float(tactile_pc_dr["held_pos_noise_std"])
+                print(
+                    "[INFO] Setting tactile_pointcloud_held_pos_noise_std to "
+                    f"{env_cfg.tactile_pointcloud_held_pos_noise_std}"
+                )
+            if "held_rot_noise_std" in tactile_pc_dr and hasattr(env_cfg, "tactile_pointcloud_held_rot_noise_std"):
+                env_cfg.tactile_pointcloud_held_rot_noise_std = float(tactile_pc_dr["held_rot_noise_std"])
+                print(
+                    "[INFO] Setting tactile_pointcloud_held_rot_noise_std to "
+                    f"{env_cfg.tactile_pointcloud_held_rot_noise_std}"
+                )
         
         # Override include_held_asset_obs flag if specified
         include_held_asset_obs = task_overrides.get("include_held_asset_obs", None)

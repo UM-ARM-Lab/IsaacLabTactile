@@ -175,6 +175,12 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     include_tactile_pointclouds: bool = False
     tactile_pointcloud_gripper_points: int = 800
     tactile_pointcloud_peg_points: int = 400
+    # i.i.d. Gaussian std (meters) on held-object position when rendering tactile_pc_peg_w.
+    # Finger point clouds use ground-truth poses. 0.0 disables noise (clean GT rendering).
+    tactile_pointcloud_held_pos_noise_std: float = 0.0
+    # Axis-angle component std (radians) on held-object orientation when rendering tactile_pc_peg_w.
+    # 0.0 disables noise (clean GT rendering).
+    tactile_pointcloud_held_rot_noise_std: float = 0.0
     
     episode_length_s = 10.0  # Probably need to override.
     sim: SimulationCfg = SimulationCfg(
@@ -437,6 +443,11 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.use_gelsight_finger = env.use_gelsight_finger
         if env.get("obs_history", None) is not None and env["obs_history"].get("history_length", None) is not None:
             self.obs_history.history_length = env["obs_history"]["history_length"]
+
+        if env.get("tactile_pointcloud_held_pos_noise_std", None) is not None:
+            self.tactile_pointcloud_held_pos_noise_std = float(env.tactile_pointcloud_held_pos_noise_std)
+        if env.get("tactile_pointcloud_held_rot_noise_std", None) is not None:
+            self.tactile_pointcloud_held_rot_noise_std = float(env.tactile_pointcloud_held_rot_noise_std)
 
         # Handle optional inclusion of fingertip contact forces/wrenches in observations and states
         if env.get("include_contact_forces", None) is not None:

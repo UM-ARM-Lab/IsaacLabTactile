@@ -50,7 +50,12 @@ parser.add_argument(
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--sigma", type=str, default=None, help="The policy's initial standard deviation.")
-parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument(
+    "--max_iterations",
+    type=int,
+    default=None,
+    help="Number of training epochs. When resuming from a checkpoint, this is additional epochs on top of the checkpoint epoch.",
+)
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
 parser.add_argument("--wandb-entity", type=str, default=None, help="the entity (team) of wandb's project")
 parser.add_argument("--wandb-name", type=str, default=None, help="the name of wandb's run")
@@ -154,6 +159,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print(f"[INFO] Setting enable_obs_noise to {obs_noise['enable_obs_noise']}")
             else:
                 print("[WARNING] obs_noise must be a dictionary with 'enable_obs_noise' key")
+
+        tactile_pc_dr = task_overrides.get("tactile_pointcloud_dr", None)
+        if isinstance(tactile_pc_dr, dict):
+            if "held_pos_noise_std" in tactile_pc_dr and hasattr(env_cfg, "tactile_pointcloud_held_pos_noise_std"):
+                env_cfg.tactile_pointcloud_held_pos_noise_std = float(tactile_pc_dr["held_pos_noise_std"])
+                print(
+                    "[INFO] Setting tactile_pointcloud_held_pos_noise_std to "
+                    f"{env_cfg.tactile_pointcloud_held_pos_noise_std}"
+                )
+            if "held_rot_noise_std" in tactile_pc_dr and hasattr(env_cfg, "tactile_pointcloud_held_rot_noise_std"):
+                env_cfg.tactile_pointcloud_held_rot_noise_std = float(tactile_pc_dr["held_rot_noise_std"])
+                print(
+                    "[INFO] Setting tactile_pointcloud_held_rot_noise_std to "
+                    f"{env_cfg.tactile_pointcloud_held_rot_noise_std}"
+                )
         
         # Override include_held_asset_obs flag if specified
         include_held_asset_obs = task_overrides.get("include_held_asset_obs", None)
