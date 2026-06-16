@@ -112,8 +112,8 @@ params:
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0027_nut_no_wrench/point_mae_epoch_0005.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0022_gear_no_wrench/point_mae_epoch_0005.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0026_peg_no_wrench/point_mae_epoch_0005.pth
-        # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0029_all_no_wrench/point_mae_epoch_0005.pth
-        point_mae: null
+        point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0029_all_no_wrench/point_mae_epoch_0005.pth
+        # point_mae: null
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0028_nut/tactile_image_mae_epoch_0300.pth
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0012_gear/tactile_image_mae_epoch_0300.pth
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0024_peg/tactile_image_mae_epoch_0300.pth
