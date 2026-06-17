@@ -303,7 +303,7 @@ class GearMesh(FactoryTask):
     # Held Asset (applies to all tasks)
     held_asset_pos_noise: list = [0.003, 0.0, 0.003]  # noise level of the held asset in gripper
     held_asset_rot_init: float = -90.0
-    held_asset_rot_noise: list = [0.0, 0.1, 0.0]
+    held_asset_rot_noise: list = [0.0, 0.3, 0.0]
 
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
