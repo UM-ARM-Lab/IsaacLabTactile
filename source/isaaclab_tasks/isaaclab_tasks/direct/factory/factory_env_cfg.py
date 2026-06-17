@@ -540,6 +540,10 @@ class FactoryTaskGearMeshCfg(FactoryEnvCfg):
     task = GearMesh()
     episode_length_s = 20.0
 
+    def __post_init__(self):
+        super().__post_init__()
+        self.ctrl.use_full_rotation = True
+
 
 @configclass
 class FactoryTaskNutThreadCfg(FactoryEnvCfg):
