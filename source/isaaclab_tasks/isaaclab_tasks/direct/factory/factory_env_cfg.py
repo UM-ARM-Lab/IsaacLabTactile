@@ -538,7 +538,7 @@ class FactoryTaskPegInsertCfg(FactoryEnvCfg):
 class FactoryTaskGearMeshCfg(FactoryEnvCfg):
     task_name = "gear_mesh"
     task = GearMesh()
-    episode_length_s = 20.0
+    episode_length_s = 10.0
 
     def __post_init__(self):
         super().__post_init__()
