@@ -14,7 +14,6 @@ class TactileObsWrapperSpec:
     force_keys: dict[str, str]
     ot_euler_steps: int
     ot_euler_steps_hop2: int | None
-    hop1_latent_noise_std: float
     ot_reverse_direction: bool
     use_projection: bool
     projection_source_latent: str | None
@@ -23,8 +22,6 @@ class TactileObsWrapperSpec:
     ckpt_ot: str | None
     ckpt_ot_2: str | None
     ckpt_projection: str | None
-    latent_noise_enable: bool
-    latent_noise_std: float
     force_input_noise_std: float
 
 
@@ -63,25 +60,11 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
     ot_euler_steps_hop2 = (
         None if ot_euler_steps_hop2_raw is None else int(ot_euler_steps_hop2_raw)
     )
-    hop1_latent_noise_std = float(wrapper_cfg.get("hop1_latent_noise_std", 0.0))
-    if hop1_latent_noise_std < 0.0:
-        raise ValueError(
-            "tactile_obs_wrapper.hop1_latent_noise_std must be non-negative, "
-            f"got {hop1_latent_noise_std}."
-        )
     ot_reverse_direction = bool(wrapper_cfg.get("ot_reverse_direction", False))
     use_projection = bool(wrapper_cfg.get("use_projection", False))
     projection_source_latent = wrapper_cfg.get("projection_source_latent")
     if projection_source_latent is not None:
         projection_source_latent = str(projection_source_latent).lower()
-    latent_noise_cfg = dict(wrapper_cfg.get("gaussian_dropout") or wrapper_cfg.get("latent_noise") or {})
-    latent_noise_enable = bool(latent_noise_cfg.get("enable", False))
-    latent_noise_std = float(latent_noise_cfg.get("std", 0.0))
-    if latent_noise_std < 0.0:
-        raise ValueError(
-            "tactile_obs_wrapper.gaussian_dropout.std must be non-negative, "
-            f"got {latent_noise_std}."
-        )
     force_input_noise_raw = wrapper_cfg.get(
         "force_input_noise_std", wrapper_cfg.get("force_input_noise", 0.0)
     )
@@ -102,7 +85,6 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         force_keys=force_keys,
         ot_euler_steps=ot_euler_steps,
         ot_euler_steps_hop2=ot_euler_steps_hop2,
-        hop1_latent_noise_std=hop1_latent_noise_std,
         ot_reverse_direction=ot_reverse_direction,
         use_projection=use_projection,
         projection_source_latent=projection_source_latent,
@@ -111,8 +93,6 @@ def _parse_spec(task_overrides: dict) -> TactileObsWrapperSpec:
         ckpt_ot=str(ckpts.get("ot")) if _is_enabled_path(ckpts.get("ot")) else None,
         ckpt_ot_2=str(ckpts.get("ot_2")) if _is_enabled_path(ckpts.get("ot_2")) else None,
         ckpt_projection=str(ckpts.get("projection")) if _is_enabled_path(ckpts.get("projection")) else None,
-        latent_noise_enable=latent_noise_enable,
-        latent_noise_std=latent_noise_std,
         force_input_noise_std=force_input_noise_std,
     )
 
@@ -183,8 +163,6 @@ def build_tactile_obs_wrapper(
             device=wrap_device,
             projection=projection,
             tactile_obs_key=spec.tactile_obs_key,
-            latent_noise_enable=spec.latent_noise_enable,
-            latent_noise_std=spec.latent_noise_std,
         )
 
     if name == "point_mae":
@@ -222,8 +200,6 @@ def build_tactile_obs_wrapper(
                 wrap_device,
                 point_cfg,
                 projection,
-                latent_noise_enable=spec.latent_noise_enable,
-                latent_noise_std=spec.latent_noise_std,
             )
 
         return lambda env: PointMAEObsWrapper(
@@ -231,8 +207,6 @@ def build_tactile_obs_wrapper(
             point_mae,
             wrap_device,
             point_cfg,
-            latent_noise_enable=spec.latent_noise_enable,
-            latent_noise_std=spec.latent_noise_std,
         )
 
     if name == "ot":
@@ -434,8 +408,6 @@ def build_tactile_obs_wrapper(
             pc_gather_cfg=pc_gather_cfg,
             proprio_src_mean=proprio_mean,
             proprio_src_std=proprio_std,
-            latent_noise_enable=spec.latent_noise_enable,
-            latent_noise_std=spec.latent_noise_std,
             flow_mode=flow_mode,
         )
 
@@ -681,10 +653,7 @@ def build_tactile_obs_wrapper(
             pc_gather_cfg=pc_gather_cfg,
             proprio_src_mean=proprio_img_mean,
             proprio_src_std=proprio_img_std,
-            latent_noise_enable=spec.latent_noise_enable,
-            latent_noise_std=spec.latent_noise_std,
             double_ot=True,
-            hop1_latent_noise_std=float(spec.hop1_latent_noise_std),
             proprio_pc_mean=proprio_pc_mean,
             proprio_pc_std=proprio_pc_std,
             flow_mode=flow_mode_hop1,
