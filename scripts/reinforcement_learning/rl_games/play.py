@@ -125,6 +125,40 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 env_cfg.task.gripper_peg_friction_range = task_overrides["gripper_peg_friction_range"]
                 print(f"[INFO] Setting gripper_peg_friction_range to {env_cfg.task.gripper_peg_friction_range}")
 
+        elastomer_stiffness = task_overrides.get("elastomer_stiffness", None)
+        if elastomer_stiffness is not None:
+            elastomer_stiffness = float(elastomer_stiffness)
+            if hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
+                env_cfg.tactile_cam.compliance_stiffness = elastomer_stiffness
+            if hasattr(env_cfg, "tactile_cam_right") and env_cfg.tactile_cam_right is not None:
+                env_cfg.tactile_cam_right.compliance_stiffness = elastomer_stiffness
+            print(f"[INFO] Setting elastomer compliance_stiffness to {elastomer_stiffness}")
+
+        gripper_kp = task_overrides.get("gripper_kp", None)
+        gripper_kd = task_overrides.get("gripper_kd", None)
+        if gripper_kp is not None or gripper_kd is not None:
+            if hasattr(env_cfg, "robot") and "panda_hand" in env_cfg.robot.actuators:
+                if gripper_kp is not None:
+                    env_cfg.robot.actuators["panda_hand"].stiffness = float(gripper_kp)
+                    print(f"[INFO] Setting gripper_kp (panda_hand stiffness) to {gripper_kp}")
+                if gripper_kd is not None:
+                    env_cfg.robot.actuators["panda_hand"].damping = float(gripper_kd)
+                    print(f"[INFO] Setting gripper_kd (panda_hand damping) to {gripper_kd}")
+
+        if hasattr(env_cfg, "task"):
+            if "arm_control_gain_randomization" in task_overrides:
+                env_cfg.task.arm_control_gain_randomization = task_overrides["arm_control_gain_randomization"]
+                print(
+                    "[INFO] Setting arm_control_gain_randomization to "
+                    f"{env_cfg.task.arm_control_gain_randomization}"
+                )
+            if "arm_kp_scale_range" in task_overrides:
+                env_cfg.task.arm_kp_scale_range = task_overrides["arm_kp_scale_range"]
+                print(f"[INFO] Setting arm_kp_scale_range to {env_cfg.task.arm_kp_scale_range}")
+            if "arm_kd_scale_range" in task_overrides:
+                env_cfg.task.arm_kd_scale_range = task_overrides["arm_kd_scale_range"]
+                print(f"[INFO] Setting arm_kd_scale_range to {env_cfg.task.arm_kd_scale_range}")
+
         # Override observation noise enable flag if specified
         obs_noise = task_overrides.get("obs_noise", None)
         if obs_noise is not None and hasattr(env_cfg, "obs_rand"):

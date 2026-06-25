@@ -486,6 +486,12 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.task.gripper_peg_friction_randomization = task.gripper_peg_friction_randomization
         if task.get("gripper_peg_friction_range", None) is not None:
             self.task.gripper_peg_friction_range = OmegaConf.to_container(task.gripper_peg_friction_range, resolve=True)
+        if task.get("arm_control_gain_randomization", None) is not None:
+            self.task.arm_control_gain_randomization = task.arm_control_gain_randomization
+        if task.get("arm_kp_scale_range", None) is not None:
+            self.task.arm_kp_scale_range = OmegaConf.to_container(task.arm_kp_scale_range, resolve=True)
+        if task.get("arm_kd_scale_range", None) is not None:
+            self.task.arm_kd_scale_range = OmegaConf.to_container(task.arm_kd_scale_range, resolve=True)
         if task.get("held_asset_rot_noise", None) is not None:
             self.task.held_asset_rot_noise = OmegaConf.to_container(task.held_asset_rot_noise, resolve=True)
         if task.get("hand_init_pos", None) is not None:

@@ -95,6 +95,12 @@ class FactoryTask:
     gripper_peg_friction_randomization: bool = False
     gripper_peg_friction_range: list = [0.5, 0.75]  # [min, max] when randomization is enabled
 
+    # Domain randomization: sample arm operational-space Kp/Kd scales every control update.
+    # Multiplicative factors applied to task_prop_gains (Kp) and task_deriv_gains (Kd).
+    arm_control_gain_randomization: bool = False
+    arm_kp_scale_range: list = [0.8, 1.2]  # [min, max] multiplicative scale on task Kp
+    arm_kd_scale_range: list = [0.8, 1.2]  # [min, max] multiplicative scale on task Kd
+
 
 @configclass
 class Peg8mm(HeldAssetCfg):

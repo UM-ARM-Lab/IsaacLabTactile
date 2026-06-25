@@ -95,6 +95,11 @@ params:
     gripper_peg_friction_randomization: False  # Set to true to enable friction domain randomization
     gripper_peg_friction_range: [0.4, 1.0]   # [min, max] friction when randomization is enabled
 
+    # Arm operational-space control gain domain randomization (task_prop_gains / task_deriv_gains).
+    arm_control_gain_randomization: False
+    arm_kp_scale_range: [0.8, 1.2]
+    arm_kd_scale_range: [0.8, 1.2]
+
     # Observation noise for domain randomization
     # Set enable_obs_noise to true to enable observation noise
     # Individual noise parameters are configured in factory_env_cfg.py (ObsRandCfg)
@@ -129,9 +134,6 @@ params:
     tactile_obs_wrapper:
       name: null  # one of: null, mae, point_mae, ot, double_ot
       use_projection: false
-      gaussian_dropout:
-        enable: false  # multiplicative N(1, std) on final policy latent; applies when name == mae|point_mae|ot
-        std: 0.1  # each step: latent *= N(1, std)
       force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off
       projection_source_latent: null  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
       checkpoints:

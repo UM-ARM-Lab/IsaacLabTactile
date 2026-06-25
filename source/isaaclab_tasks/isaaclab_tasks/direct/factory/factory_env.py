@@ -876,10 +876,22 @@ class FactoryEnv(DirectRLEnv):
             ctrl_target_gripper_dof_pos=0.0,
         )
 
+    def _sample_arm_control_gains(self):
+        """Sample per-env Kp/Kd scales for operational-space arm control."""
+        if not getattr(self.cfg_task, "arm_control_gain_randomization", False):
+            return self.task_prop_gains, self.task_deriv_gains
+
+        kp_lo, kp_hi = self.cfg_task.arm_kp_scale_range[0], self.cfg_task.arm_kp_scale_range[1]
+        kd_lo, kd_hi = self.cfg_task.arm_kd_scale_range[0], self.cfg_task.arm_kd_scale_range[1]
+        kp_scale = (kp_hi - kp_lo) * torch.rand((self.num_envs, 1), device=self.device) + kp_lo
+        kd_scale = (kd_hi - kd_lo) * torch.rand((self.num_envs, 1), device=self.device) + kd_lo
+        return self.task_prop_gains * kp_scale, self.task_deriv_gains * kd_scale
+
     def generate_ctrl_signals(
         self, ctrl_target_fingertip_midpoint_pos, ctrl_target_fingertip_midpoint_quat, ctrl_target_gripper_dof_pos
     ):
         """Get Jacobian. Set Franka DOF position targets (fingers) or DOF torques (arm)."""
+        task_prop_gains, task_deriv_gains = self._sample_arm_control_gains()
         self.joint_torque, self.applied_wrench = factory_control.compute_dof_torque(
             cfg=self.cfg,
             dof_pos=self.joint_pos,
@@ -892,8 +904,8 @@ class FactoryEnv(DirectRLEnv):
             arm_mass_matrix=self.arm_mass_matrix,
             ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
             ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
-            task_prop_gains=self.task_prop_gains,
-            task_deriv_gains=self.task_deriv_gains,
+            task_prop_gains=task_prop_gains,
+            task_deriv_gains=task_deriv_gains,
             device=self.device,
             dead_zone_thresholds=self.dead_zone_thresholds,
         )
