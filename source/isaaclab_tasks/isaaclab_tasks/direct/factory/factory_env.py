@@ -258,6 +258,10 @@ class FactoryEnv(DirectRLEnv):
                 self.scene.num_envs,
             )
 
+        self._panda_hand_actuator = self._robot.actuators["panda_hand"]
+        self.gripper_kp_nominal = float(self._panda_hand_actuator.stiffness[0, 0].item())
+        self.gripper_kd_nominal = float(self._panda_hand_actuator.damping[0, 0].item())
+
     def _init_tensors(self):
         """Initialize tensors once."""
         # Control targets.
@@ -887,6 +891,23 @@ class FactoryEnv(DirectRLEnv):
         kd_scale = (kd_hi - kd_lo) * torch.rand((self.num_envs, 1), device=self.device) + kd_lo
         return self.task_prop_gains * kp_scale, self.task_deriv_gains * kd_scale
 
+    def _apply_gripper_kp_kd_randomization(self):
+        """Sample per-env gripper finger PD gains and write to sim."""
+        if not getattr(self.cfg_task, "gripper_kp_kd_randomization", False):
+            return
+
+        actuator = self._panda_hand_actuator
+        kp_lo, kp_hi = self.cfg_task.gripper_kp_scale_range[0], self.cfg_task.gripper_kp_scale_range[1]
+        kd_lo, kd_hi = self.cfg_task.gripper_kd_scale_range[0], self.cfg_task.gripper_kd_scale_range[1]
+        kp_scale = (kp_hi - kp_lo) * torch.rand((self.num_envs, 1), device=self.device) + kp_lo
+        kd_scale = (kd_hi - kd_lo) * torch.rand((self.num_envs, 1), device=self.device) + kd_lo
+        stiffness = (self.gripper_kp_nominal * kp_scale).expand(-1, actuator.num_joints)
+        damping = (self.gripper_kd_nominal * kd_scale).expand(-1, actuator.num_joints)
+        actuator.stiffness[:] = stiffness
+        actuator.damping[:] = damping
+        self._robot.write_joint_stiffness_to_sim(stiffness, joint_ids=actuator.joint_indices)
+        self._robot.write_joint_damping_to_sim(damping, joint_ids=actuator.joint_indices)
+
     def generate_ctrl_signals(
         self, ctrl_target_fingertip_midpoint_pos, ctrl_target_fingertip_midpoint_quat, ctrl_target_gripper_dof_pos
     ):
@@ -914,6 +935,7 @@ class FactoryEnv(DirectRLEnv):
         self.ctrl_target_joint_pos[:, 7:9] = ctrl_target_gripper_dof_pos
         self.joint_torque[:, 7:9] = 0.0
 
+        self._apply_gripper_kp_kd_randomization()
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
         self._robot.set_joint_effort_target(self.joint_torque)
 

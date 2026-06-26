@@ -158,6 +158,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if "arm_kd_scale_range" in task_overrides:
                 env_cfg.task.arm_kd_scale_range = task_overrides["arm_kd_scale_range"]
                 print(f"[INFO] Setting arm_kd_scale_range to {env_cfg.task.arm_kd_scale_range}")
+            if "gripper_kp_kd_randomization" in task_overrides:
+                env_cfg.task.gripper_kp_kd_randomization = task_overrides["gripper_kp_kd_randomization"]
+                print(
+                    "[INFO] Setting gripper_kp_kd_randomization to "
+                    f"{env_cfg.task.gripper_kp_kd_randomization}"
+                )
+            if "gripper_kp_scale_range" in task_overrides:
+                env_cfg.task.gripper_kp_scale_range = task_overrides["gripper_kp_scale_range"]
+                print(f"[INFO] Setting gripper_kp_scale_range to {env_cfg.task.gripper_kp_scale_range}")
+            if "gripper_kd_scale_range" in task_overrides:
+                env_cfg.task.gripper_kd_scale_range = task_overrides["gripper_kd_scale_range"]
+                print(f"[INFO] Setting gripper_kd_scale_range to {env_cfg.task.gripper_kd_scale_range}")
 
         # Override observation noise enable flag if specified
         obs_noise = task_overrides.get("obs_noise", None)
