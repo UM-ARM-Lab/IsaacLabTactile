@@ -67,9 +67,15 @@ params:
     gripper_kp: 500.0
     gripper_kd: 40.0
 
+    # Gripper finger PD gain domain randomization (panda_hand stiffness / damping).
+    # Samples multiplicative scales on gripper_kp / gripper_kd every control update.
+    gripper_kp_kd_randomization: False
+    gripper_kp_scale_range: [0.5, 1.1]
+    gripper_kd_scale_range: [0.8, 1.2]
+
     # Arm operational-space control gain domain randomization (task_prop_gains / task_deriv_gains).
     # Samples multiplicative scales on base gains every control update.
-    arm_control_gain_randomization: false
+    arm_control_gain_randomization: False
     arm_kp_scale_range: [0.8, 1.2]  # multiplicative on task Kp (xyz position + xyz rotation)
     arm_kd_scale_range: [0.8, 1.2]  # multiplicative on task Kd
 
@@ -91,8 +97,8 @@ params:
     # Adds Gaussian noise to held-object pose before rendering tactile_pc_peg_w.
     # Finger point clouds are unchanged. std=0 uses clean ground-truth pose.
     tactile_pointcloud_dr:
-      held_pos_noise_std: 0.0005   # meters
-      held_rot_noise_std: 0.005   # radians (axis-angle components)
+      held_pos_noise_std: 0.000   # meters
+      held_rot_noise_std: 0.00   # radians (axis-angle components)
 
     # Tactile observation wrapper (refactored).
     # Choose ONE wrapper to append a latent token to policy vector observations.
@@ -100,10 +106,10 @@ params:
       # name: ot  # one of: null, mae, point_mae, ot, double_ot
       # name: null  # one of: null, mae, point_mae, ot, double_ot
       # name: mae  # one of: null, mae, point_mae, ot, double_ot
-      name: point_mae  # one of: null, mae, point_mae, ot, double_ot
-      # name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
+      # name: point_mae  # one of: null, mae, point_mae, ot, double_ot
+      name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
-      force_input_noise_std: 0.3  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
+      force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
       ot_euler_steps: 4  # double_ot hop 1 (point->image); also hop 2 default unless ot_euler_steps_hop2 is set
       ot_euler_steps_hop2: null  # double_ot hop 2 (image->point); null = use ot_euler_steps
@@ -112,9 +118,10 @@ params:
       # noise_to_data_latent_cond: requires ot_2; each hop integrates N(0,I)->target with source latent as cond (no reverse).
       ot_reverse_direction: false  # true: run reverse of checkpoint training direction
       checkpoints:
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0180_hardware_peg_pc_to_image/rectified_flow_latent_epoch_5000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0144_ot_peg/rectified_flow_latent_epoch_2000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0172_ot_peg_pc_to_image/rectified_flow_latent_epoch_5000.pth
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0171_ot_peg_image_to_pc/rectified_flow_latent_epoch_5000.pth
+        # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0171_ot_peg_image_to_pc/rectified_flow_latent_epoch_5000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0173_ot_gear_image_to_pc/rectified_flow_latent_epoch_5000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0178_ot_nut_pc_to_image/rectified_flow_latent_epoch_5000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0177_ot_nut_image_to_pc/rectified_flow_latent_epoch_5000.pth
@@ -123,7 +130,8 @@ params:
         # ot: null
         # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0173_ot_gear_image_to_pc/rectified_flow_latent_epoch_5000.pth
         # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0177_ot_nut_image_to_pc/rectified_flow_latent_epoch_5000.pth
-        ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0171_ot_peg_image_to_pc/rectified_flow_latent_epoch_5000.pth
+        ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0179_hardware_peg_image_to_pc/rectified_flow_latent_epoch_5000.pth
+        # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0171_ot_peg_image_to_pc/rectified_flow_latent_epoch_5000.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0027_nut_no_wrench/point_mae_epoch_0005.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0022_gear_no_wrench/point_mae_epoch_0005.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0026_peg_no_wrench/point_mae_epoch_0005.pth
@@ -132,7 +140,8 @@ params:
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0028_nut/tactile_image_mae_epoch_0300.pth
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0012_gear/tactile_image_mae_epoch_0300.pth
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0024_peg/tactile_image_mae_epoch_0300.pth
-        mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0030_all/tactile_image_mae_epoch_0300.pth
+        # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0030_all/tactile_image_mae_epoch_0300.pth
+        mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0032_peg/tactile_image_mae_epoch_0500.pth
         # mae: null
         projection: null
       tactile_obs_key: [tactile, tactile_right]

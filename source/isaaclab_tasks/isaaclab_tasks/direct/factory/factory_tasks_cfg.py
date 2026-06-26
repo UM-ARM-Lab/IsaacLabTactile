@@ -101,6 +101,12 @@ class FactoryTask:
     arm_kp_scale_range: list = [0.8, 1.2]  # [min, max] multiplicative scale on task Kp
     arm_kd_scale_range: list = [0.8, 1.2]  # [min, max] multiplicative scale on task Kd
 
+    # Domain randomization: sample gripper finger PD gains every control update.
+    # Multiplicative factors applied to panda_hand actuator stiffness (Kp) and damping (Kd).
+    gripper_kp_kd_randomization: bool = False
+    gripper_kp_scale_range: list = [0.8, 1.2]  # [min, max] multiplicative scale on gripper Kp
+    gripper_kd_scale_range: list = [0.8, 1.2]  # [min, max] multiplicative scale on gripper Kd
+
 
 @configclass
 class Peg8mm(HeldAssetCfg):

@@ -95,6 +95,11 @@ params:
     gripper_peg_friction_randomization: False  # Set to true to enable friction domain randomization
     gripper_peg_friction_range: [0.4, 1.0]   # [min, max] friction when randomization is enabled
 
+    # Gripper finger PD gain domain randomization (panda_hand stiffness / damping).
+    gripper_kp_kd_randomization: False
+    gripper_kp_scale_range: [0.8, 1.2]
+    gripper_kd_scale_range: [0.8, 1.2]
+
     # Arm operational-space control gain domain randomization (task_prop_gains / task_deriv_gains).
     arm_control_gain_randomization: False
     arm_kp_scale_range: [0.8, 1.2]
