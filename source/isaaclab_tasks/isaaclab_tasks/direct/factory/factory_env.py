@@ -322,6 +322,19 @@ class FactoryEnv(DirectRLEnv):
         self.left_finger_wrench = torch.zeros((self.num_envs, 6), device=self.device)
         self.right_finger_wrench = torch.zeros((self.num_envs, 6), device=self.device)
 
+        # Wrist F/T sensor for contact-force penalty (FORGE-style).
+        self._use_wrist_force_penalty = self.cfg_task.contact_penalty_scale > 0.0
+        if self._use_wrist_force_penalty:
+            self.force_sensor_body_idx = self._robot.body_names.index(self.cfg.wrist_force_body_name)
+            self.force_sensor_smooth = torch.zeros((self.num_envs, 6), device=self.device)
+            self.force_sensor_world_smooth = torch.zeros((self.num_envs, 6), device=self.device)
+            contact_lower, contact_upper = self.cfg_task.contact_penalty_threshold_range
+            self.contact_penalty_thresholds = torch.full(
+                (self.num_envs,),
+                0.5 * (contact_lower + contact_upper),
+                device=self.device,
+            )
+
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
         self.prev_fingertip_pos = torch.zeros((self.num_envs, 3), device=self.device)
@@ -481,6 +494,10 @@ class FactoryEnv(DirectRLEnv):
             right_torque_w = torch_utils.quat_apply(right_parent_quat, right_torque_p)
             self.right_finger_wrench[:, 0:3] = right_force_w
             self.right_finger_wrench[:, 3:6] = right_torque_w
+
+        if self._use_wrist_force_penalty:
+            self._update_wrist_force_sensor()
+
         # Finite-differencing results in more reliable velocity estimates.
         self.ee_linvel_fd = (self.fingertip_midpoint_pos - self.prev_fingertip_pos) / dt
         self.prev_fingertip_pos = self.fingertip_midpoint_pos.clone()
@@ -650,6 +667,26 @@ class FactoryEnv(DirectRLEnv):
                 noisy_obs_dict[obs_name] = obs_tensor
         
         return noisy_obs_dict
+
+    def _update_wrist_force_sensor(self):
+        """Read and smooth wrist F/T sensor; express wrench in the fixed-asset observation frame."""
+        self.force_sensor_world = self._robot.root_physx_view.get_link_incoming_joint_force()[
+            :, self.force_sensor_body_idx
+        ]
+
+        alpha = self.cfg.ft_smoothing_factor
+        self.force_sensor_world_smooth = (
+            alpha * self.force_sensor_world + (1.0 - alpha) * self.force_sensor_world_smooth
+        )
+
+        identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+        self.force_sensor_smooth = torch.zeros_like(self.force_sensor_world)
+        self.force_sensor_smooth[:, :3], self.force_sensor_smooth[:, 3:6] = factory_utils.change_FT_frame(
+            self.force_sensor_world_smooth[:, 0:3],
+            self.force_sensor_world_smooth[:, 3:6],
+            (identity_quat, torch.zeros((self.num_envs, 3), device=self.device)),
+            (identity_quat, self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise),
+        )
 
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
@@ -1114,6 +1151,10 @@ class FactoryEnv(DirectRLEnv):
             "curr_engaged": 1.0,
             "curr_success": 1.0,
         }
+        if self._use_wrist_force_penalty:
+            contact_force = torch.norm(self.force_sensor_smooth[:, 0:3], p=2, dim=-1)
+            rew_dict["contact_penalty"] = torch.nn.functional.relu(contact_force - self.contact_penalty_thresholds)
+            rew_scales["contact_penalty"] = -self.cfg_task.contact_penalty_scale
         return rew_dict, rew_scales
 
     def _reset_idx(self, env_ids):
@@ -1133,6 +1174,10 @@ class FactoryEnv(DirectRLEnv):
                     self._tactile_cam_right.get_initial_render()
         self.randomize_initial_state(env_ids)
         self._apply_gripper_peg_friction_randomization(env_ids)
+        if self._use_wrist_force_penalty:
+            contact_rand = torch.rand((len(env_ids),), dtype=torch.float32, device=self.device)
+            contact_lower, contact_upper = self.cfg_task.contact_penalty_threshold_range
+            self.contact_penalty_thresholds[env_ids] = contact_lower + contact_rand * (contact_upper - contact_lower)
 
     def _apply_gripper_peg_friction_randomization(self, env_ids):
         """If enabled, sample gripper-peg friction from configured range for the given envs."""

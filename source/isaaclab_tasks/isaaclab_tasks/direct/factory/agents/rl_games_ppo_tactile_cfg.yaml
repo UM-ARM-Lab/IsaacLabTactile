@@ -111,6 +111,11 @@ params:
     # std=0 disables noise (default). Applied in the environment for both training and play.
     action_noise_std: 0.0
 
+    # Wrist F/T sensor contact-force penalty (FORGE-style).
+    enable_contact_penalty: false  # false = off; true = on (uses contact_penalty_scale or task default)
+    contact_penalty_scale: null  # only when enable_contact_penalty=true; null = task default (peg_insert: 0.2)
+    contact_penalty_threshold_range: null  # null = task default [2.0, 8.0] N
+
     # Observation noise for domain randomization
     # Set enable_obs_noise to true to enable observation noise
     # Individual noise parameters are configured in factory_env_cfg.py (ObsRandCfg)

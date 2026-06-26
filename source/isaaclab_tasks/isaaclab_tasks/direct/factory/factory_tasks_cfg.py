@@ -74,6 +74,9 @@ class FactoryTask:
     ee_success_yaw: float = 0.0  # nut_thread task only.
     action_penalty_ee_scale: float = 0.0
     action_grad_penalty_scale: float = 0.0
+    # Wrist F/T sensor contact penalty (FORGE-style): penalize ||F|| above a per-env threshold (N).
+    contact_penalty_scale: float = 0.05
+    contact_penalty_threshold_range: list = [2.0, 8.0]
     # Reward function details can be found in Appendix B of https://arxiv.org/pdf/2408.04587.
     # Multi-scale keypoints are used to capture different phases of the task.
     # Each reward passes the keypoint distance, x, through a squashing function:
@@ -160,6 +163,7 @@ class PegInsert(FactoryTask):
     # Fraction of socket height.
     success_threshold: float = 0.04
     engage_threshold: float = 0.9
+    contact_penalty_scale: float = 0.2
 
     fixed_asset: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/FixedAsset",

@@ -202,6 +202,32 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if "gripper_kd_scale_range" in task_overrides:
                 env_cfg.task.gripper_kd_scale_range = task_overrides["gripper_kd_scale_range"]
                 print(f"[INFO] Setting gripper_kd_scale_range to {env_cfg.task.gripper_kd_scale_range}")
+            if hasattr(env_cfg, "task"):
+                enable_contact_penalty = task_overrides.get("enable_contact_penalty", None)
+                if enable_contact_penalty is not None:
+                    if not bool(enable_contact_penalty):
+                        env_cfg.task.contact_penalty_scale = 0.0
+                        print("[INFO] Contact penalty disabled (enable_contact_penalty=false)")
+                    elif (
+                        "contact_penalty_scale" in task_overrides
+                        and task_overrides["contact_penalty_scale"] is not None
+                    ):
+                        env_cfg.task.contact_penalty_scale = float(task_overrides["contact_penalty_scale"])
+                        print(f"[INFO] Setting contact_penalty_scale to {env_cfg.task.contact_penalty_scale}")
+                    else:
+                        print(f"[INFO] Contact penalty enabled (scale={env_cfg.task.contact_penalty_scale})")
+                elif "contact_penalty_scale" in task_overrides and task_overrides["contact_penalty_scale"] is not None:
+                    env_cfg.task.contact_penalty_scale = float(task_overrides["contact_penalty_scale"])
+                    print(f"[INFO] Setting contact_penalty_scale to {env_cfg.task.contact_penalty_scale}")
+                if (
+                    "contact_penalty_threshold_range" in task_overrides
+                    and task_overrides["contact_penalty_threshold_range"] is not None
+                ):
+                    env_cfg.task.contact_penalty_threshold_range = task_overrides["contact_penalty_threshold_range"]
+                    print(
+                        f"[INFO] Setting contact_penalty_threshold_range to "
+                        f"{env_cfg.task.contact_penalty_threshold_range}"
+                    )
 
         # Override observation noise enable flag if specified
         obs_noise = task_overrides.get("obs_noise", None)

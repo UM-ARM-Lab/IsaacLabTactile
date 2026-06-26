@@ -274,7 +274,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             ),
             "panda_hand": ImplicitActuatorCfg(
                 joint_names_expr=["panda_finger_joint[1-2]"],
-                effort_limit_sim=40.0,
+                effort_limit_sim=5.0,
                 velocity_limit_sim=0.04,
                 # stiffness=7500.0, # og param
                 # damping=173.0,
@@ -416,6 +416,9 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     enable_obs_camera: bool = False
     use_compliant_gripper: bool = True
     use_gelsight_finger: bool = True
+    # Wrist F/T sensor smoothing (EMA factor) for contact-force penalty.
+    ft_smoothing_factor: float = 0.25
+    wrist_force_body_name: str = "force_sensor"
 
     def update_env_params(self):
         # return
@@ -498,6 +501,16 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.task.gripper_kp_scale_range = OmegaConf.to_container(task.gripper_kp_scale_range, resolve=True)
         if task.get("gripper_kd_scale_range", None) is not None:
             self.task.gripper_kd_scale_range = OmegaConf.to_container(task.gripper_kd_scale_range, resolve=True)
+        if task.get("contact_penalty_scale", None) is not None:
+            self.task.contact_penalty_scale = task.contact_penalty_scale
+        if task.get("contact_penalty_threshold_range", None) is not None:
+            self.task.contact_penalty_threshold_range = OmegaConf.to_container(
+                task.contact_penalty_threshold_range, resolve=True
+            )
+        if env.get("ft_smoothing_factor", None) is not None:
+            self.ft_smoothing_factor = env.ft_smoothing_factor
+        if env.get("wrist_force_body_name", None) is not None:
+            self.wrist_force_body_name = env.wrist_force_body_name
         if task.get("held_asset_rot_noise", None) is not None:
             self.task.held_asset_rot_noise = OmegaConf.to_container(task.held_asset_rot_noise, resolve=True)
         if task.get("hand_init_pos", None) is not None:

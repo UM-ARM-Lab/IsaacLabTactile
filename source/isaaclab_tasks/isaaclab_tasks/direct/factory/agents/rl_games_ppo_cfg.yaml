@@ -52,7 +52,7 @@ params:
   # Task-specific overrides (e.g., Factory peg insertion specific parameters)
   task_overrides:
     # Override ctrl.use_full_rotation (peg_insert/gear_mesh default true, nut_thread default false).
-    use_full_rotation: null
+    use_full_rotation: False
 
     # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
     # Set to null to use individual config values, or specify a float value (e.g., 1.0)
@@ -86,6 +86,11 @@ params:
     # std=0 disables noise (default). Applied in the environment for both training and play.
     action_noise_std: 0.0
 
+    # Wrist F/T sensor contact-force penalty (FORGE-style).
+    enable_contact_penalty: false  # false = off; true = on (uses contact_penalty_scale or task default)
+    contact_penalty_scale: null  # only when enable_contact_penalty=true; null = task default (peg_insert: 0.2)
+    contact_penalty_threshold_range: null  # null = task default [2.0, 8.0] N
+
     # Observation noise for domain randomization
     # Set enable_obs_noise to true to enable observation noise
     # Individual noise parameters are configured in factory_env_cfg.py (ObsRandCfg)
@@ -111,10 +116,10 @@ params:
     # Choose ONE wrapper to append a latent token to policy vector observations.
     tactile_obs_wrapper:
       # name: ot  # one of: null, mae, point_mae, ot, double_ot
-      # name: null  # one of: null, mae, point_mae, ot, double_ot
+      name: null  # one of: null, mae, point_mae, ot, double_ot
       # name: mae  # one of: null, mae, point_mae, ot, double_ot
       # name: point_mae  # one of: null, mae, point_mae, ot, double_ot
-      name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
+      # name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
       force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
