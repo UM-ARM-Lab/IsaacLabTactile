@@ -76,6 +76,7 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
+from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelCfg
 from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
@@ -103,6 +104,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # Apply task-specific overrides from agent config (e.g., Factory peg insertion specific parameters)
     task_overrides = agent_cfg["params"].get("task_overrides", {})
     if task_overrides:
+        use_full_rotation = task_overrides.get("use_full_rotation")
+        if use_full_rotation is not None and hasattr(env_cfg, "ctrl"):
+            env_cfg.ctrl.use_full_rotation = bool(use_full_rotation)
+            print(f"[INFO] Setting use_full_rotation to {env_cfg.ctrl.use_full_rotation}")
+
         # Override tactile sensor calibration if specified
         if task_overrides.get("use_real_calib", False) and hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
             env_cfg.tactile_cam.calib_variant = "real"
@@ -179,6 +185,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print(f"[INFO] Setting enable_obs_noise to {obs_noise['enable_obs_noise']}")
             else:
                 print("[WARNING] obs_noise must be a dictionary with 'enable_obs_noise' key")
+
+        if "action_noise_std" in task_overrides:
+            action_noise_std = float(task_overrides["action_noise_std"])
+            if action_noise_std < 0.0:
+                raise ValueError(f"action_noise_std must be non-negative, got {action_noise_std}")
+            if action_noise_std > 0.0:
+                env_cfg.action_noise_model = NoiseModelCfg(
+                    noise_cfg=GaussianNoiseCfg(mean=0.0, std=action_noise_std, operation="add"),
+                )
+                print(f"[INFO] Setting action_noise_std to {action_noise_std}")
+            else:
+                env_cfg.action_noise_model = None
 
         tactile_pc_dr = task_overrides.get("tactile_pointcloud_dr", None)
         if isinstance(tactile_pc_dr, dict):

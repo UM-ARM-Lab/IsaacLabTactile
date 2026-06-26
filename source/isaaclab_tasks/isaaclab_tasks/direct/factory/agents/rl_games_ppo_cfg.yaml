@@ -51,6 +51,9 @@ params:
 
   # Task-specific overrides (e.g., Factory peg insertion specific parameters)
   task_overrides:
+    # Override ctrl.use_full_rotation (peg_insert/gear_mesh default true, nut_thread default false).
+    use_full_rotation: null
+
     # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
     # Set to null to use individual config values, or specify a float value (e.g., 1.0)
     # Ignored when gripper_peg_friction_randomization is true.
@@ -78,6 +81,10 @@ params:
     arm_control_gain_randomization: False
     arm_kp_scale_range: [0.8, 1.2]  # multiplicative on task Kp (xyz position + xyz rotation)
     arm_kd_scale_range: [0.8, 1.2]  # multiplicative on task Kd
+
+    # Additive Gaussian noise on policy actions each env step: action += N(0, std).
+    # std=0 disables noise (default). Applied in the environment for both training and play.
+    action_noise_std: 0.0
 
     # Observation noise for domain randomization
     # Set enable_obs_noise to true to enable observation noise
