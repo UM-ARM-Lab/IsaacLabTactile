@@ -52,12 +52,16 @@ params:
   # Task-specific overrides (e.g., Factory peg insertion specific parameters)
   task_overrides:
     # Override ctrl.use_full_rotation (peg_insert/gear_mesh default true, nut_thread default false).
-    use_full_rotation: False
+    use_full_rotation: null
 
     # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
     # Set to null to use individual config values, or specify a float value (e.g., 1.0)
     # Ignored when gripper_peg_friction_randomization is true.
     gripper_peg_friction: null
+
+    # Friction on the fixed asset (socket/hole). If set, overrides fixed_asset_cfg.friction (default 0.75).
+    # Set to null to use the task default, or specify a float value (e.g., 0.5).
+    fixed_asset_friction: null
 
     # Domain randomization: gripper-peg friction sampled uniformly per env at each reset.
     gripper_peg_friction_randomization: False  # Set to true to enable friction domain randomization
@@ -116,9 +120,9 @@ params:
     # Choose ONE wrapper to append a latent token to policy vector observations.
     tactile_obs_wrapper:
       # name: ot  # one of: null, mae, point_mae, ot, double_ot
-      name: null  # one of: null, mae, point_mae, ot, double_ot
+      # name: null  # one of: null, mae, point_mae, ot, double_ot
       # name: mae  # one of: null, mae, point_mae, ot, double_ot
-      # name: point_mae  # one of: null, mae, point_mae, ot, double_ot
+      name: point_mae  # one of: null, mae, point_mae, ot, double_ot
       # name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
       force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
@@ -130,7 +134,6 @@ params:
       # noise_to_data_latent_cond: requires ot_2; each hop integrates N(0,I)->target with source latent as cond (no reverse).
       ot_reverse_direction: false  # true: run reverse of checkpoint training direction
       checkpoints:
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0180_hardware_peg_pc_to_image/rectified_flow_latent_epoch_5000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0144_ot_peg/rectified_flow_latent_epoch_2000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0172_ot_peg_pc_to_image/rectified_flow_latent_epoch_5000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0171_ot_peg_image_to_pc/rectified_flow_latent_epoch_5000.pth
@@ -153,7 +156,8 @@ params:
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0012_gear/tactile_image_mae_epoch_0300.pth
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0024_peg/tactile_image_mae_epoch_0300.pth
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0030_all/tactile_image_mae_epoch_0300.pth
-        mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0032_peg/tactile_image_mae_epoch_0500.pth
+        # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0032_peg/tactile_image_mae_epoch_0500.pth
+        mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0033_peg/tactile_image_mae_epoch_0500.pth
         # mae: null
         projection: null
       tactile_obs_key: [tactile, tactile_right]

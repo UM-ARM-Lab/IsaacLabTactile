@@ -239,11 +239,16 @@ class FactoryEnv(DirectRLEnv):
         # If gripper_peg_friction_randomization is enabled, use midpoint of range for initial set; per-env values applied at reset.
         # Otherwise, if gripper_peg_friction is set in task config, use it for both held_asset and robot (gripper-peg friction).
         # Else use individual config values.
+        fixed_asset_friction = (
+            self.cfg_task.fixed_asset_friction
+            if self.cfg_task.fixed_asset_friction is not None
+            else self.cfg_task.fixed_asset_cfg.friction
+        )
         if getattr(self.cfg_task, "gripper_peg_friction_randomization", False):
             low, high = self.cfg_task.gripper_peg_friction_range[0], self.cfg_task.gripper_peg_friction_range[1]
             nominal_friction = (low + high) * 0.5
             factory_utils.set_friction(self._held_asset, nominal_friction, self.scene.num_envs)
-            factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
+            factory_utils.set_friction(self._fixed_asset, fixed_asset_friction, self.scene.num_envs)
             factory_utils.set_friction(self._robot, nominal_friction, self.scene.num_envs)
         else:
             factory_utils.set_friction(
@@ -251,7 +256,7 @@ class FactoryEnv(DirectRLEnv):
                 self.cfg_task.gripper_peg_friction if self.cfg_task.gripper_peg_friction is not None else self.cfg_task.held_asset_cfg.friction,
                 self.scene.num_envs,
             )
-            factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
+            factory_utils.set_friction(self._fixed_asset, fixed_asset_friction, self.scene.num_envs)
             factory_utils.set_friction(
                 self._robot,
                 self.cfg_task.gripper_peg_friction if self.cfg_task.gripper_peg_friction is not None else self.cfg_task.robot_cfg.friction,
