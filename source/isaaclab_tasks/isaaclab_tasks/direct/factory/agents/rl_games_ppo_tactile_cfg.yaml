@@ -107,8 +107,8 @@ params:
     arm_kp_scale_range: [0.8, 1.2]
     arm_kd_scale_range: [0.8, 1.2]
 
-    # Additive Gaussian noise on policy actions each env step: action += N(0, std).
-    # std=0 disables noise (default). Applied in the environment for both training and play.
+    # Additive Gaussian noise on EMA-smoothed actions each env step: action += N(0, std).
+    # std=0 disables noise (default). Applied after EMA in the environment for both training and play.
     action_noise_std: 0.0
 
     # Wrist F/T sensor contact-force penalty (FORGE-style).

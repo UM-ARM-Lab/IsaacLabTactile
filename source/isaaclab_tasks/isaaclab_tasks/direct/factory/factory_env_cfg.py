@@ -417,8 +417,6 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     enable_obs_camera: bool = False
     use_compliant_gripper: bool = True
     use_gelsight_finger: bool = True
-    # Wrist F/T sensor smoothing (EMA factor) for contact-force penalty.
-    ft_smoothing_factor: float = 0.25
     wrist_force_body_name: str = "force_sensor"
 
     def update_env_params(self):
@@ -508,8 +506,6 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.task.contact_penalty_threshold_range = OmegaConf.to_container(
                 task.contact_penalty_threshold_range, resolve=True
             )
-        if env.get("ft_smoothing_factor", None) is not None:
-            self.ft_smoothing_factor = env.ft_smoothing_factor
         if env.get("wrist_force_body_name", None) is not None:
             self.wrist_force_body_name = env.wrist_force_body_name
         if task.get("held_asset_rot_noise", None) is not None:

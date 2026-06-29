@@ -332,7 +332,6 @@ class FactoryEnv(DirectRLEnv):
         if self._use_wrist_force_penalty:
             self.force_sensor_body_idx = self._robot.body_names.index(self.cfg.wrist_force_body_name)
             self.force_sensor_smooth = torch.zeros((self.num_envs, 6), device=self.device)
-            self.force_sensor_world_smooth = torch.zeros((self.num_envs, 6), device=self.device)
             contact_lower, contact_upper = self.cfg_task.contact_penalty_threshold_range
             self.contact_penalty_thresholds = torch.full(
                 (self.num_envs,),
@@ -674,21 +673,16 @@ class FactoryEnv(DirectRLEnv):
         return noisy_obs_dict
 
     def _update_wrist_force_sensor(self):
-        """Read and smooth wrist F/T sensor; express wrench in the fixed-asset observation frame."""
+        """Read wrist F/T sensor and express wrench in the fixed-asset observation frame."""
         self.force_sensor_world = self._robot.root_physx_view.get_link_incoming_joint_force()[
             :, self.force_sensor_body_idx
         ]
 
-        alpha = self.cfg.ft_smoothing_factor
-        self.force_sensor_world_smooth = (
-            alpha * self.force_sensor_world + (1.0 - alpha) * self.force_sensor_world_smooth
-        )
-
         identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.force_sensor_smooth = torch.zeros_like(self.force_sensor_world)
         self.force_sensor_smooth[:, :3], self.force_sensor_smooth[:, 3:6] = factory_utils.change_FT_frame(
-            self.force_sensor_world_smooth[:, 0:3],
-            self.force_sensor_world_smooth[:, 3:6],
+            self.force_sensor_world[:, 0:3],
+            self.force_sensor_world[:, 3:6],
             (identity_quat, torch.zeros((self.num_envs, 3), device=self.device)),
             (identity_quat, self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise),
         )
@@ -824,6 +818,10 @@ class FactoryEnv(DirectRLEnv):
             self._left_finger_contact_sensor.reset(env_ids)
             self._right_finger_contact_sensor.reset(env_ids)
 
+    def _process_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Skip pre-EMA noise; action noise is applied after EMA in :meth:`_pre_physics_step`."""
+        return action
+
     def _pre_physics_step(self, action):
         """Apply policy actions with smoothing."""
         env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
@@ -831,6 +829,8 @@ class FactoryEnv(DirectRLEnv):
             self._reset_buffers(env_ids)
 
         self.actions = self.ema_factor * action.clone().to(self.device) + (1 - self.ema_factor) * self.actions
+        if self.cfg.action_noise_model:
+            self.actions = self._action_noise_model(self.actions)
 
     def close_gripper_in_place(self):
         """Keep gripper in current position as gripper closes."""

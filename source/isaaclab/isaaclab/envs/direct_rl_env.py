@@ -334,10 +334,7 @@ class DirectRLEnv(gym.Env):
         Returns:
             A tuple containing the observations, rewards, resets (terminated and truncated) and extras.
         """
-        action = action.to(self.device)
-        # add action noise
-        if self.cfg.action_noise_model:
-            action = self._action_noise_model(action)
+        action = self._process_action(action.to(self.device))
 
         # process actions
         self._pre_physics_step(action)
@@ -621,6 +618,15 @@ class DirectRLEnv(gym.Env):
         any explicit scene setup, the function can be left empty.
         """
         pass
+
+    def _process_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Pre-process raw policy actions before :meth:`_pre_physics_step`.
+
+        Subclasses can override this to change when action noise is applied.
+        """
+        if self.cfg.action_noise_model:
+            action = self._action_noise_model(action)
+        return action
 
     @abstractmethod
     def _pre_physics_step(self, actions: torch.Tensor):
