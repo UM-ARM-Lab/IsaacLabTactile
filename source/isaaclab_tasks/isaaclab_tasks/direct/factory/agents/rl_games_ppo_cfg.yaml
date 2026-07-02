@@ -75,7 +75,7 @@ params:
     gripper_kd: 40.0
 
     # Gripper finger PD gain domain randomization (panda_hand stiffness / damping).
-    # Samples multiplicative scales on gripper_kp / gripper_kd every control update.
+    # Samples multiplicative scales on gripper_kp / gripper_kd at each episode reset.
     gripper_kp_kd_randomization: True
     gripper_kp_scale_range: [0.5, 1.1]
     gripper_kd_scale_range: [0.8, 1.2]
@@ -84,11 +84,17 @@ params:
     # Samples multiplicative scales on base gains every control update.
     arm_control_gain_randomization: True
     arm_kp_scale_range: [0.8, 1.2]  # multiplicative on task Kp (xyz position + xyz rotation)
-    arm_kd_scale_range: [0.8, 1.2]  # multiplicative on task Kd
+    arm_kd_scale_range: [0.8, 1.2]
+
+    # Arm joint friction domain randomization (panda_joint[1-7] actuator friction).
+    # panda_arm1 (joints 1-4) and panda_arm2 (joints 5-7) share the same sampled value per env.
+    # Resampled at each episode reset.
+    joint_friction_randomization: False
+    joint_friction_range: [0.0, 0.2]  # [min, max] friction when randomization is enabled
 
     # Additive Gaussian noise on xyz position command (meters) at execution time.
     # std=0 disables noise. Sampled once per env step; does not affect EMA memory, orientation, or prev_actions.
-    action_noise_std: 0.003
+    action_noise_std: 0.00
 
     # Wrist F/T sensor contact-force penalty (FORGE-style).
     enable_contact_penalty: True  # false = off; true = on (uses contact_penalty_scale or task default)
@@ -142,11 +148,11 @@ params:
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0177_ot_nut_image_to_pc/rectified_flow_latent_epoch_5000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0174_ot_gear_pc_to_image/rectified_flow_latent_epoch_5000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0173_ot_gear_image_to_pc/rectified_flow_latent_epoch_5000.pth
-        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0184_hardware_peg_pc_to_image/rectified_flow_latent_epoch_20000.pth
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0186_hardware_peg_pc_to_image/rectified_flow_latent_epoch_20000.pth
         # ot: null
         # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0173_ot_gear_image_to_pc/rectified_flow_latent_epoch_5000.pth
         # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0177_ot_nut_image_to_pc/rectified_flow_latent_epoch_5000.pth
-        ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0183_hardware_peg_image_to_pc/rectified_flow_latent_epoch_20000.pth
+        ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0185_hardware_peg_image_to_pc/rectified_flow_latent_epoch_20000.pth
         # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0171_ot_peg_image_to_pc/rectified_flow_latent_epoch_5000.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0027_nut_no_wrench/point_mae_epoch_0005.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0022_gear_no_wrench/point_mae_epoch_0005.pth

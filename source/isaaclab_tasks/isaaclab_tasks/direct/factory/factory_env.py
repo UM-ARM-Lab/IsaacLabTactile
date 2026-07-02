@@ -264,6 +264,10 @@ class FactoryEnv(DirectRLEnv):
             )
 
         self._panda_hand_actuator = self._robot.actuators["panda_hand"]
+        self._panda_arm_actuators = [
+            self._robot.actuators["panda_arm1"],
+            self._robot.actuators["panda_arm2"],
+        ]
         self.gripper_kp_nominal = float(self._panda_hand_actuator.stiffness[0, 0].item())
         self.gripper_kd_nominal = float(self._panda_hand_actuator.damping[0, 0].item())
 
@@ -937,22 +941,30 @@ class FactoryEnv(DirectRLEnv):
         kd_scale = (kd_hi - kd_lo) * torch.rand((self.num_envs, 1), device=self.device) + kd_lo
         return self.task_prop_gains * kp_scale, self.task_deriv_gains * kd_scale
 
-    def _apply_gripper_kp_kd_randomization(self):
-        """Sample per-env gripper finger PD gains and write to sim."""
-        if not getattr(self.cfg_task, "gripper_kp_kd_randomization", False):
-            return
-
+    def _write_gripper_kp_kd(self, env_ids, kp_scale, kd_scale):
+        """Write gripper finger PD gains for the given envs."""
         actuator = self._panda_hand_actuator
-        kp_lo, kp_hi = self.cfg_task.gripper_kp_scale_range[0], self.cfg_task.gripper_kp_scale_range[1]
-        kd_lo, kd_hi = self.cfg_task.gripper_kd_scale_range[0], self.cfg_task.gripper_kd_scale_range[1]
-        kp_scale = (kp_hi - kp_lo) * torch.rand((self.num_envs, 1), device=self.device) + kp_lo
-        kd_scale = (kd_hi - kd_lo) * torch.rand((self.num_envs, 1), device=self.device) + kd_lo
+        kp_scale = kp_scale.reshape(-1, 1)
+        kd_scale = kd_scale.reshape(-1, 1)
         stiffness = (self.gripper_kp_nominal * kp_scale).expand(-1, actuator.num_joints)
         damping = (self.gripper_kd_nominal * kd_scale).expand(-1, actuator.num_joints)
-        actuator.stiffness[:] = stiffness
-        actuator.damping[:] = damping
-        self._robot.write_joint_stiffness_to_sim(stiffness, joint_ids=actuator.joint_indices)
-        self._robot.write_joint_damping_to_sim(damping, joint_ids=actuator.joint_indices)
+        actuator.stiffness[env_ids] = stiffness
+        actuator.damping[env_ids] = damping
+        self._robot.write_joint_stiffness_to_sim(stiffness, joint_ids=actuator.joint_indices, env_ids=env_ids)
+        self._robot.write_joint_damping_to_sim(damping, joint_ids=actuator.joint_indices, env_ids=env_ids)
+
+    def _apply_gripper_kp_kd_randomization(self, env_ids):
+        """If enabled, sample gripper finger PD gain scales for the given envs."""
+        if not getattr(self.cfg_task, "gripper_kp_kd_randomization", False):
+            return
+        env_ids = env_ids.reshape(-1)
+        if env_ids.numel() == 0:
+            return
+        kp_lo, kp_hi = self.cfg_task.gripper_kp_scale_range[0], self.cfg_task.gripper_kp_scale_range[1]
+        kd_lo, kd_hi = self.cfg_task.gripper_kd_scale_range[0], self.cfg_task.gripper_kd_scale_range[1]
+        kp_scale = (kp_hi - kp_lo) * torch.rand((env_ids.numel(), 1), device=self.device) + kp_lo
+        kd_scale = (kd_hi - kd_lo) * torch.rand((env_ids.numel(), 1), device=self.device) + kd_lo
+        self._write_gripper_kp_kd(env_ids, kp_scale, kd_scale)
 
     def generate_ctrl_signals(
         self, ctrl_target_fingertip_midpoint_pos, ctrl_target_fingertip_midpoint_quat, ctrl_target_gripper_dof_pos
@@ -981,7 +993,6 @@ class FactoryEnv(DirectRLEnv):
         self.ctrl_target_joint_pos[:, 7:9] = ctrl_target_gripper_dof_pos
         self.joint_torque[:, 7:9] = 0.0
 
-        self._apply_gripper_kp_kd_randomization()
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
         self._robot.set_joint_effort_target(self.joint_torque)
 
@@ -1183,10 +1194,25 @@ class FactoryEnv(DirectRLEnv):
                     self._tactile_cam_right.get_initial_render()
         self.randomize_initial_state(env_ids)
         self._apply_gripper_peg_friction_randomization(env_ids)
+        self._apply_joint_friction_randomization(env_ids)
+        self._apply_gripper_kp_kd_randomization(env_ids)
         if self._use_wrist_force_penalty:
             contact_rand = torch.rand((len(env_ids),), dtype=torch.float32, device=self.device)
             contact_lower, contact_upper = self.cfg_task.contact_penalty_threshold_range
             self.contact_penalty_thresholds[env_ids] = contact_lower + contact_rand * (contact_upper - contact_lower)
+
+    def _write_panda_arm_joint_friction(self, env_ids, friction):
+        """Write the same arm joint friction to panda_joint[1-7] for the given envs."""
+        if not torch.is_tensor(friction):
+            friction = torch.full((env_ids.numel(),), float(friction), device=self.device)
+        else:
+            friction = friction.reshape(-1)
+        for actuator in self._panda_arm_actuators:
+            friction_joints = friction.unsqueeze(-1).expand(-1, actuator.num_joints)
+            actuator.friction[env_ids] = friction_joints
+            self._robot.write_joint_friction_coefficient_to_sim(
+                friction_joints, joint_ids=actuator.joint_indices, env_ids=env_ids
+            )
 
     def _apply_gripper_peg_friction_randomization(self, env_ids):
         """If enabled, sample gripper-peg friction from configured range for the given envs."""
@@ -1199,6 +1225,17 @@ class FactoryEnv(DirectRLEnv):
         friction = (high - low) * torch.rand(env_ids.numel(), device=self.device) + low
         factory_utils.set_friction_for_envs(self._held_asset, friction, env_ids)
         factory_utils.set_friction_for_envs(self._robot, friction, env_ids)
+
+    def _apply_joint_friction_randomization(self, env_ids):
+        """If enabled, sample arm joint friction from configured range for the given envs."""
+        if not getattr(self.cfg_task, "joint_friction_randomization", False):
+            return
+        env_ids = env_ids.reshape(-1)
+        if env_ids.numel() == 0:
+            return
+        low, high = self.cfg_task.joint_friction_range[0], self.cfg_task.joint_friction_range[1]
+        friction = (high - low) * torch.rand(env_ids.numel(), device=self.device) + low
+        self._write_panda_arm_joint_friction(env_ids, friction)
 
     def _set_assets_to_default_pose(self, env_ids):
         """Move assets to default pose before randomization."""

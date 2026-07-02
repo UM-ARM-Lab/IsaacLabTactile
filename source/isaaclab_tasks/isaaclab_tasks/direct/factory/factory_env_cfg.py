@@ -506,6 +506,10 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.task.gripper_kp_scale_range = OmegaConf.to_container(task.gripper_kp_scale_range, resolve=True)
         if task.get("gripper_kd_scale_range", None) is not None:
             self.task.gripper_kd_scale_range = OmegaConf.to_container(task.gripper_kd_scale_range, resolve=True)
+        if task.get("joint_friction_randomization", None) is not None:
+            self.task.joint_friction_randomization = task.joint_friction_randomization
+        if task.get("joint_friction_range", None) is not None:
+            self.task.joint_friction_range = OmegaConf.to_container(task.joint_friction_range, resolve=True)
         if task.get("contact_penalty_scale", None) is not None:
             self.task.contact_penalty_scale = task.contact_penalty_scale
         if task.get("contact_penalty_threshold_range", None) is not None:

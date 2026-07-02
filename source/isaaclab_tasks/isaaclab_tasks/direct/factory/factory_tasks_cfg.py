@@ -107,11 +107,16 @@ class FactoryTask:
     arm_kp_scale_range: list = [0.8, 1.2]  # [min, max] multiplicative scale on task Kp
     arm_kd_scale_range: list = [0.8, 1.2]  # [min, max] multiplicative scale on task Kd
 
-    # Domain randomization: sample gripper finger PD gains every control update.
+    # Domain randomization: sample gripper finger PD gains at each env reset.
     # Multiplicative factors applied to panda_hand actuator stiffness (Kp) and damping (Kd).
     gripper_kp_kd_randomization: bool = False
     gripper_kp_scale_range: list = [0.8, 1.2]  # [min, max] multiplicative scale on gripper Kp
     gripper_kd_scale_range: list = [0.8, 1.2]  # [min, max] multiplicative scale on gripper Kd
+
+    # Domain randomization: sample arm joint friction (panda_joint[1-7]) uniformly at each env reset.
+    # panda_arm1 (joints 1-4) and panda_arm2 (joints 5-7) share the same sampled value per env.
+    joint_friction_randomization: bool = False
+    joint_friction_range: list = [0.0, 0.0]  # [min, max] when randomization is enabled
 
 
 @configclass
@@ -153,6 +158,7 @@ class PegInsert(FactoryTask):
 
     # Held Asset (applies to all tasks)
     held_asset_pos_noise: list = [0.003, 0.0, 0.003]  # noise level of the held asset in gripper
+    # held_asset_pos_noise: list = [0.006, 0.0, 0.006]  # noise level of the held asset in gripper
     # held_asset_rot_noise: list = [0.0, 0.0, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     held_asset_rot_noise: list = [0.0, 0.1, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     # held_asset_rot_noise: list = [0.0, 0.3, 0.0]      # [0.0, 0.628318, 0.0] for tacsl

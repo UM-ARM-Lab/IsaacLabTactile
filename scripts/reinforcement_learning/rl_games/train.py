@@ -210,6 +210,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if "gripper_kd_scale_range" in task_overrides:
                 env_cfg.task.gripper_kd_scale_range = task_overrides["gripper_kd_scale_range"]
                 print(f"[INFO] Setting gripper_kd_scale_range to {env_cfg.task.gripper_kd_scale_range}")
+            if "joint_friction_randomization" in task_overrides:
+                env_cfg.task.joint_friction_randomization = task_overrides["joint_friction_randomization"]
+                print(
+                    "[INFO] Setting joint_friction_randomization to "
+                    f"{env_cfg.task.joint_friction_randomization}"
+                )
+            if "joint_friction_range" in task_overrides:
+                env_cfg.task.joint_friction_range = task_overrides["joint_friction_range"]
+                print(f"[INFO] Setting joint_friction_range to {env_cfg.task.joint_friction_range}")
             if hasattr(env_cfg, "task"):
                 enable_contact_penalty = task_overrides.get("enable_contact_penalty", None)
                 if enable_contact_penalty is not None:
