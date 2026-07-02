@@ -64,7 +64,7 @@ params:
     fixed_asset_friction: null
 
     # Domain randomization: gripper-peg friction sampled uniformly per env at each reset.
-    gripper_peg_friction_randomization: False  # Set to true to enable friction domain randomization
+    gripper_peg_friction_randomization: True  # Set to False to enable friction domain randomization
     gripper_peg_friction_range: [0.5, 0.75]   # [min, max] friction when randomization is enabled
 
     # Elastomer compliance stiffness for tactile sensors (left and right fingers).
@@ -76,22 +76,22 @@ params:
 
     # Gripper finger PD gain domain randomization (panda_hand stiffness / damping).
     # Samples multiplicative scales on gripper_kp / gripper_kd every control update.
-    gripper_kp_kd_randomization: False
+    gripper_kp_kd_randomization: True
     gripper_kp_scale_range: [0.5, 1.1]
     gripper_kd_scale_range: [0.8, 1.2]
 
     # Arm operational-space control gain domain randomization (task_prop_gains / task_deriv_gains).
     # Samples multiplicative scales on base gains every control update.
-    arm_control_gain_randomization: False
+    arm_control_gain_randomization: True
     arm_kp_scale_range: [0.8, 1.2]  # multiplicative on task Kp (xyz position + xyz rotation)
     arm_kd_scale_range: [0.8, 1.2]  # multiplicative on task Kd
 
-    # Additive Gaussian noise on EMA-smoothed actions each env step: action += N(0, std).
-    # std=0 disables noise (default). Applied after EMA in the environment for both training and play.
-    action_noise_std: 0.0
+    # Additive Gaussian noise on xyz position command (meters) at execution time.
+    # std=0 disables noise. Sampled once per env step; does not affect EMA memory, orientation, or prev_actions.
+    action_noise_std: 0.003
 
     # Wrist F/T sensor contact-force penalty (FORGE-style).
-    enable_contact_penalty: false  # false = off; true = on (uses contact_penalty_scale or task default)
+    enable_contact_penalty: True  # false = off; true = on (uses contact_penalty_scale or task default)
     contact_penalty_scale: null  # only when enable_contact_penalty=true; null = task default (peg_insert: 0.2)
     contact_penalty_threshold_range: null  # null = task default [2.0, 8.0] N
 
@@ -107,7 +107,7 @@ params:
 
     # Include previous action vector in policy observations.
     # Assumes obs history is disabled (history_length == 0).
-    include_prev_actions: false  # Set to false to drop prev_actions from policy observation
+    include_prev_actions: True  # Set to false to drop prev_actions from policy observation
 
     # Tactile point cloud domain randomization (held object only).
     # Adds Gaussian noise to held-object pose before rendering tactile_pc_peg_w.
@@ -122,8 +122,8 @@ params:
       # name: ot  # one of: null, mae, point_mae, ot, double_ot
       # name: null  # one of: null, mae, point_mae, ot, double_ot
       # name: mae  # one of: null, mae, point_mae, ot, double_ot
-      name: point_mae  # one of: null, mae, point_mae, ot, double_ot
-      # name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
+      # name: point_mae  # one of: null, mae, point_mae, ot, double_ot
+      name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
       force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
@@ -142,10 +142,11 @@ params:
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0177_ot_nut_image_to_pc/rectified_flow_latent_epoch_5000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0174_ot_gear_pc_to_image/rectified_flow_latent_epoch_5000.pth
         # ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0173_ot_gear_image_to_pc/rectified_flow_latent_epoch_5000.pth
+        ot: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0184_hardware_peg_pc_to_image/rectified_flow_latent_epoch_20000.pth
         # ot: null
         # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0173_ot_gear_image_to_pc/rectified_flow_latent_epoch_5000.pth
         # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0177_ot_nut_image_to_pc/rectified_flow_latent_epoch_5000.pth
-        ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0179_hardware_peg_image_to_pc/rectified_flow_latent_epoch_5000.pth
+        ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0183_hardware_peg_image_to_pc/rectified_flow_latent_epoch_20000.pth
         # ot_2: /home/fanyang/github/tactile_transfer/outputs/rf_latent_ot_0171_ot_peg_image_to_pc/rectified_flow_latent_epoch_5000.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0027_nut_no_wrench/point_mae_epoch_0005.pth
         # point_mae: /home/fanyang/github/tactile_transfer/outputs/point_mae/0022_gear_no_wrench/point_mae_epoch_0005.pth
@@ -157,8 +158,8 @@ params:
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0024_peg/tactile_image_mae_epoch_0300.pth
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0030_all/tactile_image_mae_epoch_0300.pth
         # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0032_peg/tactile_image_mae_epoch_0500.pth
-        mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0033_peg/tactile_image_mae_epoch_0500.pth
-        # mae: null
+        # mae: /home/fanyang/github/tactile_transfer/outputs/tactile_mae_images/0033_peg/tactile_image_mae_epoch_0500.pth
+        mae: null
         projection: null
       tactile_obs_key: [tactile, tactile_right]
       # tactile_obs_key: [tactile]

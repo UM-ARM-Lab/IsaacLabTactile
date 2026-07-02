@@ -155,7 +155,7 @@ class PegInsert(FactoryTask):
     held_asset_pos_noise: list = [0.003, 0.0, 0.003]  # noise level of the held asset in gripper
     # held_asset_rot_noise: list = [0.0, 0.0, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     held_asset_rot_noise: list = [0.0, 0.1, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
-    # held_asset_rot_noise: list = [0.0, 0.2, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
+    # held_asset_rot_noise: list = [0.0, 0.3, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     # held_asset_rot_noise: list = [0.0, 0.628318, 0.0]      # [0.0, 0.628318, 0.0] for tacsl
     held_asset_rot_init: float = 0.0
 

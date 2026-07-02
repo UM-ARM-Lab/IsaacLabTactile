@@ -126,6 +126,8 @@ class CtrlCfg:
 
     pos_action_threshold = [0.02, 0.02, 0.02]
     rot_action_threshold = [0.097, 0.097, 0.097]
+    # pos_action_threshold = [0.01, 0.01, 0.01]
+    # rot_action_threshold = [0.05, 0.05, 0.05]
 
     reset_joints = [1.5178e-03, -1.9651e-01, -1.4364e-03, -1.9761, -2.7717e-04, 1.7796, 7.8556e-01]
     reset_task_prop_gains = [300, 300, 300, 20, 20, 20]
@@ -414,6 +416,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     read_tactile_sensor: bool = False # this is actually not taking effect, unless we change obs_order to include tactile_taxim
     enable_tactile_sensor_right: bool = False  # Enable right finger tactile sensor (uses extra compute)
     include_prev_actions: bool = True
+    # Additive Gaussian std (meters) on xyz position command at execution time. 0 disables noise.
+    action_pos_noise_std: float = 0.0
     enable_obs_camera: bool = False
     use_compliant_gripper: bool = True
     use_gelsight_finger: bool = True
@@ -437,6 +441,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.enable_tactile_sensor_right = env.enable_tactile_sensor_right
         if env.get("include_prev_actions", None) is not None:
             self.include_prev_actions = env.include_prev_actions
+        if env.get("action_noise_std", None) is not None:
+            self.action_pos_noise_std = float(env.action_noise_std)
         if env.get("enable_obs_camera", None) is not None:
             self.enable_obs_camera = env.enable_obs_camera
         if env.get("use_compliant_gripper", None) is not None:

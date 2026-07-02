@@ -273,6 +273,7 @@ class FactoryEnv(DirectRLEnv):
         self.ctrl_target_joint_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
         self.ema_factor = self.cfg.ctrl.ema_factor
         self.dead_zone_thresholds = None
+        self.pos_action_noise = torch.zeros((self.num_envs, 3), device=self.device)
 
         # Fixed asset.
         self.fixed_pos_obs_frame = torch.zeros((self.num_envs, 3), device=self.device)
@@ -819,7 +820,7 @@ class FactoryEnv(DirectRLEnv):
             self._right_finger_contact_sensor.reset(env_ids)
 
     def _process_action(self, action: torch.Tensor) -> torch.Tensor:
-        """Skip pre-EMA noise; action noise is applied after EMA in :meth:`_pre_physics_step`."""
+        """Return raw policy actions; EMA and execution noise are handled in :meth:`_pre_physics_step`."""
         return action
 
     def _pre_physics_step(self, action):
@@ -829,8 +830,11 @@ class FactoryEnv(DirectRLEnv):
             self._reset_buffers(env_ids)
 
         self.actions = self.ema_factor * action.clone().to(self.device) + (1 - self.ema_factor) * self.actions
-        if self.cfg.action_noise_model:
-            self.actions = self._action_noise_model(self.actions)
+        pos_noise_std = self.cfg.action_pos_noise_std
+        if pos_noise_std > 0.0:
+            self.pos_action_noise.normal_(mean=0.0, std=pos_noise_std)
+        else:
+            self.pos_action_noise.zero_()
 
     def close_gripper_in_place(self):
         """Keep gripper in current position as gripper closes."""
@@ -878,7 +882,7 @@ class FactoryEnv(DirectRLEnv):
             self._compute_intermediate_values(dt=self.physics_dt)
 
         # Interpret actions as target pos displacements and set pos target
-        pos_actions = self.actions[:, 0:3] * self.pos_threshold
+        pos_actions = self.actions[:, 0:3] * self.pos_threshold + self.pos_action_noise
 
         # Interpret actions as target rot (axis-angle) displacements
         rot_actions = self.actions[:, 3:6]
@@ -1554,6 +1558,7 @@ class FactoryEnv(DirectRLEnv):
 
         # Set initial actions to involve no-movement. Needed for EMA/correct penalties.
         self.actions = torch.zeros_like(self.actions)
+        self.pos_action_noise.zero_()
         self.prev_actions = torch.zeros_like(self.actions)
 
         # Zero initial velocity.

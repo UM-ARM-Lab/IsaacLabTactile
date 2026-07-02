@@ -224,7 +224,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             action_noise_std = float(task_overrides["action_noise_std"])
             if action_noise_std < 0.0:
                 raise ValueError(f"action_noise_std must be non-negative, got {action_noise_std}")
-            if action_noise_std > 0.0:
+            if hasattr(env_cfg, "action_pos_noise_std"):
+                env_cfg.action_noise_model = None
+                env_cfg.action_pos_noise_std = action_noise_std
+                print(f"[INFO] Setting action_pos_noise_std to {action_noise_std} m")
+            elif action_noise_std > 0.0:
                 env_cfg.action_noise_model = NoiseModelCfg(
                     noise_cfg=GaussianNoiseCfg(mean=0.0, std=action_noise_std, operation="add"),
                 )
