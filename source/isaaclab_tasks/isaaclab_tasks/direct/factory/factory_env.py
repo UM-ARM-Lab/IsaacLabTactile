@@ -228,22 +228,28 @@ class FactoryEnv(DirectRLEnv):
             (self.num_envs, 1)
         )
 
-        self.pos_threshold = torch.tensor(self.cfg.ctrl.pos_action_threshold, device=self.device).repeat(
+        self.default_pos_threshold = torch.tensor(self.cfg.ctrl.pos_action_threshold, device=self.device).repeat(
             (self.num_envs, 1)
         )
-        self.rot_threshold = torch.tensor(self.cfg.ctrl.rot_action_threshold, device=self.device).repeat(
+        self.default_rot_threshold = torch.tensor(self.cfg.ctrl.rot_action_threshold, device=self.device).repeat(
             (self.num_envs, 1)
         )
+        self.pos_threshold = self.default_pos_threshold.clone()
+        self.rot_threshold = self.default_rot_threshold.clone()
 
         # Set masses and frictions.
-        # If gripper_peg_friction_randomization is enabled, use midpoint of range for initial set; per-env values applied at reset.
-        # Otherwise, if gripper_peg_friction is set in task config, use it for both held_asset and robot (gripper-peg friction).
+        # If friction randomization is enabled, use midpoint of range for initial set; per-env values applied at reset.
+        # Otherwise, if gripper_peg_friction / fixed_asset_friction is set in task config, use those overrides.
         # Else use individual config values.
-        fixed_asset_friction = (
-            self.cfg_task.fixed_asset_friction
-            if self.cfg_task.fixed_asset_friction is not None
-            else self.cfg_task.fixed_asset_cfg.friction
-        )
+        if getattr(self.cfg_task, "fixed_asset_friction_randomization", False):
+            low, high = self.cfg_task.fixed_asset_friction_range[0], self.cfg_task.fixed_asset_friction_range[1]
+            fixed_asset_friction = (low + high) * 0.5
+        else:
+            fixed_asset_friction = (
+                self.cfg_task.fixed_asset_friction
+                if self.cfg_task.fixed_asset_friction is not None
+                else self.cfg_task.fixed_asset_cfg.friction
+            )
         if getattr(self.cfg_task, "gripper_peg_friction_randomization", False):
             low, high = self.cfg_task.gripper_peg_friction_range[0], self.cfg_task.gripper_peg_friction_range[1]
             nominal_friction = (low + high) * 0.5
@@ -953,6 +959,27 @@ class FactoryEnv(DirectRLEnv):
         self._robot.write_joint_stiffness_to_sim(stiffness, joint_ids=actuator.joint_indices, env_ids=env_ids)
         self._robot.write_joint_damping_to_sim(damping, joint_ids=actuator.joint_indices, env_ids=env_ids)
 
+    def _apply_action_threshold_randomization(self, env_ids):
+        """If enabled, sample FORGE-style multiplicative noise on action thresholds for the given envs."""
+        if not getattr(self.cfg_task, "action_threshold_randomization", False):
+            return
+        env_ids = env_ids.reshape(-1)
+        if env_ids.numel() == 0:
+            return
+        n = env_ids.numel()
+        pos_eps = self.cfg_task.pos_threshold_noise_level
+        rot_eps = self.cfg_task.rot_threshold_noise_level
+        pos_noise_levels = [pos_eps, pos_eps, pos_eps]
+        rot_noise_levels = [rot_eps, rot_eps, rot_eps]
+        default_pos = self.default_pos_threshold[env_ids]
+        default_rot = self.default_rot_threshold[env_ids]
+        self.pos_threshold[env_ids] = factory_utils.get_random_prop_gains(
+            default_pos, pos_noise_levels, n, self.device
+        )
+        self.rot_threshold[env_ids] = factory_utils.get_random_prop_gains(
+            default_rot, rot_noise_levels, n, self.device
+        )
+
     def _apply_gripper_kp_kd_randomization(self, env_ids):
         """If enabled, sample gripper finger PD gain scales for the given envs."""
         if not getattr(self.cfg_task, "gripper_kp_kd_randomization", False):
@@ -1194,8 +1221,10 @@ class FactoryEnv(DirectRLEnv):
                     self._tactile_cam_right.get_initial_render()
         self.randomize_initial_state(env_ids)
         self._apply_gripper_peg_friction_randomization(env_ids)
+        self._apply_fixed_asset_friction_randomization(env_ids)
         self._apply_joint_friction_randomization(env_ids)
         self._apply_gripper_kp_kd_randomization(env_ids)
+        self._apply_action_threshold_randomization(env_ids)
         if self._use_wrist_force_penalty:
             contact_rand = torch.rand((len(env_ids),), dtype=torch.float32, device=self.device)
             contact_lower, contact_upper = self.cfg_task.contact_penalty_threshold_range
@@ -1225,6 +1254,17 @@ class FactoryEnv(DirectRLEnv):
         friction = (high - low) * torch.rand(env_ids.numel(), device=self.device) + low
         factory_utils.set_friction_for_envs(self._held_asset, friction, env_ids)
         factory_utils.set_friction_for_envs(self._robot, friction, env_ids)
+
+    def _apply_fixed_asset_friction_randomization(self, env_ids):
+        """If enabled, sample fixed-asset friction from configured range for the given envs."""
+        if not getattr(self.cfg_task, "fixed_asset_friction_randomization", False):
+            return
+        env_ids = env_ids.reshape(-1)
+        if env_ids.numel() == 0:
+            return
+        low, high = self.cfg_task.fixed_asset_friction_range[0], self.cfg_task.fixed_asset_friction_range[1]
+        friction = (high - low) * torch.rand(env_ids.numel(), device=self.device) + low
+        factory_utils.set_friction_for_envs(self._fixed_asset, friction, env_ids)
 
     def _apply_joint_friction_randomization(self, env_ids):
         """If enabled, sample arm joint friction from configured range for the given envs."""

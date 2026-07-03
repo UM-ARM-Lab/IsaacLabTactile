@@ -97,6 +97,10 @@ class FactoryTask:
     # Friction on the fixed asset (e.g. socket/hole). If set, overrides fixed_asset_cfg.friction.
     fixed_asset_friction: float | None = None
 
+    # Domain randomization: sample fixed-asset friction uniformly in [min, max] at each env reset.
+    fixed_asset_friction_randomization: bool = False
+    fixed_asset_friction_range: list = [0.75, 0.75]  # [min, max] when randomization is enabled
+
     # Domain randomization: sample gripper-peg friction uniformly in [min, max] at each env reset.
     gripper_peg_friction_randomization: bool = False
     gripper_peg_friction_range: list = [0.5, 0.75]  # [min, max] when randomization is enabled
@@ -117,6 +121,12 @@ class FactoryTask:
     # panda_arm1 (joints 1-4) and panda_arm2 (joints 5-7) share the same sampled value per env.
     joint_friction_randomization: bool = False
     joint_friction_range: list = [0.0, 0.0]  # [min, max] when randomization is enabled
+
+    # Domain randomization: FORGE-style multiplicative noise on pos/rot action thresholds at each env reset.
+    # noise_level is shared across xyz; multiplier m ~ U[1/(1+eps), 1+eps] with 50% chance to invert.
+    action_threshold_randomization: bool = False
+    pos_threshold_noise_level: float = 0.25
+    rot_threshold_noise_level: float = 0.29
 
 
 @configclass

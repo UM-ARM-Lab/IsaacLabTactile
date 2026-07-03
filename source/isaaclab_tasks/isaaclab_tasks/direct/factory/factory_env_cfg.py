@@ -494,6 +494,10 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.task.gripper_peg_friction_randomization = task.gripper_peg_friction_randomization
         if task.get("gripper_peg_friction_range", None) is not None:
             self.task.gripper_peg_friction_range = OmegaConf.to_container(task.gripper_peg_friction_range, resolve=True)
+        if task.get("fixed_asset_friction_randomization", None) is not None:
+            self.task.fixed_asset_friction_randomization = task.fixed_asset_friction_randomization
+        if task.get("fixed_asset_friction_range", None) is not None:
+            self.task.fixed_asset_friction_range = OmegaConf.to_container(task.fixed_asset_friction_range, resolve=True)
         if task.get("arm_control_gain_randomization", None) is not None:
             self.task.arm_control_gain_randomization = task.arm_control_gain_randomization
         if task.get("arm_kp_scale_range", None) is not None:
@@ -510,6 +514,12 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.task.joint_friction_randomization = task.joint_friction_randomization
         if task.get("joint_friction_range", None) is not None:
             self.task.joint_friction_range = OmegaConf.to_container(task.joint_friction_range, resolve=True)
+        if task.get("action_threshold_randomization", None) is not None:
+            self.task.action_threshold_randomization = task.action_threshold_randomization
+        if task.get("pos_threshold_noise_level", None) is not None:
+            self.task.pos_threshold_noise_level = float(task.pos_threshold_noise_level)
+        if task.get("rot_threshold_noise_level", None) is not None:
+            self.task.rot_threshold_noise_level = float(task.rot_threshold_noise_level)
         if task.get("contact_penalty_scale", None) is not None:
             self.task.contact_penalty_scale = task.contact_penalty_scale
         if task.get("contact_penalty_threshold_range", None) is not None:

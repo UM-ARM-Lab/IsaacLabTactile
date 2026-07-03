@@ -23,6 +23,16 @@ def get_deriv_gains(prop_gains, rot_deriv_scale=1.0):
     return deriv_gains
 
 
+def get_random_prop_gains(default_values, noise_levels, num_envs, device):
+    """Sample multiplicative scales for controller parameters (FORGE-style DR)."""
+    c_param_noise = torch.rand((num_envs, default_values.shape[1]), dtype=torch.float32, device=device)
+    c_param_noise = c_param_noise @ torch.diag(torch.tensor(noise_levels, dtype=torch.float32, device=device))
+    c_param_multiplier = 1.0 + c_param_noise
+    decrease_param_flag = torch.rand((num_envs, default_values.shape[1]), dtype=torch.float32, device=device) > 0.5
+    c_param_multiplier = torch.where(decrease_param_flag, 1.0 / c_param_multiplier, c_param_multiplier)
+    return default_values * c_param_multiplier
+
+
 def wrap_yaw(angle):
     """Ensure yaw stays within range."""
     return torch.where(angle > np.deg2rad(235), angle - 2 * np.pi, angle)

@@ -60,8 +60,12 @@ params:
     gripper_peg_friction: null
 
     # Friction on the fixed asset (socket/hole). If set, overrides fixed_asset_cfg.friction (default 0.75).
-    # Set to null to use the task default, or specify a float value (e.g., 0.5).
+    # Ignored when fixed_asset_friction_randomization is true.
     fixed_asset_friction: null
+
+    # Domain randomization: fixed-asset (socket/hole) friction sampled uniformly per env at each reset.
+    fixed_asset_friction_randomization: True
+    fixed_asset_friction_range: [0.75, 1.25]  # [min, max] friction when randomization is enabled
 
     # Domain randomization: gripper-peg friction sampled uniformly per env at each reset.
     gripper_peg_friction_randomization: True  # Set to False to enable friction domain randomization
@@ -96,6 +100,12 @@ params:
     # std=0 disables noise. Sampled once per env step; does not affect EMA memory, orientation, or prev_actions.
     action_noise_std: 0.00
 
+    # FORGE-style action threshold domain randomization (pos/rot per-step clip limits).
+    # Resampled at each episode reset. noise_level is shared across xyz axes.
+    action_threshold_randomization: False
+    pos_threshold_noise_level: 0.25  # multiplier range [1/(1+eps), 1+eps] per axis
+    rot_threshold_noise_level: 0.29
+
     # Wrist F/T sensor contact-force penalty (FORGE-style).
     enable_contact_penalty: True  # false = off; true = on (uses contact_penalty_scale or task default)
     contact_penalty_scale: null  # only when enable_contact_penalty=true; null = task default (peg_insert: 0.2)
@@ -119,8 +129,8 @@ params:
     # Adds Gaussian noise to held-object pose before rendering tactile_pc_peg_w.
     # Finger point clouds are unchanged. std=0 uses clean ground-truth pose.
     tactile_pointcloud_dr:
-      held_pos_noise_std: 0.000   # meters
-      held_rot_noise_std: 0.00   # radians (axis-angle components)
+      held_pos_noise_std: 0.0005   # meters
+      held_rot_noise_std: 0.005   # radians (axis-angle components)
 
     # Tactile observation wrapper (refactored).
     # Choose ONE wrapper to append a latent token to policy vector observations.
@@ -128,10 +138,10 @@ params:
       # name: ot  # one of: null, mae, point_mae, ot, double_ot
       # name: null  # one of: null, mae, point_mae, ot, double_ot
       # name: mae  # one of: null, mae, point_mae, ot, double_ot
-      # name: point_mae  # one of: null, mae, point_mae, ot, double_ot
-      name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
+      name: point_mae  # one of: null, mae, point_mae, ot, double_ot
+      # name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
-      force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
+      force_input_noise_std: 0.3  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)
       projection_source_latent: point  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
       ot_euler_steps: 4  # double_ot hop 1 (point->image); also hop 2 default unless ot_euler_steps_hop2 is set
       ot_euler_steps_hop2: null  # double_ot hop 2 (image->point); null = use ot_euler_steps

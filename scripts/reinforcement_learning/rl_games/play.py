@@ -130,7 +130,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 print("[WARNING] fixed_asset_friction parameter not available in this task configuration")
 
-        # Override gripper-peg friction domain randomization if specified
+        # Override friction domain randomization if specified
         if hasattr(env_cfg, "task"):
             if "gripper_peg_friction_randomization" in task_overrides:
                 env_cfg.task.gripper_peg_friction_randomization = task_overrides["gripper_peg_friction_randomization"]
@@ -138,6 +138,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if "gripper_peg_friction_range" in task_overrides:
                 env_cfg.task.gripper_peg_friction_range = task_overrides["gripper_peg_friction_range"]
                 print(f"[INFO] Setting gripper_peg_friction_range to {env_cfg.task.gripper_peg_friction_range}")
+            if "fixed_asset_friction_randomization" in task_overrides:
+                env_cfg.task.fixed_asset_friction_randomization = task_overrides["fixed_asset_friction_randomization"]
+                print(
+                    "[INFO] Setting fixed_asset_friction_randomization to "
+                    f"{env_cfg.task.fixed_asset_friction_randomization}"
+                )
+            if "fixed_asset_friction_range" in task_overrides:
+                env_cfg.task.fixed_asset_friction_range = task_overrides["fixed_asset_friction_range"]
+                print(f"[INFO] Setting fixed_asset_friction_range to {env_cfg.task.fixed_asset_friction_range}")
 
         elastomer_stiffness = task_overrides.get("elastomer_stiffness", None)
         if elastomer_stiffness is not None:
@@ -193,6 +202,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if "joint_friction_range" in task_overrides:
                 env_cfg.task.joint_friction_range = task_overrides["joint_friction_range"]
                 print(f"[INFO] Setting joint_friction_range to {env_cfg.task.joint_friction_range}")
+            if "action_threshold_randomization" in task_overrides:
+                env_cfg.task.action_threshold_randomization = task_overrides["action_threshold_randomization"]
+                print(
+                    "[INFO] Setting action_threshold_randomization to "
+                    f"{env_cfg.task.action_threshold_randomization}"
+                )
+            if "pos_threshold_noise_level" in task_overrides:
+                env_cfg.task.pos_threshold_noise_level = float(task_overrides["pos_threshold_noise_level"])
+                print(f"[INFO] Setting pos_threshold_noise_level to {env_cfg.task.pos_threshold_noise_level}")
+            if "rot_threshold_noise_level" in task_overrides:
+                env_cfg.task.rot_threshold_noise_level = float(task_overrides["rot_threshold_noise_level"])
+                print(f"[INFO] Setting rot_threshold_noise_level to {env_cfg.task.rot_threshold_noise_level}")
             if hasattr(env_cfg, "task"):
                 enable_contact_penalty = task_overrides.get("enable_contact_penalty", None)
                 if enable_contact_penalty is not None:
