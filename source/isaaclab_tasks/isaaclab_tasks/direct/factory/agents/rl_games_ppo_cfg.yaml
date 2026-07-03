@@ -59,10 +59,6 @@ params:
     # Ignored when gripper_peg_friction_randomization is true.
     gripper_peg_friction: null
 
-    # Friction on the fixed asset (socket/hole). If set, overrides fixed_asset_cfg.friction (default 0.75).
-    # Ignored when fixed_asset_friction_randomization is true.
-    fixed_asset_friction: null
-
     # Domain randomization: fixed-asset (socket/hole) friction sampled uniformly per env at each reset.
     fixed_asset_friction_randomization: True
     fixed_asset_friction_range: [0.75, 1.25]  # [min, max] friction when randomization is enabled

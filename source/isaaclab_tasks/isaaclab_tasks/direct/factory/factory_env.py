@@ -239,17 +239,12 @@ class FactoryEnv(DirectRLEnv):
 
         # Set masses and frictions.
         # If friction randomization is enabled, use midpoint of range for initial set; per-env values applied at reset.
-        # Otherwise, if gripper_peg_friction / fixed_asset_friction is set in task config, use those overrides.
-        # Else use individual config values.
+        # Otherwise, if gripper_peg_friction is set in task config, use that override. Else use individual config values.
         if getattr(self.cfg_task, "fixed_asset_friction_randomization", False):
             low, high = self.cfg_task.fixed_asset_friction_range[0], self.cfg_task.fixed_asset_friction_range[1]
             fixed_asset_friction = (low + high) * 0.5
         else:
-            fixed_asset_friction = (
-                self.cfg_task.fixed_asset_friction
-                if self.cfg_task.fixed_asset_friction is not None
-                else self.cfg_task.fixed_asset_cfg.friction
-            )
+            fixed_asset_friction = self.cfg_task.fixed_asset_cfg.friction
         if getattr(self.cfg_task, "gripper_peg_friction_randomization", False):
             low, high = self.cfg_task.gripper_peg_friction_range[0], self.cfg_task.gripper_peg_friction_range[1]
             nominal_friction = (low + high) * 0.5

@@ -122,14 +122,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 print("[WARNING] gripper_peg_friction parameter not available in this task configuration")
 
-        fixed_asset_friction = task_overrides.get("fixed_asset_friction", None)
-        if fixed_asset_friction is not None:
-            if hasattr(env_cfg, "task") and hasattr(env_cfg.task, "fixed_asset_friction"):
-                env_cfg.task.fixed_asset_friction = fixed_asset_friction
-                print(f"[INFO] Setting fixed-asset friction to {fixed_asset_friction}")
-            else:
-                print("[WARNING] fixed_asset_friction parameter not available in this task configuration")
-
         # Override friction domain randomization if specified
         if hasattr(env_cfg, "task"):
             if "gripper_peg_friction_randomization" in task_overrides:
