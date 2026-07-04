@@ -148,7 +148,7 @@ params:
     # For OT, projection is applied on whichever source latent branch the projection
     # checkpoint was trained on ("point" or "image").
     tactile_obs_wrapper:
-      name: null  # one of: null, mae, point_mae, ot, double_ot
+      name: null  # one of: null, mae, point_mae, ot, double_ot, contact_point
       use_projection: false
       force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off
       projection_source_latent: null  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt

@@ -8,7 +8,7 @@ import torch
 
 @dataclass(frozen=True)
 class TactileObsWrapperSpec:
-    name: str  # none|mae|point_mae|ot|double_ot
+    name: str  # none|mae|point_mae|ot|double_ot|contact_point
     tactile_obs_key: str | Sequence[str]
     pc_keys: list[str]
     force_keys: dict[str, str]
@@ -135,6 +135,15 @@ def build_tactile_obs_wrapper(
 
     if name in ("none", "null", ""):
         return lambda env: env
+
+    if name == "contact_point":
+        if hasattr(env_cfg, "include_contact_points"):
+            env_cfg.include_contact_points = True
+        else:
+            raise ValueError("include_contact_points must exist in env_cfg for contact_point wrapper")
+        from tactile_transfer.utils.rl_contact_point_wrapper import ContactPointObsWrapper  # noqa: WPS433
+
+        return lambda env: ContactPointObsWrapper(env)
 
     if name == "mae":
         if spec.ckpt_mae is None:
@@ -665,7 +674,7 @@ def build_tactile_obs_wrapper(
         )
 
     raise ValueError(
-        f"Unsupported tactile_obs_wrapper.name={name!r}. Expected null|mae|point_mae|ot|double_ot."
+        f"Unsupported tactile_obs_wrapper.name={name!r}. Expected null|mae|point_mae|ot|double_ot|contact_point."
     )
 
 
@@ -699,6 +708,11 @@ def resolve_policy_latent_dim(task_overrides: dict) -> tuple[int, str]:
         embed_dim = int(point_mae_config_from_checkpoint_dict(ckpt["config"]).embed_dim)
         return embed_dim, name
 
+    if name == "contact_point":
+        from tactile_transfer.utils.rl_contact_point_wrapper import CONTACT_POINT_OBS_DIM  # noqa: WPS433
+
+        return CONTACT_POINT_OBS_DIM, name
+
     if name in ("ot", "double_ot"):
         if spec.ckpt_ot is None:
             raise ValueError(f"tactile_obs_wrapper.name={name!r} requires checkpoints.ot")
@@ -708,6 +722,6 @@ def resolve_policy_latent_dim(task_overrides: dict) -> tuple[int, str]:
         return int(payload["latent_dim"]), name
 
     raise ValueError(
-        f"Unsupported tactile_obs_wrapper.name={name!r}. Expected null|mae|point_mae|ot|double_ot."
+        f"Unsupported tactile_obs_wrapper.name={name!r}. Expected null|mae|point_mae|ot|double_ot|contact_point."
     )
 

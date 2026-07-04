@@ -172,6 +172,8 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     ctrl: CtrlCfg = CtrlCfg()
     # Whether to include fingertip contact forces (left/right) in observations and critic states
     include_contact_forces: bool = False
+    # Whether to track average fingertip contact point positions (each in its GelSight tip frame)
+    include_contact_points: bool = False
     # Whether to maintain per-step fingertip + held-object point clouds as an additional tactile representation.
     # Point clouds are treated like sensor readings: they are always kept on the environment (when enabled),
     # and can optionally be added to observations if future configs desire.
@@ -456,6 +458,9 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.tactile_pointcloud_held_pos_noise_std = float(env.tactile_pointcloud_held_pos_noise_std)
         if env.get("tactile_pointcloud_held_rot_noise_std", None) is not None:
             self.tactile_pointcloud_held_rot_noise_std = float(env.tactile_pointcloud_held_rot_noise_std)
+
+        if env.get("include_contact_points", None) is not None:
+            self.include_contact_points = env.include_contact_points
 
         # Handle optional inclusion of fingertip contact forces/wrenches in observations and states
         if env.get("include_contact_forces", None) is not None:

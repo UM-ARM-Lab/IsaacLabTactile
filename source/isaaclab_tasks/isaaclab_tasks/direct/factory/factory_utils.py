@@ -5,6 +5,7 @@
 
 import numpy as np
 import torch
+from typing import Any
 
 import isaacsim.core.utils.torch as torch_utils
 
@@ -156,3 +157,83 @@ def change_FT_frame(source_F, source_T, source_frame, target_frame):
         target_T_source_quat, (source_T + torch.cross(target_T_source_pos, source_F, dim=-1))
     )
     return target_F, target_T
+
+
+def _env_regex_path(prim_path: str) -> str:
+    import re
+
+    return re.sub(r"/World/envs/env_\d+", "/World/envs/env_.*", prim_path)
+
+
+def _append_articulation_link_filters(
+    asset: Any,
+    label: str,
+    paths: list[str],
+    labels: list[str],
+) -> None:
+    link_paths = asset.root_physx_view.link_paths[0]
+    if not link_paths:
+        return
+    # Use the root link path; PhysX filters must match actual rigid-body prims.
+    paths.append(_env_regex_path(link_paths[0]))
+    labels.append(label)
+
+
+HELD_ASSET_CONTACT_FILTER_INDEX = 0
+
+
+def build_held_asset_contact_point_filter_config(held_asset: Any) -> tuple[list[str], list[str], int]:
+    """Contact filters for fingertip–held-object contact position only."""
+    paths: list[str] = []
+    labels: list[str] = []
+    _append_articulation_link_filters(held_asset, "HeldAsset", paths, labels)
+    return paths, labels, HELD_ASSET_CONTACT_FILTER_INDEX
+
+
+def build_contact_point_filter_config(
+    held_asset: Any,
+    robot: Any,
+    *,
+    small_gear_asset: Any | None = None,
+    large_gear_asset: Any | None = None,
+    include_robot_elastomers: bool = True,
+) -> tuple[list[str], list[str], int]:
+    """Build PhysX contact filters from actual articulation link paths."""
+    paths: list[str] = []
+    labels: list[str] = []
+
+    _append_articulation_link_filters(held_asset, "HeldAsset", paths, labels)
+    held_asset_filter_index = HELD_ASSET_CONTACT_FILTER_INDEX
+    if small_gear_asset is not None:
+        _append_articulation_link_filters(small_gear_asset, "SmallGear", paths, labels)
+    if large_gear_asset is not None:
+        _append_articulation_link_filters(large_gear_asset, "LargeGear", paths, labels)
+
+    if include_robot_elastomers:
+        for link_path in robot.root_physx_view.link_paths[0]:
+            if not (link_path.endswith("/elastomer") or link_path.endswith("/elastomer_0")):
+                continue
+            expr = _env_regex_path(link_path)
+            if expr in paths:
+                continue
+            side = "LeftElastomer" if "leftfinger" in link_path else "RightElastomer"
+            paths.append(expr)
+            labels.append(side)
+
+    return paths, labels, held_asset_filter_index
+
+
+def avg_fingertip_contact_point_body_frame(
+    contact_pos_w: torch.Tensor,
+    fingertip_pos_w: torch.Tensor,
+    fingertip_quat_w: torch.Tensor,
+    filter_index: int = HELD_ASSET_CONTACT_FILTER_INDEX,
+) -> torch.Tensor:
+    """Contact point in the fingertip frame from a filtered contact pair (default: HeldAsset)."""
+    avg_w = contact_pos_w[:, 0, filter_index, :]
+    no_contact = ~torch.isfinite(avg_w).all(dim=-1)
+    delta_w = avg_w - fingertip_pos_w
+    q_inv = torch_utils.quat_conjugate(fingertip_quat_w)
+    contact_point_body = torch_utils.quat_apply(q_inv, delta_w)
+    contact_point_body[no_contact] = 0.0
+    return contact_point_body

@@ -60,11 +60,11 @@ params:
     gripper_peg_friction: null
 
     # Domain randomization: fixed-asset (socket/hole) friction sampled uniformly per env at each reset.
-    fixed_asset_friction_randomization: True
+    fixed_asset_friction_randomization: False
     fixed_asset_friction_range: [0.75, 1.25]  # [min, max] friction when randomization is enabled
 
     # Domain randomization: gripper-peg friction sampled uniformly per env at each reset.
-    gripper_peg_friction_randomization: True  # Set to False to enable friction domain randomization
+    gripper_peg_friction_randomization: False  # Set to False to enable friction domain randomization
     gripper_peg_friction_range: [0.5, 0.75]   # [min, max] friction when randomization is enabled
 
     # Elastomer compliance stiffness for tactile sensors (left and right fingers).
@@ -76,13 +76,13 @@ params:
 
     # Gripper finger PD gain domain randomization (panda_hand stiffness / damping).
     # Samples multiplicative scales on gripper_kp / gripper_kd at each episode reset.
-    gripper_kp_kd_randomization: True
+    gripper_kp_kd_randomization: False
     gripper_kp_scale_range: [0.5, 1.1]
     gripper_kd_scale_range: [0.8, 1.2]
 
     # Arm operational-space control gain domain randomization (task_prop_gains / task_deriv_gains).
     # Samples multiplicative scales on base gains every control update.
-    arm_control_gain_randomization: True
+    arm_control_gain_randomization: False
     arm_kp_scale_range: [0.8, 1.2]  # multiplicative on task Kp (xyz position + xyz rotation)
     arm_kd_scale_range: [0.8, 1.2]
 
@@ -103,7 +103,7 @@ params:
     rot_threshold_noise_level: 0.29
 
     # Wrist F/T sensor contact-force penalty (FORGE-style).
-    enable_contact_penalty: True  # false = off; true = on (uses contact_penalty_scale or task default)
+    enable_contact_penalty: False  # false = off; true = on (uses contact_penalty_scale or task default)
     contact_penalty_scale: null  # only when enable_contact_penalty=true; null = task default (peg_insert: 0.2)
     contact_penalty_threshold_range: null  # null = task default [2.0, 8.0] N
 
@@ -131,10 +131,11 @@ params:
     # Tactile observation wrapper (refactored).
     # Choose ONE wrapper to append a latent token to policy vector observations.
     tactile_obs_wrapper:
-      # name: ot  # one of: null, mae, point_mae, ot, double_ot
-      # name: null  # one of: null, mae, point_mae, ot, double_ot
-      # name: mae  # one of: null, mae, point_mae, ot, double_ot
-      name: point_mae  # one of: null, mae, point_mae, ot, double_ot
+      # name: ot  # one of: null, mae, point_mae, ot, double_ot, contact_point
+      # name: null  # one of: null, mae, point_mae, ot, double_ot, contact_point
+      # name: mae  # one of: null, mae, point_mae, ot, double_ot, contact_point
+      name: point_mae  # one of: null, mae, point_mae, ot, double_ot, contact_point
+      # name: contact_point  # append left/right xy contact sector one-hot (16D: 8 per finger) to policy obs only
       # name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
       force_input_noise_std: 0.3  # additive N(0, std) on PointMAE force input; 0 = off (point_mae|ot)

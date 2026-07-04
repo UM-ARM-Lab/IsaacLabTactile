@@ -183,31 +183,56 @@ class FactoryEnv(DirectRLEnv):
             # However, RL-Games wrapper will handle the batching, so we don't need to update it here
             # The wrapper uses single_observation_space to build its own spaces
 
-        # Optional contact sensors attached to the fingertip links, reporting net normal
-        # forces in the world frame. These are only created if include_contact_forces
-        # is enabled to avoid unnecessary overhead.
+        # Optional contact sensors on fingertip links (forces and/or average contact points).
         self._left_finger_contact_sensor: ContactSensor | None = None
         self._right_finger_contact_sensor: ContactSensor | None = None
-        if self.cfg.include_contact_forces:
+        if self.cfg.include_contact_forces or self.cfg.include_contact_points:
             left_prim_path = "/World/envs/env_.*/Robot/panda_leftfinger/elastomer"
             right_prim_path = "/World/envs/env_.*/Robot/panda_rightfinger/elastomer"
+            track_contact_points = self.cfg.include_contact_points
+            if track_contact_points:
+                small_gear = getattr(self, "_small_gear_asset", None)
+                large_gear = getattr(self, "_large_gear_asset", None)
+                if self.cfg.include_contact_forces:
+                    contact_filter_paths, contact_filter_labels, held_filter_idx = (
+                        factory_utils.build_contact_point_filter_config(
+                            self._held_asset,
+                            self._robot,
+                            small_gear_asset=small_gear if self.cfg_task.name == "gear_mesh" else None,
+                            large_gear_asset=large_gear if self.cfg_task.name == "gear_mesh" else None,
+                        )
+                    )
+                else:
+                    contact_filter_paths, contact_filter_labels, held_filter_idx = (
+                        factory_utils.build_held_asset_contact_point_filter_config(self._held_asset)
+                    )
+                self._contact_point_filter_labels = contact_filter_labels
+                self._held_asset_contact_filter_index = held_filter_idx
+            else:
+                contact_filter_paths = []
+                self._contact_point_filter_labels = []
+                self._held_asset_contact_filter_index = 0
+
+            max_contact_data_count_per_prim = 128
 
             left_cfg = ContactSensorCfg(
                 prim_path=left_prim_path,
                 history_length=0,
                 track_pose=False,
-                track_contact_points=False,
+                track_contact_points=track_contact_points,
                 track_air_time=False,
-                filter_prim_paths_expr=[],
+                filter_prim_paths_expr=contact_filter_paths,
+                max_contact_data_count_per_prim=max_contact_data_count_per_prim,
                 debug_vis=False,
             )
             right_cfg = ContactSensorCfg(
                 prim_path=right_prim_path,
                 history_length=0,
                 track_pose=False,
-                track_contact_points=False,
+                track_contact_points=track_contact_points,
                 track_air_time=False,
-                filter_prim_paths_expr=[],
+                filter_prim_paths_expr=contact_filter_paths,
+                max_contact_data_count_per_prim=max_contact_data_count_per_prim,
                 debug_vis=False,
             )
             self._left_finger_contact_sensor = ContactSensor(left_cfg)
@@ -328,6 +353,16 @@ class FactoryEnv(DirectRLEnv):
         self.left_finger_force = torch.zeros((self.num_envs, 3), device=self.device)
         self.right_finger_force = torch.zeros((self.num_envs, 3), device=self.device)
 
+        # Average contact point positions in each fingertip body frame (left/right).
+        if self.cfg.include_contact_points:
+            self.left_finger_contact_point = torch.zeros((self.num_envs, 3), device=self.device)
+            self.right_finger_contact_point = torch.zeros((self.num_envs, 3), device=self.device)
+            self._gelsight_tip_views_init_attempted = False
+            self._left_elastomer_tip_body_view = None
+            self._right_elastomer_tip_body_view = None
+            self._gelsight_tip_offset_elastomer_left: torch.Tensor | None = None
+            self._gelsight_tip_offset_elastomer_right: torch.Tensor | None = None
+
         # Net wrench buffers at individual fingertips, derived from incoming joint forces.
         # Each wrench is 6D: (Fx, Fy, Fz, Tx, Ty, Tz) in the parent link frame.
         self.left_finger_wrench = torch.zeros((self.num_envs, 6), device=self.device)
@@ -439,7 +474,7 @@ class FactoryEnv(DirectRLEnv):
         print(f"[INFO] Environment prim paths: {self.scene.env_prim_paths[0]} ... {self.scene.env_prim_paths[-1]}")
         print(f"[INFO] Environment origins shape: {self.scene.env_origins.shape}")
 
-    def _compute_intermediate_values(self, dt):
+    def _compute_intermediate_values(self, dt, read_finger_contact_sensors: bool = True):
         """Get values computed from raw tensors. This includes adding noise."""
         # TODO: A lot of these can probably only be set once?
         self.fixed_pos = self._fixed_asset.data.root_pos_w - self.scene.env_origins
@@ -469,41 +504,59 @@ class FactoryEnv(DirectRLEnv):
         # Contact forces at the individual fingertips (world frame), measured via contact sensors.
         # We use the net normal contact forces reported by the sensors so that each observation
         # is a 3D force vector (Fx, Fy, Fz).
-        if self.cfg.include_contact_forces:
-            left_data = self._left_finger_contact_sensor.data
-            # net_forces_w has shape (num_envs, num_bodies, 3)
-            # For fingertip sensors we expect a single body per env.
-            left_forces = left_data.net_forces_w[:, 0, :]
-            self.left_finger_force[:, :] = left_forces
-            right_data = self._right_finger_contact_sensor.data
-            right_forces = right_data.net_forces_w[:, 0, :]
-            self.right_finger_force[:, :] = right_forces
+        if (self.cfg.include_contact_forces or self.cfg.include_contact_points) and read_finger_contact_sensors:
+            if self.cfg.include_contact_forces:
+                left_data = self._left_finger_contact_sensor.data
+                # net_forces_w has shape (num_envs, num_bodies, 3)
+                # For fingertip sensors we expect a single body per env.
+                left_forces = left_data.net_forces_w[:, 0, :]
+                self.left_finger_force[:, :] = left_forces
+                right_data = self._right_finger_contact_sensor.data
+                right_forces = right_data.net_forces_w[:, 0, :]
+                self.right_finger_force[:, :] = right_forces
 
-            # Net joint reaction wrenches at fingertip links from PhysX (includes normal + tangential + dynamics).
-            # Shape from PhysX: (num_envs, num_bodies, 6), expressed in the parent-link frames.
-            link_wrenches_parent = self._robot.root_physx_view.get_link_incoming_joint_force()
+                # Net joint reaction wrenches at fingertip links from PhysX (includes normal + tangential + dynamics).
+                # Shape from PhysX: (num_envs, num_bodies, 6), expressed in the parent-link frames.
+                link_wrenches_parent = self._robot.root_physx_view.get_link_incoming_joint_force()
 
-            # Rotate forces and torques from parent-link frames into world frame using the parent body orientations.
-            parent_quat_w = self._robot.data.body_quat_w
-            # Left fingertip
-            left_wrench_p = link_wrenches_parent[:, self.left_finger_body_idx]
-            left_force_p = left_wrench_p[:, 0:3]
-            left_torque_p = left_wrench_p[:, 3:6]
-            left_parent_quat = parent_quat_w[:, self.left_finger_parent_body_idx]
-            left_force_w = torch_utils.quat_apply(left_parent_quat, left_force_p)
-            left_torque_w = torch_utils.quat_apply(left_parent_quat, left_torque_p)
-            self.left_finger_wrench[:, 0:3] = left_force_w
-            self.left_finger_wrench[:, 3:6] = left_torque_w
+                # Rotate forces and torques from parent-link frames into world frame using the parent body orientations.
+                parent_quat_w = self._robot.data.body_quat_w
+                # Left fingertip
+                left_wrench_p = link_wrenches_parent[:, self.left_finger_body_idx]
+                left_force_p = left_wrench_p[:, 0:3]
+                left_torque_p = left_wrench_p[:, 3:6]
+                left_parent_quat = parent_quat_w[:, self.left_finger_parent_body_idx]
+                left_force_w = torch_utils.quat_apply(left_parent_quat, left_force_p)
+                left_torque_w = torch_utils.quat_apply(left_parent_quat, left_torque_p)
+                self.left_finger_wrench[:, 0:3] = left_force_w
+                self.left_finger_wrench[:, 3:6] = left_torque_w
 
-            # Right fingertip
-            right_wrench_p = link_wrenches_parent[:, self.right_finger_body_idx]
-            right_force_p = right_wrench_p[:, 0:3]
-            right_torque_p = right_wrench_p[:, 3:6]
-            right_parent_quat = parent_quat_w[:, self.right_finger_parent_body_idx]
-            right_force_w = torch_utils.quat_apply(right_parent_quat, right_force_p)
-            right_torque_w = torch_utils.quat_apply(right_parent_quat, right_torque_p)
-            self.right_finger_wrench[:, 0:3] = right_force_w
-            self.right_finger_wrench[:, 3:6] = right_torque_w
+                # Right fingertip
+                right_wrench_p = link_wrenches_parent[:, self.right_finger_body_idx]
+                right_force_p = right_wrench_p[:, 0:3]
+                right_torque_p = right_wrench_p[:, 3:6]
+                right_parent_quat = parent_quat_w[:, self.right_finger_parent_body_idx]
+                right_force_w = torch_utils.quat_apply(right_parent_quat, right_force_p)
+                right_torque_w = torch_utils.quat_apply(right_parent_quat, right_torque_p)
+                self.right_finger_wrench[:, 0:3] = right_force_w
+                self.right_finger_wrench[:, 3:6] = right_torque_w
+
+            # Average contact point positions in the GelSight tip frame (elastomer_tip when available).
+            if self.cfg.include_contact_points:
+                left_frame_pos_w, left_frame_quat_w = self._contact_sensor_frame_pose_w("left")
+                right_frame_pos_w, right_frame_quat_w = self._contact_sensor_frame_pose_w("right")
+                self.left_finger_contact_point[:, :] = factory_utils.avg_fingertip_contact_point_body_frame(
+                    self._left_finger_contact_sensor.data.contact_pos_w,
+                    left_frame_pos_w,
+                    left_frame_quat_w,
+                    filter_index=self._held_asset_contact_filter_index,
+                )
+                self.right_finger_contact_point[:, :] = factory_utils.avg_fingertip_contact_point_body_frame(
+                    self._right_finger_contact_sensor.data.contact_pos_w,
+                    right_frame_pos_w,
+                    right_frame_quat_w,
+                    filter_index=self._held_asset_contact_filter_index,
+                )
 
         if self._use_wrist_force_penalty:
             self._update_wrist_force_sensor()
@@ -678,6 +731,83 @@ class FactoryEnv(DirectRLEnv):
         
         return noisy_obs_dict
 
+    def _ensure_gelsight_tip_body_views(self):
+        if getattr(self, "_gelsight_tip_views_init_attempted", False):
+            return
+        self._gelsight_tip_views_init_attempted = True
+        self._left_elastomer_tip_body_view = None
+        self._right_elastomer_tip_body_view = None
+        if not self.cfg.use_gelsight_finger:
+            return
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+
+            sim_view = SimulationManager.get_physics_sim_view()
+            left_view = sim_view.create_rigid_body_view(["/World/envs/env_*/Robot/panda_leftfinger/elastomer_tip"])
+            right_view = sim_view.create_rigid_body_view(["/World/envs/env_*/Robot/panda_rightfinger/elastomer_tip"])
+            if left_view.count > 0:
+                self._left_elastomer_tip_body_view = left_view
+            if right_view.count > 0:
+                self._right_elastomer_tip_body_view = right_view
+            if self._left_elastomer_tip_body_view is None and self._right_elastomer_tip_body_view is None:
+                print(
+                    "[WARN] GelSight elastomer_tip rigid bodies not found; "
+                    "using elastomer origin + fixed ~6.8 cm offset fallback."
+                )
+        except Exception as exc:
+            print(f"[WARN] Failed to create GelSight elastomer_tip body views: {exc}")
+
+    def _tip_pose_from_body_view(self, tip_view) -> tuple[torch.Tensor, torch.Tensor]:
+        from isaaclab.utils.math import convert_quat
+
+        pose = tip_view.get_transforms().view(self.num_envs, 7)
+        pos_w = pose[:, :3]
+        quat_w = convert_quat(pose[:, 3:7], to="wxyz")
+        return pos_w, quat_w
+
+    def _maybe_calibrate_gelsight_tip_offset(self, side: str, elast_pos_w: torch.Tensor, tip_pos_w: torch.Tensor):
+        offset_attr = f"_gelsight_tip_offset_elastomer_{side}"
+        if getattr(self, offset_attr) is not None:
+            return
+        elast_quat_w = self._robot.data.body_quat_w[:, self.left_finger_body_idx if side == "left" else self.right_finger_body_idx]
+        offset = torch_utils.quat_apply(torch_utils.quat_conjugate(elast_quat_w[0:1]), (tip_pos_w - elast_pos_w)[0:1])[0]
+        setattr(self, offset_attr, offset)
+        dist_m = float(torch.linalg.norm(offset).item())
+        print(
+            f"[INFO] Calibrated GelSight {side} tip offset in elastomer frame: "
+            f"{offset.detach().cpu().tolist()} (|offset|={dist_m:.4f} m)"
+        )
+
+    def _contact_sensor_frame_pose_w(self, side: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """World pose of the contact / GelSight tip frame used for contact-point observations."""
+        body_idx = self.left_finger_body_idx if side == "left" else self.right_finger_body_idx
+        elast_pos_w = self._robot.data.body_pos_w[:, body_idx]
+        elast_quat_w = self._robot.data.body_quat_w[:, body_idx]
+
+        if self.cfg.use_gelsight_finger:
+            self._ensure_gelsight_tip_body_views()
+            tip_view = self._left_elastomer_tip_body_view if side == "left" else self._right_elastomer_tip_body_view
+            if tip_view is not None:
+                tip_pos_w, tip_quat_w = self._tip_pose_from_body_view(tip_view)
+                self._maybe_calibrate_gelsight_tip_offset(side, elast_pos_w, tip_pos_w)
+                return tip_pos_w, tip_quat_w
+
+            offset = getattr(self, f"_gelsight_tip_offset_elastomer_{side}", None)
+            if offset is None:
+                # URDF fallback: ~6.8 cm along finger length in elastomer/finger frame.
+                offset = torch.tensor([0.0, 0.0, 0.06776], device=self.device)
+                setattr(self, f"_gelsight_tip_offset_elastomer_{side}", offset)
+                print(
+                    f"[INFO] Using default GelSight {side} tip offset in elastomer frame: "
+                    f"{offset.detach().cpu().tolist()}"
+                )
+            tip_pos_w = elast_pos_w + torch_utils.quat_apply(
+                elast_quat_w, offset.unsqueeze(0).expand(self.num_envs, 3)
+            )
+            return tip_pos_w, elast_quat_w
+
+        return elast_pos_w, elast_quat_w
+
     def _update_wrist_force_sensor(self):
         """Read wrist F/T sensor and express wrench in the fixed-asset observation frame."""
         self.force_sensor_world = self._robot.root_physx_view.get_link_incoming_joint_force()[
@@ -820,7 +950,7 @@ class FactoryEnv(DirectRLEnv):
                 self.obs_history_buffers[obs_name][env_ids] = 0.0
 
         # Reset contact sensor state for the selected environments (if enabled)
-        if self.cfg.include_contact_forces:
+        if self.cfg.include_contact_forces or self.cfg.include_contact_points:
             self._left_finger_contact_sensor.reset(env_ids)
             self._right_finger_contact_sensor.reset(env_ids)
 
@@ -1018,10 +1148,12 @@ class FactoryEnv(DirectRLEnv):
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
         self._robot.set_joint_effort_target(self.joint_torque)
 
-        # Update contact sensors if fingertip contact forces are enabled
-        if self.cfg.include_contact_forces:
-            self._left_finger_contact_sensor.update(self.physics_dt * self.cfg.decimation)
-            self._right_finger_contact_sensor.update(self.physics_dt * self.cfg.decimation)
+    def _update_finger_contact_sensors(self, dt: float | None = None) -> None:
+        if not (self.cfg.include_contact_forces or self.cfg.include_contact_points):
+            return
+        step_dt = self.physics_dt * self.cfg.decimation if dt is None else dt
+        self._left_finger_contact_sensor.update(step_dt)
+        self._right_finger_contact_sensor.update(step_dt)
 
     def _get_dones(self):
         """Check which environments are terminated.
@@ -1032,6 +1164,7 @@ class FactoryEnv(DirectRLEnv):
         
         Note: Individual environments can terminate at different times.
         """
+        self._update_finger_contact_sensors()
         self._compute_intermediate_values(dt=self.physics_dt)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         
@@ -1389,11 +1522,8 @@ class FactoryEnv(DirectRLEnv):
         self.scene.write_data_to_sim()
         self.sim.step(render=False)
         self.scene.update(dt=self.physics_dt)
-        # Update contact sensors if fingertip contact forces are enabled
-        if self.cfg.include_contact_forces:
-            self._left_finger_contact_sensor.update(self.physics_dt)
-            self._right_finger_contact_sensor.update(self.physics_dt)
-        self._compute_intermediate_values(dt=self.physics_dt)
+        # Skip finger contact sensor reads while assets are being teleported/settled.
+        self._compute_intermediate_values(dt=self.physics_dt, read_finger_contact_sensors=False)
 
     def randomize_initial_state(self, env_ids):
         """Randomize initial state and perform any episode-level randomization."""
