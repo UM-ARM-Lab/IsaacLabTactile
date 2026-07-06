@@ -181,7 +181,7 @@ class TestEnv(FactoryEnv):
         self._fixed_peg.write_root_velocity_to_sim(peg_state[:, 7:], env_ids=env_ids)
         self._fixed_peg.reset()
 
-    def _compute_intermediate_values(self, dt):
+    def _compute_intermediate_values(self, dt, read_finger_contact_sensors: bool = True):
         """Get values computed from raw tensors."""
         self.fingertip_midpoint_pos = self._robot.data.body_pos_w[:, self.fingertip_body_idx] - self.scene.env_origins
 
@@ -216,7 +216,7 @@ class TestEnv(FactoryEnv):
         self.joint_vel_fd = joint_diff / dt
         self.prev_joint_pos = self.joint_pos[:, 0:7].clone()
 
-        if self.cfg.include_contact_forces:
+        if self.cfg.include_contact_forces and read_finger_contact_sensors:
             left_data = self._left_finger_contact_sensor.data
             self.left_finger_force[:, :] = left_data.net_forces_w[:, 0, :]
             right_data = self._right_finger_contact_sensor.data
