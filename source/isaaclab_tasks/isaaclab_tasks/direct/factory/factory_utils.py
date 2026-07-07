@@ -39,6 +39,34 @@ def wrap_yaw(angle):
     return torch.where(angle > np.deg2rad(235), angle - 2 * np.pi, angle)
 
 
+def corrupt_fingertip_pose(
+    fingertip_pos: torch.Tensor,
+    fingertip_quat: torch.Tensor,
+    pos_std: float,
+    rot_deg: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply isotropic position and random-axis rotation noise (FORGE-style)."""
+    pos_std = float(pos_std)
+    rot_deg = float(rot_deg)
+
+    if pos_std <= 0.0:
+        noisy_pos = fingertip_pos
+    else:
+        noisy_pos = fingertip_pos + torch.randn_like(fingertip_pos) * pos_std
+
+    if rot_deg <= 0.0:
+        return noisy_pos, fingertip_quat
+
+    rot_noise_axis = torch.randn((fingertip_quat.shape[0], 3), dtype=fingertip_quat.dtype, device=fingertip_quat.device)
+    rot_noise_axis = rot_noise_axis / torch.linalg.norm(rot_noise_axis, dim=1, keepdim=True)
+    rot_noise_angle = (
+        torch.randn((fingertip_quat.shape[0],), dtype=fingertip_quat.dtype, device=fingertip_quat.device)
+        * np.deg2rad(rot_deg)
+    )
+    quat_delta = torch_utils.quat_from_angle_axis(rot_noise_angle, rot_noise_axis)
+    return noisy_pos, torch_utils.quat_mul(fingertip_quat, quat_delta)
+
+
 def set_friction(asset, value, num_envs):
     """Update material properties for a given asset. value is a scalar applied to all envs."""
     materials = asset.root_physx_view.get_material_properties()

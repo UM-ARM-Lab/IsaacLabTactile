@@ -86,29 +86,13 @@ STATE_DIM_CFG = {
 
 @configclass
 class ObsRandCfg:
+    # Per-episode bias on the fixed-asset observation frame (sampled at reset, not per-step).
     fixed_asset_pos = [0.001, 0.001, 0.001]
-    # fixed_asset_pos = [0.003, 0.003, 0.003]
-    
-    # Observation noise parameters for domain randomization
-    # Each parameter is a list of standard deviations for Gaussian noise
+
+    # Per-step fingertip pose noise for policy observations (FORGE-style).
     enable_obs_noise: bool = False
-    
-    # Position observations (3D: x, y, z) - noise in meters
-    # Default: 1-2mm noise for position observations
-    fingertip_pos = [0.001, 0.001, 0.001]
-    fingertip_pos_rel_fixed = [0.001, 0.001, 0.001]
-    held_pos = [0.001, 0.001, 0.001]
-    held_pos_rel_fixed = [0.001, 0.001, 0.001]
-    
-    # Quaternion observations - noise applied as small axis-angle perturbations (radians)
-    # Default: ~0.5-1 degree angular noise
-    fingertip_quat = [0.01, 0.01, 0.01]  # Only first 3 used for axis-angle noise
-    held_quat = [0.01, 0.01, 0.01]  # Only first 3 used for axis-angle noise
-    
-    # Velocity observations (3D) - noise in m/s or rad/s
-    # Default: small velocity noise
-    ee_linvel = [0.01, 0.01, 0.01]  # m/s
-    ee_angvel = [0.05, 0.05, 0.05]  # rad/s
+    fingertip_pos: float = 0.001  # isotropic position std (meters)
+    fingertip_rot_deg: float = 0.5  # rotation std (degrees), random axis
 
 @configclass
 class ObsHistoryCfg:
@@ -124,16 +108,16 @@ class CtrlCfg:
     pos_action_bounds = [0.05, 0.05, 0.05]
     rot_action_bounds = [1.0, 1.0, 1.0]
 
-    pos_action_threshold = [0.02, 0.02, 0.02]
+    # pos_action_threshold = [0.02, 0.02, 0.02]
     rot_action_threshold = [0.097, 0.097, 0.097]
-    # pos_action_threshold = [0.01, 0.01, 0.01]
+    pos_action_threshold = [0.01, 0.01, 0.01]
     # rot_action_threshold = [0.05, 0.05, 0.05]
 
     reset_joints = [1.5178e-03, -1.9651e-01, -1.4364e-03, -1.9761, -2.7717e-04, 1.7796, 7.8556e-01]
     reset_task_prop_gains = [300, 300, 300, 20, 20, 20]
     reset_rot_deriv_scale = 10.0
-    default_task_prop_gains = [100, 100, 100, 30, 30, 30]
-    # default_task_prop_gains = [400, 400, 400, 15, 15, 15]
+    # default_task_prop_gains = [100, 100, 100, 30, 30, 30]
+    default_task_prop_gains = [400, 400, 400, 15, 15, 15]
 
     # Null space parameters.
     default_dof_pos_tensor = [-1.3003, -0.4015, 1.1791, -2.1493, 0.4001, 1.9425, 0.4754]

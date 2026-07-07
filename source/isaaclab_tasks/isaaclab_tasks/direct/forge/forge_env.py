@@ -65,7 +65,6 @@ class ForgeEnv(FactoryEnv):
             torch.tensor([pos_noise_level, pos_noise_level, pos_noise_level], dtype=torch.float32, device=self.device)
         )
         self.noisy_fingertip_pos = self.fingertip_midpoint_pos + fingertip_pos_noise
-        # only allow rotation around z-axis ?
         rot_noise_axis = torch.randn((self.num_envs, 3), dtype=torch.float32, device=self.device)
         rot_noise_axis /= torch.linalg.norm(rot_noise_axis, dim=1, keepdim=True)
         rot_noise_angle = torch.randn((self.num_envs,), dtype=torch.float32, device=self.device) * np.deg2rad(

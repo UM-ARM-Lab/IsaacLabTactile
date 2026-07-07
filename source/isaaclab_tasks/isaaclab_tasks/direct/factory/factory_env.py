@@ -120,8 +120,7 @@ def _held_pos_for_tactile_pc(held_pos_e: torch.Tensor, noise_std: float) -> torc
 def _held_quat_for_tactile_pc(held_quat_w: torch.Tensor, noise_std: float) -> torch.Tensor:
     """Held-object world quaternion for peg tactile PC rendering (optional DR noise).
 
-    Applies a small axis-angle perturbation in the body frame (right multiply), matching
-    ``_apply_observation_noise`` for ``*_quat`` observations.
+    Applies a small axis-angle perturbation in the body frame (right multiply).
     """
     std = float(noise_std)
     if std <= 0.0:
@@ -382,6 +381,10 @@ class FactoryEnv(DirectRLEnv):
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
+        self.noisy_fingertip_pos = torch.zeros((self.num_envs, 3), device=self.device)
+        self.noisy_fingertip_quat = (
+            torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+        )
         self.prev_fingertip_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.prev_fingertip_quat = (
             torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
@@ -561,18 +564,7 @@ class FactoryEnv(DirectRLEnv):
         if self._use_wrist_force_penalty:
             self._update_wrist_force_sensor()
 
-        # Finite-differencing results in more reliable velocity estimates.
-        self.ee_linvel_fd = (self.fingertip_midpoint_pos - self.prev_fingertip_pos) / dt
-        self.prev_fingertip_pos = self.fingertip_midpoint_pos.clone()
-
-        # Add state differences if velocity isn't being added.
-        rot_diff_quat = torch_utils.quat_mul(
-            self.fingertip_midpoint_quat, torch_utils.quat_conjugate(self.prev_fingertip_quat)
-        )
-        rot_diff_quat *= torch.sign(rot_diff_quat[:, 0]).unsqueeze(-1)
-        rot_diff_aa = axis_angle_from_quat(rot_diff_quat)
-        self.ee_angvel_fd = rot_diff_aa / dt
-        self.prev_fingertip_quat = self.fingertip_midpoint_quat.clone()
+        self._update_noisy_fingertip_obs(dt)
 
         joint_diff = self.joint_pos[:, 0:7] - self.prev_joint_pos
         self.joint_vel_fd = joint_diff / dt
@@ -662,74 +654,29 @@ class FactoryEnv(DirectRLEnv):
                 # Add new observation at the end (most recent)
                 self.obs_history_buffers[obs_name][:, -1] = obs_tensor
 
-    def _apply_observation_noise(self, obs_dict):
-        """Apply domain randomization noise to observations.
-        
-        Args:
-            obs_dict: Dictionary of observation tensors
-            
-        Returns:
-            Dictionary with noisy observations
-        """
-        if not self.cfg.obs_rand.enable_obs_noise:
-            return obs_dict
-        
-        noisy_obs_dict = {}
-        
-        for obs_name, obs_tensor in obs_dict.items():
-            # Get noise configuration for this observation
-            if hasattr(self.cfg.obs_rand, obs_name):
-                noise_std = torch.tensor(
-                    getattr(self.cfg.obs_rand, obs_name), 
-                    dtype=torch.float32, 
-                    device=self.device
-                )
-                
-                # Check if noise is enabled (non-zero)
-                if torch.any(noise_std > 0.0):
-                    # Handle different observation dimensions
-                    if obs_tensor.dim() == 2 and obs_tensor.shape[0] == self.num_envs:  # (num_envs, obs_dim)
-                        # Special handling for quaternions - add small angular noise
-                        if obs_name.endswith("_quat") and obs_tensor.shape[-1] == 4:
-                            # Convert quaternion noise to small axis-angle perturbations
-                            # This preserves quaternion normalization better
-                            angle_noise = torch.randn(
-                                (self.num_envs, 3), 
-                                dtype=torch.float32, 
-                                device=self.device
-                            ) * noise_std[:3].unsqueeze(0)
-                            # Limit to small angles to preserve quaternion validity
-                            angle_noise = torch.clamp(angle_noise, -0.1, 0.1)
-                            
-                            # Convert to quaternion delta
-                            angle = torch.norm(angle_noise, p=2, dim=-1, keepdim=True)
-                            axis = angle_noise / (angle + 1e-8)
-                            quat_delta = torch_utils.quat_from_angle_axis(
-                                angle.squeeze(-1), 
-                                axis
-                            )
-                            # Apply quaternion multiplication
-                            noisy_obs_dict[obs_name] = torch_utils.quat_mul(obs_tensor, quat_delta)
-                        else:
-                            # Add Gaussian noise for other observations
-                            # Ensure noise_std matches observation dimension
-                            if noise_std.shape[0] == obs_tensor.shape[-1]:
-                                noise = torch.randn_like(obs_tensor) * noise_std.unsqueeze(0)
-                                noisy_obs_dict[obs_name] = obs_tensor + noise
-                            else:
-                                # Dimension mismatch - skip noise for this observation
-                                noisy_obs_dict[obs_name] = obs_tensor
-                    else:
-                        # If shape doesn't match, skip noise for this observation
-                        noisy_obs_dict[obs_name] = obs_tensor
-                else:
-                    # Noise is zero - no modification needed
-                    noisy_obs_dict[obs_name] = obs_tensor
-            else:
-                # No noise configured for this observation
-                noisy_obs_dict[obs_name] = obs_tensor
-        
-        return noisy_obs_dict
+    def _update_noisy_fingertip_obs(self, dt):
+        """Corrupt fingertip pose for policy observations and finite-difference velocities from it."""
+        obs_rand = self.cfg.obs_rand
+        if obs_rand.enable_obs_noise:
+            self.noisy_fingertip_pos, self.noisy_fingertip_quat = factory_utils.corrupt_fingertip_pose(
+                self.fingertip_midpoint_pos,
+                self.fingertip_midpoint_quat,
+                obs_rand.fingertip_pos,
+                obs_rand.fingertip_rot_deg,
+            )
+        else:
+            self.noisy_fingertip_pos = self.fingertip_midpoint_pos
+            self.noisy_fingertip_quat = self.fingertip_midpoint_quat
+
+        self.ee_linvel_fd = (self.noisy_fingertip_pos - self.prev_fingertip_pos) / dt
+        self.prev_fingertip_pos = self.noisy_fingertip_pos.clone()
+
+        rot_diff_quat = torch_utils.quat_mul(
+            self.noisy_fingertip_quat, torch_utils.quat_conjugate(self.prev_fingertip_quat)
+        )
+        rot_diff_quat *= torch.sign(rot_diff_quat[:, 0]).unsqueeze(-1)
+        self.ee_angvel_fd = axis_angle_from_quat(rot_diff_quat) / dt
+        self.prev_fingertip_quat = self.noisy_fingertip_quat.clone()
 
     def _ensure_gelsight_tip_body_views(self):
         if getattr(self, "_gelsight_tip_views_init_attempted", False):
@@ -828,14 +775,14 @@ class FactoryEnv(DirectRLEnv):
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
 
         prev_actions = self.actions.clone()
-        fingertip_rot_mat = matrix_from_quat(self.fingertip_midpoint_quat)
+        fingertip_rot_mat = matrix_from_quat(self.noisy_fingertip_quat)
         # 6D orientation representation using the first two rotation matrix columns.
         fingertip_orn_6d = torch.cat((fingertip_rot_mat[:, :, 0], fingertip_rot_mat[:, :, 1]), dim=-1)
 
         obs_dict = {
-            "fingertip_pos": self.fingertip_midpoint_pos,
-            "fingertip_pos_rel_fixed": self.fingertip_midpoint_pos - noisy_fixed_pos,
-            "fingertip_quat": self.fingertip_midpoint_quat,
+            "fingertip_pos": self.noisy_fingertip_pos,
+            "fingertip_pos_rel_fixed": self.noisy_fingertip_pos - noisy_fixed_pos,
+            "fingertip_quat": self.noisy_fingertip_quat,
             "fingertip_orn_6d": fingertip_orn_6d,
             "ee_linvel": self.ee_linvel_fd,
             "ee_angvel": self.ee_angvel_fd,
@@ -875,10 +822,7 @@ class FactoryEnv(DirectRLEnv):
             obs_dict["fingertip_wrench_right"] = self.right_finger_wrench
             state_dict["fingertip_wrench_left"] = self.left_finger_wrench
             state_dict["fingertip_wrench_right"] = self.right_finger_wrench
-        
-        # Apply observation noise to policy observations (not critic states)
-        obs_dict = self._apply_observation_noise(obs_dict)
-        
+
         return obs_dict, state_dict
 
     def _get_observations(self):

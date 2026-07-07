@@ -242,6 +242,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 print("[WARNING] obs_noise must be a dictionary with 'enable_obs_noise' key")
 
+        if "fixed_asset_pos" in task_overrides and task_overrides["fixed_asset_pos"] is not None:
+            if hasattr(env_cfg, "obs_rand"):
+                env_cfg.obs_rand.fixed_asset_pos = list(task_overrides["fixed_asset_pos"])
+                print(f"[INFO] Setting fixed_asset_pos to {env_cfg.obs_rand.fixed_asset_pos}")
+            else:
+                print("[WARNING] fixed_asset_pos override ignored: env has no obs_rand config")
+
         if "action_noise_std" in task_overrides:
             action_noise_std = float(task_overrides["action_noise_std"])
             if action_noise_std < 0.0:
