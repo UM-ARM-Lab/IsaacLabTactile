@@ -177,7 +177,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         gripper_kp = task_overrides.get("gripper_kp", None)
         gripper_kd = task_overrides.get("gripper_kd", None)
-        if gripper_kp is not None or gripper_kd is not None:
+        gripper_effort_limit = task_overrides.get("gripper_effort_limit", None)
+        if gripper_kp is not None or gripper_kd is not None or gripper_effort_limit is not None:
             if hasattr(env_cfg, "robot") and "panda_hand" in env_cfg.robot.actuators:
                 if gripper_kp is not None:
                     env_cfg.robot.actuators["panda_hand"].stiffness = float(gripper_kp)
@@ -185,6 +186,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if gripper_kd is not None:
                     env_cfg.robot.actuators["panda_hand"].damping = float(gripper_kd)
                     print(f"[INFO] Setting gripper_kd (panda_hand damping) to {gripper_kd}")
+                if gripper_effort_limit is not None:
+                    env_cfg.robot.actuators["panda_hand"].effort_limit_sim = float(gripper_effort_limit)
+                    print(f"[INFO] Setting gripper_effort_limit (panda_hand effort_limit_sim) to {gripper_effort_limit}")
 
         if hasattr(env_cfg, "task"):
             if "arm_control_gain_randomization" in task_overrides:

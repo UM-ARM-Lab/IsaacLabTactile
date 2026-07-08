@@ -74,6 +74,9 @@ params:
     gripper_kp: 500.0
     gripper_kd: 40.0
 
+    # Gripper finger effort limit (panda_hand actuator effort_limit_sim).
+    gripper_effort_limit: 5.0 # 40 for sim
+
     # Gripper finger PD gain domain randomization (panda_hand stiffness / damping).
     # Samples multiplicative scales on gripper_kp / gripper_kd at each episode reset.
     gripper_kp_kd_randomization: False
