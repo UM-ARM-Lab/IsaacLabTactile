@@ -298,11 +298,12 @@ class VisuoTactileSensor(SensorBase):
 
         # gelsightRender - pass camera dimensions to match resolution
         self.taxim_gelsight = gelsightRender(
-            self.cfg.sensor_type, 
+            self.cfg.sensor_type,
             device=self.device,
             height=self.cfg.camera_cfg.height,
             width=self.cfg.camera_cfg.width,
-            calib_variant=self.cfg.calib_variant
+            calib_variant=self.cfg.calib_variant,
+            calib_rotation_deg=self.cfg.calib_rotation_deg,
         )
 
         # Create camera sensor

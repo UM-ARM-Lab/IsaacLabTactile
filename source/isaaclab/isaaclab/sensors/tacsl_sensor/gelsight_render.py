@@ -158,7 +158,15 @@ class gelsightRender:
         Ref: https://arxiv.org/abs/2109.04027
     """
 
-    def __init__(self, sensor_name, device, height=None, width=None, calib_variant="sim"):
+    def __init__(
+        self,
+        sensor_name,
+        device,
+        height=None,
+        width=None,
+        calib_variant="sim",
+        calib_rotation_deg: int = 0,
+    ):
         """
         Initialize the GelSight renderer.
 
@@ -167,35 +175,53 @@ class gelsightRender:
         device (str): Device to use ('cpu' or 'cuda').
         height (int, optional): Height of the output image. If None, uses config default.
         width (int, optional): Width of the output image. If None, uses config default.
-        calib_variant (str, optional): Calibration variant. Options: 'sim' (polycalib.npz) or 'real' (polycalib_real.npz). Defaults to 'sim'.
+        calib_variant (str, optional): Calibration variant. Options: 'sim' (sensor-local polycalib.npz + bg.jpg)
+            or 'real' (gs_mini_data polycalib_real.npz + bg.jpg). Defaults to 'sim'.
+        calib_rotation_deg (int, optional): CCW rotation (0/90/180/270) applied to the depth map so it
+            matches the orientation used when the calibration/background were captured. The rendered RGB
+            is rotated back by the same amount. Defaults to 0.
         """
 
         self.sensor_name = sensor_name
         self.device = device
         self.conf = conf_options[self.sensor_name]
 
-        bg_path = get_gs_render_data(self.conf["data_dir"], self.conf["background_path"])
-        
-        # Override calibration file based on calib_variant
+        if calib_rotation_deg not in (0, 90, 180, 270):
+            raise ValueError(f"calib_rotation_deg must be 0, 90, 180, or 270, got {calib_rotation_deg}")
+        self.calib_rotation_deg = int(calib_rotation_deg)
+        # torch.rot90 k: number of 90-degree CCW rotations
+        self._rot90_k = self.calib_rotation_deg // 90
+
+        # Real variant uses GelSight Mini real-world calib + background from gs_mini_data.
         if calib_variant == "real":
+            data_dir = "gs_mini_data"
+            bg_name = "bg.jpg"
             calib_name = "polycalib_real.npz"
         else:
+            data_dir = self.conf["data_dir"]
+            bg_name = self.conf["background_path"]
             calib_name = self.conf["calib_path"]
-        
-        calib_path = get_gs_render_data(self.conf["data_dir"], calib_name)
+
+        bg_path = get_gs_render_data(data_dir, bg_name)
+        calib_path = get_gs_render_data(data_dir, calib_name)
 
         self.background = cv2.cvtColor(cv2.imread(bg_path), cv2.COLOR_BGR2RGB)
 
         self.calib_data = CalibData(calib_path)
-        
-        # Use provided dimensions or fall back to config defaults
-        h = height if height is not None else self.conf["h"]
-        w = width if width is not None else self.conf["w"]
-        
-        # Resize background if dimensions don't match
+
+        # Camera / output resolution
+        out_h = height if height is not None else self.conf["h"]
+        out_w = width if width is not None else self.conf["w"]
+        # Working resolution in the calibration frame (swap for 90/270)
+        if self._rot90_k % 2 == 1:
+            h, w = out_w, out_h
+        else:
+            h, w = out_h, out_w
+
+        # Resize background to the calibration-frame resolution
         if self.background.shape[:2] != (h, w):
             self.background = cv2.resize(self.background, (w, h), interpolation=cv2.INTER_LINEAR)
-        
+
         bins = self.conf["numBins"]
         [xx, yy] = np.meshgrid(range(w), range(h))
         xf = xx.flatten()
@@ -215,19 +241,26 @@ class gelsightRender:
 
         self.A_tensor = torch.tensor(self.A.reshape(h, w, 6), device=self.device).unsqueeze(0)
         self.background_tensor = torch.tensor(self.background, device=self.device)
-        print(f"Gelsight initialization done! Resolution: {h}x{w}")
+        print(
+            f"Gelsight initialization done! Output: {out_h}x{out_w}, "
+            f"calib-frame: {h}x{w}, calib_rotation_deg={self.calib_rotation_deg}"
+        )
 
     def render_tensorized(self, heightMap):
         """
         Render the height map using the GelSight sensor (tensorized version).
 
         Parameters:
-        heightMap (torch.Tensor): Input height map tensor.
+        heightMap (torch.Tensor): Input height map tensor. Shape: (B, H, W).
 
         Returns:
-        torch.Tensor: Rendered image tensor.
+        torch.Tensor: Rendered image tensor. Shape: (B, H, W, 3).
         """
         height_map = heightMap.clone()
+        # Align depth with the orientation used for calibration / background.
+        if self._rot90_k != 0:
+            height_map = torch.rot90(height_map, k=self._rot90_k, dims=(1, 2))
+
         height_map[torch.abs(height_map) < 1e-6] = 0  # remove minor artifact
         height_map = height_map * -1000.0
         height_map /= self.conf["pixmm"]
@@ -251,4 +284,8 @@ class gelsightRender:
         # write tactile image
         sim_img = sim_img_rgb_tensor + self.background_tensor  # /255.0
         sim_img = torch.clip(sim_img, 0, 255, out=sim_img).to(torch.uint8)
+
+        # Rotate RGB back to the camera / output orientation.
+        if self._rot90_k != 0:
+            sim_img = torch.rot90(sim_img, k=-self._rot90_k, dims=(1, 2))
         return sim_img

@@ -49,6 +49,12 @@ parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
+parser.add_argument(
+    "--load_critic_only",
+    action="store_true",
+    default=False,
+    help="When resuming from --checkpoint, load only the central value critic (assymetric_vf_nets), not the actor.",
+)
 parser.add_argument("--sigma", type=str, default=None, help="The policy's initial standard deviation.")
 parser.add_argument(
     "--max_iterations",
@@ -135,9 +141,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env_cfg.ctrl.use_full_rotation = bool(use_full_rotation)
             print(f"[INFO] Setting use_full_rotation to {env_cfg.ctrl.use_full_rotation}")
 
-        # Override tactile sensor calibration if specified
-        if task_overrides.get("use_real_calib", False) and hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
-            env_cfg.tactile_cam.calib_variant = "real"
+        # Override tactile sensor calibration if specified (real: gs_mini_data polycalib + bg)
+        if task_overrides.get("use_real_calib", False):
+            if hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
+                env_cfg.tactile_cam.calib_variant = "real"
+            if hasattr(env_cfg, "tactile_cam_right") and env_cfg.tactile_cam_right is not None:
+                env_cfg.tactile_cam_right.calib_variant = "real"
+
+        # CCW rotation aligning depth with calib/bg orientation (0/90/180/270)
+        calib_rotation_deg = task_overrides.get("calib_rotation_deg", None)
+        if calib_rotation_deg is not None:
+            calib_rotation_deg = int(calib_rotation_deg)
+            if hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
+                env_cfg.tactile_cam.calib_rotation_deg = calib_rotation_deg
+            if hasattr(env_cfg, "tactile_cam_right") and env_cfg.tactile_cam_right is not None:
+                env_cfg.tactile_cam_right.calib_rotation_deg = calib_rotation_deg
+            print(f"[INFO] Setting tactile calib_rotation_deg to {calib_rotation_deg}")
         
         # Override gripper-peg friction if specified (ignored when gripper_peg_friction_randomization is True)
         gripper_peg_friction = task_overrides.get("gripper_peg_friction", None)
@@ -355,11 +374,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg["params"]["config"]["max_epochs"] = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg["params"]["config"]["max_epochs"]
     )
+    load_critic_only = args_cli.load_critic_only or agent_cfg["params"].get("load_critic_only", False)
+    if args_cli.load_critic_only:
+        agent_cfg["params"]["load_critic_only"] = True
+    if load_critic_only and args_cli.checkpoint is None:
+        raise ValueError("--load-critic-only requires --checkpoint")
+
+    resume_path = None
     if args_cli.checkpoint is not None:
         resume_path = retrieve_file_path(args_cli.checkpoint)
         agent_cfg["params"]["load_checkpoint"] = True
         agent_cfg["params"]["load_path"] = resume_path
-        print(f"[INFO]: Loading model checkpoint from: {agent_cfg['params']['load_path']}")
+        if load_critic_only:
+            print(f"[INFO]: Loading central value critic only from: {resume_path}")
+        else:
+            print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     train_sigma = float(args_cli.sigma) if args_cli.sigma is not None else None
 
     # multi-gpu training config
@@ -490,7 +519,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             wandb.config.update({"agent_cfg": agent_cfg})
 
     if args_cli.checkpoint is not None:
-        runner.run({"train": True, "play": False, "sigma": train_sigma, "checkpoint": resume_path})
+        runner.run(
+            {
+                "train": True,
+                "play": False,
+                "sigma": train_sigma,
+                "checkpoint": resume_path,
+                "load_critic_only": load_critic_only,
+            }
+        )
     else:
         runner.run({"train": True, "play": False, "sigma": train_sigma})
 

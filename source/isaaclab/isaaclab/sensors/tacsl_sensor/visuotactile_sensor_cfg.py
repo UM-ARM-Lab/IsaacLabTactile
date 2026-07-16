@@ -30,7 +30,19 @@ class VisuoTactileSensorCfg(SensorBaseCfg):
     """Type of tactile sensor. Options: 'gelsight_r15', 'gs_mini'."""
 
     calib_variant: str = "sim"
-    """Calibration variant to use. Options: 'sim' (uses polycalib.npz) or 'real' (uses polycalib_real.npz)."""
+    """Calibration variant to use.
+
+    Options:
+      - 'sim': sensor-local polycalib.npz + bg.jpg (gelsight_r15_data or gs_mini_data)
+      - 'real': gs_mini_data polycalib_real.npz + bg.jpg (real-world GelSight Mini assets)
+    """
+
+    calib_rotation_deg: int = 0
+    """CCW rotation (0/90/180/270) aligning depth with calib/bg orientation.
+
+    Depth is rotated into the calibration frame before Taxim rendering, then the
+    RGB tactile image is rotated back to the camera frame.
+    """
 
     enable_camera_tactile: bool = True
     """Whether to enable camera-based tactile sensing."""

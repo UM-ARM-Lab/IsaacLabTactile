@@ -109,9 +109,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env_cfg.ctrl.use_full_rotation = bool(use_full_rotation)
             print(f"[INFO] Setting use_full_rotation to {env_cfg.ctrl.use_full_rotation}")
 
-        # Override tactile sensor calibration if specified
-        if task_overrides.get("use_real_calib", False) and hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
-            env_cfg.tactile_cam.calib_variant = "real"
+        # Override tactile sensor calibration if specified (real: gs_mini_data polycalib + bg)
+        if task_overrides.get("use_real_calib", False):
+            if hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
+                env_cfg.tactile_cam.calib_variant = "real"
+            if hasattr(env_cfg, "tactile_cam_right") and env_cfg.tactile_cam_right is not None:
+                env_cfg.tactile_cam_right.calib_variant = "real"
+
+        # CCW rotation aligning depth with calib/bg orientation (0/90/180/270)
+        calib_rotation_deg = task_overrides.get("calib_rotation_deg", None)
+        if calib_rotation_deg is not None:
+            calib_rotation_deg = int(calib_rotation_deg)
+            if hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
+                env_cfg.tactile_cam.calib_rotation_deg = calib_rotation_deg
+            if hasattr(env_cfg, "tactile_cam_right") and env_cfg.tactile_cam_right is not None:
+                env_cfg.tactile_cam_right.calib_rotation_deg = calib_rotation_deg
+            print(f"[INFO] Setting tactile calib_rotation_deg to {calib_rotation_deg}")
         
         # Override gripper-peg friction if specified (ignored when gripper_peg_friction_randomization is True)
         gripper_peg_friction = task_overrides.get("gripper_peg_friction", None)

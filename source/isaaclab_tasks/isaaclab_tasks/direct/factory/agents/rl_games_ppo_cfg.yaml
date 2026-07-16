@@ -48,6 +48,9 @@ params:
 
   load_checkpoint: False
   load_path: ""
+  # When true with --checkpoint, load only central value critic (assymetric_vf_nets), not the actor.
+  # Useful when actor architecture differs (e.g. tactile CNN vs point-cloud latent). CLI: --load-critic-only
+  load_critic_only: False
 
   # Task-specific overrides (e.g., Factory peg insertion specific parameters)
   task_overrides:
