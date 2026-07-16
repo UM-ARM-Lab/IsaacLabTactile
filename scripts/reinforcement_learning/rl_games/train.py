@@ -184,6 +184,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if "fixed_asset_friction_range" in task_overrides:
                 env_cfg.task.fixed_asset_friction_range = task_overrides["fixed_asset_friction_range"]
                 print(f"[INFO] Setting fixed_asset_friction_range to {env_cfg.task.fixed_asset_friction_range}")
+            if "elastomer_stiffness_randomization" in task_overrides:
+                env_cfg.task.elastomer_stiffness_randomization = task_overrides[
+                    "elastomer_stiffness_randomization"
+                ]
+                print(
+                    "[INFO] Setting elastomer_stiffness_randomization to "
+                    f"{env_cfg.task.elastomer_stiffness_randomization}"
+                )
+            if "elastomer_stiffness_range" in task_overrides:
+                env_cfg.task.elastomer_stiffness_range = task_overrides["elastomer_stiffness_range"]
+                print(
+                    f"[INFO] Setting elastomer_stiffness_range to {env_cfg.task.elastomer_stiffness_range}"
+                )
 
         elastomer_stiffness = task_overrides.get("elastomer_stiffness", None)
         if elastomer_stiffness is not None:

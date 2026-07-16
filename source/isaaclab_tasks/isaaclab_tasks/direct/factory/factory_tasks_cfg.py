@@ -102,6 +102,10 @@ class FactoryTask:
     gripper_peg_friction_randomization: bool = False
     gripper_peg_friction_range: list = [0.5, 0.75]  # [min, max] when randomization is enabled
 
+    # Domain randomization: sample tactile elastomer stiffness uniformly at each env reset.
+    elastomer_stiffness_randomization: bool = False
+    elastomer_stiffness_range: list = [350.0, 350.0]  # [min, max] when randomization is enabled
+
     # Domain randomization: sample arm operational-space Kp/Kd scales every control update.
     # Multiplicative factors applied to task_prop_gains (Kp) and task_deriv_gains (Kd).
     arm_control_gain_randomization: bool = False

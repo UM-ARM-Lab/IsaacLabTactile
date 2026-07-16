@@ -501,6 +501,12 @@ class FactoryEnvCfg(DirectRLEnvCfg):
             self.task.fixed_asset_friction_randomization = task.fixed_asset_friction_randomization
         if task.get("fixed_asset_friction_range", None) is not None:
             self.task.fixed_asset_friction_range = OmegaConf.to_container(task.fixed_asset_friction_range, resolve=True)
+        if task.get("elastomer_stiffness_randomization", None) is not None:
+            self.task.elastomer_stiffness_randomization = task.elastomer_stiffness_randomization
+        if task.get("elastomer_stiffness_range", None) is not None:
+            self.task.elastomer_stiffness_range = OmegaConf.to_container(
+                task.elastomer_stiffness_range, resolve=True
+            )
         if task.get("arm_control_gain_randomization", None) is not None:
             self.task.arm_control_gain_randomization = task.arm_control_gain_randomization
         if task.get("arm_kp_scale_range", None) is not None:

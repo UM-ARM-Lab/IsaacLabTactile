@@ -19,6 +19,7 @@ import omni.log
 from isaacsim.core.prims import SdfShapePrim
 from isaacsim.core.simulation_manager import SimulationManager
 from omni.physx.scripts import physicsUtils
+from pxr import PhysxSchema
 
 import isaaclab.sim as sim_utils
 import isaaclab.utils.math as math_utils
@@ -252,6 +253,26 @@ class VisuoTactileSensor(SensorBase):
             physicsUtils.add_physics_material_to_prim(stage, body_prim, elastomer_collision_path)
 
         omni.log.warn(f"Applied compliant contact materials to {_num_envs} environments.")
+
+    def set_compliance_stiffness(self, stiffness: torch.Tensor, env_ids: torch.Tensor):
+        """Set elastomer compliance stiffness for selected environments."""
+        env_ids_cpu = env_ids.reshape(-1).cpu().tolist()
+        stiffness_cpu = stiffness.reshape(-1).cpu().tolist()
+        if len(env_ids_cpu) != len(stiffness_cpu):
+            raise ValueError("stiffness must contain one value per environment")
+
+        parent_prims = sim_utils.find_matching_prims(self.cfg.prim_path.rsplit("/", 1)[0])
+        stage = stage_utils.get_current_stage()
+        for env_id, value in zip(env_ids_cpu, stiffness_cpu):
+            env_prim_path = parent_prims[env_id].GetPath().pathString
+            material_path = (
+                f"{env_prim_path}/{self.cfg.elastomer_rigid_body}/{self.cfg.elastomer_collision_path}"
+            )
+            material_prim = stage.GetPrimAtPath(material_path)
+            if not material_prim.IsValid():
+                raise RuntimeError(f"Compliant material not found at '{material_path}'")
+            material_api = PhysxSchema.PhysxMaterialAPI(material_prim)
+            material_api.GetCompliantContactStiffnessAttr().Set(float(value))
 
     def get_initial_render(self):
         """Get the initial tactile sensor render for baseline comparison.

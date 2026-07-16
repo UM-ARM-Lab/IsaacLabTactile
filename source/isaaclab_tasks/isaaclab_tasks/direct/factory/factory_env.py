@@ -1318,6 +1318,7 @@ class FactoryEnv(DirectRLEnv):
         self._apply_fixed_asset_friction_randomization(env_ids)
         self._apply_joint_friction_randomization(env_ids)
         self._apply_gripper_kp_kd_randomization(env_ids)
+        self._apply_elastomer_stiffness_randomization(env_ids)
         self._apply_action_threshold_randomization(env_ids)
         if self._tactile_image_augmentor is not None:
             self._tactile_image_augmentor.reset(env_ids)
@@ -1372,6 +1373,26 @@ class FactoryEnv(DirectRLEnv):
         low, high = self.cfg_task.joint_friction_range[0], self.cfg_task.joint_friction_range[1]
         friction = (high - low) * torch.rand(env_ids.numel(), device=self.device) + low
         self._write_panda_arm_joint_friction(env_ids, friction)
+
+    def _apply_elastomer_stiffness_randomization(self, env_ids):
+        """If enabled, sample one elastomer stiffness per environment for both fingers."""
+        if not getattr(self.cfg_task, "elastomer_stiffness_randomization", False):
+            return
+        if not self.cfg.enable_tactile_sensor or not self.cfg.use_compliant_gripper:
+            raise RuntimeError("Elastomer stiffness randomization requires compliant tactile sensors")
+        env_ids = env_ids.reshape(-1)
+        if env_ids.numel() == 0:
+            return
+        low, high = self.cfg_task.elastomer_stiffness_range
+        if low <= 0.0 or high < low:
+            raise ValueError(
+                f"Invalid elastomer_stiffness_range {self.cfg_task.elastomer_stiffness_range}; "
+                "expected 0 < min <= max"
+            )
+        stiffness = (high - low) * torch.rand(env_ids.numel(), device=self.device) + low
+        self._tactile_cam.set_compliance_stiffness(stiffness, env_ids)
+        if self.cfg.enable_tactile_sensor_right and self._tactile_cam_right is not None:
+            self._tactile_cam_right.set_compliance_stiffness(stiffness, env_ids)
 
     def _set_assets_to_default_pose(self, env_ids):
         """Move assets to default pose before randomization."""
