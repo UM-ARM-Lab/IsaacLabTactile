@@ -22,6 +22,7 @@ from isaaclab.sensors import VisuoTactileSensor, TiledCamera
 from isaaclab.sensors.contact_sensor import ContactSensor, ContactSensorCfg
 from . import factory_control, factory_utils
 from .factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, FactoryEnvCfg, ASSET_DIR
+from .tactile_augmentation import TactileImageAugmentor
 import matplotlib.pyplot as plt
 
 
@@ -181,6 +182,21 @@ class FactoryEnv(DirectRLEnv):
             # Note: The batched observation_space is for the "policy" key, but we're now using "vector_obs"
             # However, RL-Games wrapper will handle the batching, so we don't need to update it here
             # The wrapper uses single_observation_space to build its own spaces
+
+        # TacSL-style tactile image DR (applied in _get_observations when read_tactile_sensor is on).
+        self._tactile_image_augmentor: TactileImageAugmentor | None = None
+        if self.cfg.tactile_image_aug.enable:
+            h = self.cfg.tactile_cam.camera_cfg.height
+            w = self.cfg.tactile_cam.camera_cfg.width
+            self._tactile_image_augmentor = TactileImageAugmentor(
+                num_envs=self.num_envs,
+                device=self.device,
+                img_hw=(h, w),
+            )
+            print(
+                f"[INFO] Tactile image augmentation enabled "
+                f"(img_hw=({h}, {w}), TacSL episode+timestep defaults)"
+            )
 
         # Optional contact sensors on fingertip links (forces and/or average contact points).
         self._left_finger_contact_sensor: ContactSensor | None = None
@@ -846,7 +862,9 @@ class FactoryEnv(DirectRLEnv):
         output_dict = {"policy": obs_tensors, "critic": state_tensors}
 
         if self.cfg.enable_tactile_sensor and self.cfg.read_tactile_sensor:
-            def _normalize_tactile_obs(tactile_imgs: torch.Tensor | None) -> torch.Tensor | None:
+            def _normalize_tactile_obs(
+                tactile_imgs: torch.Tensor | None, sensor: str = "left"
+            ) -> torch.Tensor | None:
                 if tactile_imgs is None:
                     return None
                 if tactile_imgs.dim() == 4 and tactile_imgs.shape[-1] <= 4:
@@ -855,6 +873,8 @@ class FactoryEnv(DirectRLEnv):
                 # Convert to float and normalize from [0, 255] to [-1, 1]
                 # Standard normalization for CNNs: zero-centered inputs work better with batch norm
                 tactile_imgs = tactile_imgs.float() / 255.0  # [0, 1]
+                if self._tactile_image_augmentor is not None:
+                    tactile_imgs = self._tactile_image_augmentor.apply(tactile_imgs, sensor=sensor)
                 tactile_imgs = tactile_imgs * 2.0 - 1.0  # [-1, 1]
 
                 # Safety check: Replace NaN and Inf with zeros
@@ -867,13 +887,15 @@ class FactoryEnv(DirectRLEnv):
                 return tactile_imgs
 
             tactile_data = self._tactile_cam.data
-            tactile_left = _normalize_tactile_obs(tactile_data.taxim_tactile)
+            tactile_left = _normalize_tactile_obs(tactile_data.taxim_tactile, sensor="left")
             if tactile_left is not None:
-                # Add to output - images are now normalized float32 in [0, 1] range
+                # Add to output - images are now normalized float32 in [-1, 1] range
                 output_dict["tactile"] = tactile_left
 
             if self.cfg.enable_tactile_sensor_right and self._tactile_cam_right is not None:
-                tactile_right = _normalize_tactile_obs(self._tactile_cam_right.data.taxim_tactile)
+                tactile_right = _normalize_tactile_obs(
+                    self._tactile_cam_right.data.taxim_tactile, sensor="right"
+                )
                 if tactile_right is not None:
                     output_dict["tactile_right"] = tactile_right
 
@@ -1297,6 +1319,8 @@ class FactoryEnv(DirectRLEnv):
         self._apply_joint_friction_randomization(env_ids)
         self._apply_gripper_kp_kd_randomization(env_ids)
         self._apply_action_threshold_randomization(env_ids)
+        if self._tactile_image_augmentor is not None:
+            self._tactile_image_augmentor.reset(env_ids)
         if self._use_wrist_force_penalty:
             contact_rand = torch.rand((len(env_ids),), dtype=torch.float32, device=self.device)
             contact_lower, contact_upper = self.cfg_task.contact_penalty_threshold_range

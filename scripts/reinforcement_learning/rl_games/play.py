@@ -246,6 +246,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 print("[WARNING] obs_noise must be a dictionary with 'enable_obs_noise' key")
 
+        tactile_image_aug = task_overrides.get("tactile_image_aug", None)
+        if tactile_image_aug is not None and hasattr(env_cfg, "tactile_image_aug"):
+            if isinstance(tactile_image_aug, dict) and "enable" in tactile_image_aug:
+                env_cfg.tactile_image_aug.enable = bool(tactile_image_aug["enable"])
+                print(f"[INFO] Setting tactile_image_aug.enable to {env_cfg.tactile_image_aug.enable}")
+            else:
+                print("[WARNING] tactile_image_aug must be a dictionary with 'enable' key")
+
         if "fixed_asset_pos" in task_overrides and task_overrides["fixed_asset_pos"] is not None:
             if hasattr(env_cfg, "obs_rand"):
                 env_cfg.obs_rand.fixed_asset_pos = list(task_overrides["fixed_asset_pos"])

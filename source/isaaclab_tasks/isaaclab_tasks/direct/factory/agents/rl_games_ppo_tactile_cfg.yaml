@@ -67,9 +67,8 @@ params:
           strides: 1
           padding: 0
     
-    # MLP for processing vector observations (robot state, object state, velocities, actions)
-    # RL-Games will automatically route "vector_obs" group (augmented with Point-MAE latent
-    # when enabled) to this MLP based on shape.
+    # MLP for processing vector observations (robot state, object state, velocities, actions).
+    # RL-Games routes the "vector_obs" group to this MLP based on shape.
     mlp:
       units: [512, 128, 64]
       activation: elu
@@ -85,34 +84,65 @@ params:
   # Task-specific overrides (e.g., Factory peg insertion specific parameters)
   task_overrides:
     # Use real calibration file (polycalib_real.npz) instead of simulated calibration (polycalib.npz)
-    use_real_calib: True
+    use_real_calib: False
+
     # Override ctrl.use_full_rotation (peg_insert/gear_mesh default true, nut_thread default false).
     use_full_rotation: null
+
     # Friction between gripper and peg (held asset). If set, overrides held_asset_cfg.friction and robot_cfg.friction.
     # Set to null to use individual config values, or specify a float value (e.g., 1.0)
     # Ignored when gripper_peg_friction_randomization is true.
     gripper_peg_friction: 0.75
 
+    # Domain randomization: fixed-asset (socket/hole) friction sampled uniformly per env at each reset.
+    fixed_asset_friction_randomization: False
+    fixed_asset_friction_range: [0.75, 1.25]  # [min, max] friction when randomization is enabled
+
     # Domain randomization: gripper-peg friction sampled uniformly per env at each reset.
-    gripper_peg_friction_randomization: False  # Set to true to enable friction domain randomization
+    gripper_peg_friction_randomization: False  # Set to True to enable friction domain randomization
     gripper_peg_friction_range: [0.4, 1.0]   # [min, max] friction when randomization is enabled
 
+    # Elastomer compliance stiffness for tactile sensors (left and right fingers).
+    elastomer_stiffness: 350.0
+
+    # Gripper finger joint PD gains (panda_hand actuator stiffness / damping).
+    gripper_kp: 500.0
+    gripper_kd: 40.0
+
+    # Gripper finger effort limit (panda_hand actuator effort_limit_sim).
+    # gripper_effort_limit: 5.0 # 5 for real
+    gripper_effort_limit: 5.0 # 40 for sim
+
     # Gripper finger PD gain domain randomization (panda_hand stiffness / damping).
+    # Samples multiplicative scales on gripper_kp / gripper_kd at each episode reset.
     gripper_kp_kd_randomization: False
-    gripper_kp_scale_range: [0.8, 1.2]
+    gripper_kp_scale_range: [0.5, 1.1]
     gripper_kd_scale_range: [0.8, 1.2]
 
     # Arm operational-space control gain domain randomization (task_prop_gains / task_deriv_gains).
+    # Samples multiplicative scales on base gains every control update.
     arm_control_gain_randomization: False
-    arm_kp_scale_range: [0.8, 1.2]
+    arm_kp_scale_range: [0.8, 1.2]  # multiplicative on task Kp (xyz position + xyz rotation)
     arm_kd_scale_range: [0.8, 1.2]
 
+    # Arm joint friction domain randomization (panda_joint[1-7] actuator friction).
+    # panda_arm1 (joints 1-4) and panda_arm2 (joints 5-7) share the same sampled value per env.
+    # Resampled at each episode reset.
+    joint_friction_randomization: False
+    joint_friction_range: [0.0, 0.2]  # [min, max] friction when randomization is enabled
+
     # Additive Gaussian noise on xyz position command (meters) at execution time.
-    # std=0 disables noise. Does not affect EMA memory, orientation, or prev_actions.
+    # std=0 disables noise. Sampled once per env step; does not affect EMA memory, orientation, or prev_actions.
     action_noise_std: 0.0
 
+    # FORGE-style action threshold domain randomization (pos/rot per-step clip limits).
+    # Resampled at each episode reset. noise_level is shared across xyz axes.
+    action_threshold_randomization: False
+    pos_threshold_noise_level: 0.25  # multiplier range [1/(1+eps), 1+eps] per axis
+    rot_threshold_noise_level: 0.29
+
     # Wrist F/T sensor contact-force penalty (FORGE-style).
-    enable_contact_penalty: false  # false = off; true = on (uses contact_penalty_scale or task default)
+    enable_contact_penalty: False  # false = off; true = on (uses contact_penalty_scale or task default)
     contact_penalty_scale: null  # only when enable_contact_penalty=true; null = task default (peg_insert: 0.2)
     contact_penalty_threshold_range: null  # null = task default [2.0, 8.0] N
 
@@ -121,64 +151,26 @@ params:
     obs_noise:
       enable_obs_noise: False  # Set to true to enable observation noise
 
+    # TacSL-style tactile image domain randomization (episode + timestep color/crop).
+    # Only affects taxim RGB tactile observations when read_tactile_sensor is enabled.
+    tactile_image_aug:
+      enable: True
+
     # Per-episode bias std (meters) on the fixed-asset observation frame (obs-only, not physical spawn).
     # null = ObsRandCfg default [0.001, 0.001, 0.001]; [0, 0, 0] disables.
     fixed_asset_pos: null
 
-    # Tactile point cloud domain randomization (held object only).
-    # Adds Gaussian noise to held-object pose before rendering tactile_pc_peg_w.
-    # Finger point clouds are unchanged. std=0 uses clean ground-truth pose.
-    tactile_pointcloud_dr:
-      held_pos_noise_std: 0.0   # meters
-      held_rot_noise_std: 0.0   # radians (axis-angle components)
-    
     # Include held asset observations (held_pos_rel_fixed and held_quat) in obs_order
     # When enabled, adds held object position relative to fixed asset and held object orientation to policy observations
     include_held_asset_obs: False  # Set to true to include held_pos_rel_fixed and held_quat in observations
-    
-    # -------------------------------------------------------------------------
-    # Tactile observation wrapper (refactored)
-    #
-    # Choose ONE wrapper to append a latent token to the policy's vector observations.
-    # Options:
-    # - null      : no additional tactile latent conditioning
-    # - mae       : tactile-image MAE pooled latent
-    # - point_mae : tactile point-cloud Point-MAE pooled latent (optional projection)
-    # - ot        : rectified-flow latent OT (direction comes from OT checkpoint)
-    #
-    # Checkpoints are listed once under `checkpoints` and are shared across wrappers.
-    # `use_projection` applies when name == "mae", "point_mae", and also for name == "ot".
-    # For OT, projection is applied on whichever source latent branch the projection
-    # checkpoint was trained on ("point" or "image").
+
+    # Include previous action vector in policy observations.
+    # Assumes obs history is disabled (history_length == 0).
+    include_prev_actions: True  # Set to false to drop prev_actions from policy observation
+
+    # Tactile images are encoded by the CNN above; no latent wrapper is used.
     tactile_obs_wrapper:
-      name: null  # one of: null, mae, point_mae, ot, double_ot, contact_point
-      use_projection: false
-      force_input_noise_std: 0.0  # additive N(0, std) on PointMAE force input; 0 = off
-      projection_source_latent: null  # OT-only optional override/validation: point|image; null auto-detects from projection ckpt
-      checkpoints:
-        # Point-MAE checkpoint (.pth) saved by tactile_transfer/script/train_point_mae.py
-        point_mae: null
-        # Tactile-image MAE checkpoint (.pth) saved by tactile_transfer/script/train_tactile_image_mae.py
-        mae: null
-        # Rectified-flow latent OT checkpoint (.pth) saved by tactile_transfer/script/train_rectified_flow_latent_ot.py
-        ot: null
-        # Optional: point-latent projection MLP checkpoint (.pth) saved by
-        # tactile_transfer/script/train_point_latent_projection_sinkhorn.py
-        projection: null
-      # Common observation key for tactile images (used by "mae" and OT when direction=image_to_pc)
-      tactile_obs_key: tactile
-      # Point-cloud gather settings (used by "point_mae" and OT when direction=pc_to_image)
-      pc_keys:
-        - tactile_pc_left_w
-        - tactile_pc_right_w
-        - tactile_pc_peg_w
-      force_keys:
-        left_force: fingertip_force_left
-        left_wrench: fingertip_wrench_left
-        right_force: fingertip_force_right
-        right_wrench: fingertip_wrench_right
-      # OT integration settings (only used when name == "ot")
-      ot_euler_steps: 32
+      name: null
 
   config:
     name: Factory_Tactile
@@ -201,7 +193,7 @@ params:
     schedule_type: standard
     kl_threshold: 0.008
     score_to_win: 20000
-    max_epochs: 500
+    max_epochs: 200
     save_best_after: 10
     save_frequency: 20
     print_stats: True

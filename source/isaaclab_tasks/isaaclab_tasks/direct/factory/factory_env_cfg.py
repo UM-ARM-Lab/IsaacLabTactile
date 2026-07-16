@@ -94,6 +94,19 @@ class ObsRandCfg:
     fingertip_pos: float = 0.001  # isotropic position std (meters)
     fingertip_rot_deg: float = 0.5  # rotation std (degrees), random axis
 
+
+@configclass
+class TactileImageAugCfg:
+    """TacSL-style tactile image domain randomization (opt-in).
+
+    When enabled, episode-level + timestep-level color/crop transforms from
+    :class:`~.tactile_augmentation.TactileImageAugmentor` are applied to taxim
+    tactile RGB observations before they are mapped to [-1, 1].
+    """
+
+    enable: bool = False
+
+
 @configclass
 class ObsHistoryCfg:
     """Configuration for observation history."""
@@ -152,6 +165,7 @@ class FactoryEnvCfg(DirectRLEnvCfg):
     task_name: str = "peg_insert"  # peg_insert, gear_mesh, nut_thread
     task: FactoryTask = FactoryTask()
     obs_rand: ObsRandCfg = ObsRandCfg()
+    tactile_image_aug: TactileImageAugCfg = TactileImageAugCfg()
     obs_history: ObsHistoryCfg = ObsHistoryCfg()
     ctrl: CtrlCfg = CtrlCfg()
     # Whether to include fingertip contact forces (left/right) in observations and critic states
