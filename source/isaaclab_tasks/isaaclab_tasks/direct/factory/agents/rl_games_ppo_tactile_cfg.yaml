@@ -88,7 +88,7 @@ params:
   task_overrides:
     # Use real-world GelSight Mini assets from gs_mini_data (polycalib_real.npz + bg.jpg)
     # instead of the sim sensor's polycalib.npz + bg.jpg
-    use_real_calib: False
+    use_real_calib: True
     # CCW rotation (0/90/180/270) aligning depth with real calib/bg orientation.
     # Depth is rotated into the calib frame, rendered, then RGB is rotated back.
     calib_rotation_deg: 270
@@ -113,8 +113,8 @@ params:
     elastomer_stiffness: 350.0
     # When enabled, overrides elastomer_stiffness with one uniform sample per env at each episode reset.
     # The same sampled stiffness is applied to both finger elastomers.
-    elastomer_stiffness_randomization: true
-    elastomer_stiffness_range: [200.0, 500.0]  # [min, max] stiffness when randomization is enabled
+    elastomer_stiffness_randomization: True
+    elastomer_stiffness_range: [200.0, 700.0]  # [min, max] stiffness when randomization is enabled
 
     # Gripper finger joint PD gains (panda_hand actuator stiffness / damping).
     gripper_kp: 500.0
@@ -160,7 +160,7 @@ params:
     # Observation noise for domain randomization (FORGE-style per-step fingertip corruption).
     # Set enable_obs_noise to true to enable; std values are in factory_env_cfg.py (ObsRandCfg).
     obs_noise:
-      enable_obs_noise: False  # Set to true to enable observation noise
+      enable_obs_noise: True  # Set to true to enable observation noise
 
     # TacSL-style tactile image domain randomization (episode + timestep color/crop).
     # Only affects taxim RGB tactile observations when read_tactile_sensor is enabled.
