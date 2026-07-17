@@ -323,8 +323,6 @@ class VisuoTactileSensor(SensorBase):
             device=self.device,
             height=self.cfg.camera_cfg.height,
             width=self.cfg.camera_cfg.width,
-            calib_variant=self.cfg.calib_variant,
-            calib_rotation_deg=self.cfg.calib_rotation_deg,
         )
 
         # Create camera sensor

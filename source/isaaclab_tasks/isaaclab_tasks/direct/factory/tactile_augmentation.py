@@ -122,7 +122,7 @@ class TactileImageAugmentor:
         use_ep_aug: bool = True,
         use_t_aug: bool = True,
         randomize_color_channel: bool = False,
-        ep_bcsh: tuple[float, float, float, float] = (0.2, 0.2, 0.2, 0.2),
+        ep_bcsh: tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3),
         t_bcsh: tuple[float, float, float, float] = (0.02, 0.02, 0.02, 0.02),
         crop_scale: tuple[float, float] = (0.85, 1.0),
         aspect_ratio: tuple[float, float] = (0.9, 1.1),

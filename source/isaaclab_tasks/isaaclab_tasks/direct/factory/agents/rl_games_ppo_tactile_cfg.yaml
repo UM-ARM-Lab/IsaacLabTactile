@@ -86,12 +86,8 @@ params:
 
   # Task-specific overrides (e.g., Factory peg insertion specific parameters)
   task_overrides:
-    # Use real-world GelSight Mini assets from gs_mini_data (polycalib_real.npz + bg.jpg)
-    # instead of the sim sensor's polycalib.npz + bg.jpg
+    # Use GelSight Mini assets/params (sensor_type=gs_mini) instead of gelsight_r15
     use_real_calib: True
-    # CCW rotation (0/90/180/270) aligning depth with real calib/bg orientation.
-    # Depth is rotated into the calib frame, rendered, then RGB is rotated back.
-    calib_rotation_deg: 270
 
     # Override ctrl.use_full_rotation (peg_insert/gear_mesh default true, nut_thread default false).
     use_full_rotation: null
