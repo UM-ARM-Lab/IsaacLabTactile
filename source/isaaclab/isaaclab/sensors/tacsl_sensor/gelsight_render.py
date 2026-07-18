@@ -39,7 +39,7 @@ conf_digit = {
     "h": 640,
     "w": 480,
     "numBins": 120,
-    "pixmm": 0.0266,
+    "pixmm": 0.05317,
 }
 conf_options = {
     "gelsight_r15": conf_r15,
