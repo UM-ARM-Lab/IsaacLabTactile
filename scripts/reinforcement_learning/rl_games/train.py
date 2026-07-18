@@ -141,13 +141,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env_cfg.ctrl.use_full_rotation = bool(use_full_rotation)
             print(f"[INFO] Setting use_full_rotation to {env_cfg.ctrl.use_full_rotation}")
 
-        # Override tactile sensor to GelSight Mini params + assets
-        if task_overrides.get("use_real_calib", False):
+        # Override tactile calibration/render profile.
+        tactile_sensor_type = task_overrides.get("tactile_sensor_type")
+        if tactile_sensor_type is not None:
+            supported_sensor_types = ("gelsight_r15", "gs_mini", "digit")
+            if tactile_sensor_type not in supported_sensor_types:
+                raise ValueError(
+                    f"Unsupported tactile_sensor_type {tactile_sensor_type!r}; "
+                    f"expected one of {supported_sensor_types}."
+                )
             if hasattr(env_cfg, "tactile_cam") and env_cfg.tactile_cam is not None:
-                env_cfg.tactile_cam.sensor_type = "gs_mini"
+                env_cfg.tactile_cam.sensor_type = tactile_sensor_type
             if hasattr(env_cfg, "tactile_cam_right") and env_cfg.tactile_cam_right is not None:
-                env_cfg.tactile_cam_right.sensor_type = "gs_mini"
-            print("[INFO] Using GelSight Mini tactile calib (sensor_type=gs_mini)")
+                env_cfg.tactile_cam_right.sensor_type = tactile_sensor_type
+            print(f"[INFO] Using tactile calibration profile sensor_type={tactile_sensor_type}")
 
         # Override gripper-peg friction if specified (ignored when gripper_peg_friction_randomization is True)
         gripper_peg_friction = task_overrides.get("gripper_peg_friction", None)

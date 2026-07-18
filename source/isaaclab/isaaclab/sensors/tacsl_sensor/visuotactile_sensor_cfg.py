@@ -27,10 +27,10 @@ class VisuoTactileSensorCfg(SensorBaseCfg):
 
     # Sensor type and capabilities
     sensor_type: str = "gelsight_r15"
-    """Type of tactile sensor. Options: 'gelsight_r15', 'gs_mini'.
+    """Type of tactile sensor. Options: 'gelsight_r15', 'gs_mini', 'digit'.
 
     Selects the render parameter set and asset directory
-    (gelsight_r15_data or gs_mini_data: polycalib.npz + bg.jpg).
+    (<sensor_type>_data: polycalib.npz + bg.jpg).
     """
 
     enable_camera_tactile: bool = True

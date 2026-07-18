@@ -32,9 +32,19 @@ conf_gs_mini = {
     "numBins": 120,
     "pixmm": 0.072629630,
 }
+conf_digit = {
+    "data_dir": "digit_data",
+    "background_path": "bg.jpg",
+    "calib_path": "polycalib.npz",
+    "h": 640,
+    "w": 480,
+    "numBins": 120,
+    "pixmm": 0.0266,
+}
 conf_options = {
     "gelsight_r15": conf_r15,
     "gs_mini": conf_gs_mini,
+    "digit": conf_digit,
 }
 
 
@@ -167,7 +177,7 @@ class gelsightRender:
         Initialize the GelSight renderer.
 
         Parameters:
-        sensor_name (str): Name of the sensor ('gelsight_r15' or 'gs_mini').
+        sensor_name (str): Name of the sensor ('gelsight_r15', 'gs_mini', or 'digit').
         device (str): Device to use ('cpu' or 'cuda').
         height (int, optional): Height of the output image. If None, uses config default.
         width (int, optional): Width of the output image. If None, uses config default.

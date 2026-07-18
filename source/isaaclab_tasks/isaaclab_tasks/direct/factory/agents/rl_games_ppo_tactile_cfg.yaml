@@ -86,8 +86,8 @@ params:
 
   # Task-specific overrides (e.g., Factory peg insertion specific parameters)
   task_overrides:
-    # Use GelSight Mini assets/params (sensor_type=gs_mini) instead of gelsight_r15
-    use_real_calib: True
+    # Tactile calibration/render profile: gelsight_r15 (sim), gs_mini, or digit.
+    tactile_sensor_type: gelsight_r15
 
     # Override ctrl.use_full_rotation (peg_insert/gear_mesh default true, nut_thread default false).
     use_full_rotation: null
@@ -102,7 +102,7 @@ params:
     fixed_asset_friction_range: [0.75, 1.25]  # [min, max] friction when randomization is enabled
 
     # Domain randomization: gripper-peg friction sampled uniformly per env at each reset.
-    gripper_peg_friction_randomization: True  # Set to True to enable friction domain randomization
+    gripper_peg_friction_randomization: False  # Set to True to enable friction domain randomization
     gripper_peg_friction_range: [0.4, 1.0]   # [min, max] friction when randomization is enabled
 
     # Elastomer compliance stiffness for tactile sensors (left and right fingers).
@@ -122,20 +122,20 @@ params:
 
     # Gripper finger PD gain domain randomization (panda_hand stiffness / damping).
     # Samples multiplicative scales on gripper_kp / gripper_kd at each episode reset.
-    gripper_kp_kd_randomization: True
+    gripper_kp_kd_randomization: False
     gripper_kp_scale_range: [0.5, 1.1]
     gripper_kd_scale_range: [0.8, 1.2]
 
     # Arm operational-space control gain domain randomization (task_prop_gains / task_deriv_gains).
     # Samples multiplicative scales on base gains every control update.
-    arm_control_gain_randomization: True
+    arm_control_gain_randomization: False
     arm_kp_scale_range: [0.8, 1.2]  # multiplicative on task Kp (xyz position + xyz rotation)
     arm_kd_scale_range: [0.8, 1.2]
 
     # Arm joint friction domain randomization (panda_joint[1-7] actuator friction).
     # panda_arm1 (joints 1-4) and panda_arm2 (joints 5-7) share the same sampled value per env.
     # Resampled at each episode reset.
-    joint_friction_randomization: True
+    joint_friction_randomization: False
     joint_friction_range: [0.0, 0.2]  # [min, max] friction when randomization is enabled
 
     # Additive Gaussian noise on xyz position command (meters) at execution time.
@@ -144,19 +144,19 @@ params:
 
     # FORGE-style action threshold domain randomization (pos/rot per-step clip limits).
     # Resampled at each episode reset. noise_level is shared across xyz axes.
-    action_threshold_randomization: True
+    action_threshold_randomization: False
     pos_threshold_noise_level: 0.25  # multiplier range [1/(1+eps), 1+eps] per axis
     rot_threshold_noise_level: 0.29
 
     # Wrist F/T sensor contact-force penalty (FORGE-style).
-    enable_contact_penalty: True  # false = off; true = on (uses contact_penalty_scale or task default)
+    enable_contact_penalty: False  # false = off; true = on (uses contact_penalty_scale or task default)
     contact_penalty_scale: null  # only when enable_contact_penalty=true; null = task default (peg_insert: 0.2)
     contact_penalty_threshold_range: null  # null = task default [2.0, 8.0] N
 
     # Observation noise for domain randomization (FORGE-style per-step fingertip corruption).
     # Set enable_obs_noise to true to enable; std values are in factory_env_cfg.py (ObsRandCfg).
     obs_noise:
-      enable_obs_noise: True  # Set to true to enable observation noise
+      enable_obs_noise: False  # Set to true to enable observation noise
 
     # TacSL-style tactile image domain randomization (episode + timestep color/crop).
     # Only affects taxim RGB tactile observations when read_tactile_sensor is enabled.
