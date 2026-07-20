@@ -78,9 +78,8 @@ params:
     gripper_kd: 40.0
 
     # Gripper finger effort limit (panda_hand actuator effort_limit_sim).
-    gripper_effort_limit: 5.0 # 5 for real
-    # gripper_effort_limit: 40.0 # 40 for sim
-    # gripper_effort_limit: 10.0 # 40 for reak
+    # gripper_effort_limit: 5.0 # 5 for real
+    gripper_effort_limit: 40.0 # 40 for sim
 
     # Gripper finger PD gain domain randomization (panda_hand stiffness / damping).
     # Samples multiplicative scales on gripper_kp / gripper_kd at each episode reset.
@@ -135,7 +134,7 @@ params:
 
     # Include previous action vector in policy observations.
     # Assumes obs history is disabled (history_length == 0).
-    include_prev_actions: True  # Set to false to drop prev_actions from policy observation
+    include_prev_actions: False  # Set to false to drop prev_actions from policy observation
 
     # Tactile point cloud domain randomization (held object only).
     # Adds Gaussian noise to held-object pose before rendering tactile_pc_peg_w.
@@ -149,8 +148,8 @@ params:
     tactile_obs_wrapper:
       # name: ot  # one of: null, mae, point_mae, ot, double_ot, contact_point
       # name: null  # one of: null, mae, point_mae, ot, double_ot, contact_point
-      # name: mae  # one of: null, mae, point_mae, ot, double_ot, contact_point
-      name: point_mae  # one of: null, mae, point_mae, ot, double_ot, contact_point
+      name: mae  # one of: null, mae, point_mae, ot, double_ot, contact_point
+      # name: point_mae  # one of: null, mae, point_mae, ot, double_ot, contact_point
       # name: contact_point  # append left/right xy contact sector one-hot (16D: 8 per finger) to policy obs only
       # name: double_ot  # sim point MAE -> RF hop1 (point->image) -> RF hop2 (image->point); checkpoints.ot + point_mae; optional checkpoints.ot_2 for hop 2
       use_projection: false  # applies when name == "mae", "point_mae", or "ot" (source branch for OT depends on projection ckpt metadata)
