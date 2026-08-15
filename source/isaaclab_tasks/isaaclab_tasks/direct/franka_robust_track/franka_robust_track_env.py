@@ -14,13 +14,7 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.markers import (
-    CUBOID_MARKER_CFG,
-    FRAME_MARKER_CFG,
-    SPHERE_MARKER_CFG,
-    VisualizationMarkers,
-    VisualizationMarkersCfg,
-)
+from isaaclab.markers import FRAME_MARKER_CFG, SPHERE_MARKER_CFG, VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 import isaaclab.utils.math as math_utils
 import isaacsim.core.utils.torch as torch_utils
@@ -28,33 +22,15 @@ import isaacsim.core.utils.torch as torch_utils
 from isaaclab_tasks.direct.factory import factory_control, factory_utils
 
 from .franka_robust_track_env_cfg import FrankaRobustTrackEnvCfg
-from .reference_clock import (
-    history_seed_offsets,
-    is_reference_boundary,
-    policy_step_to_reference_index,
-    reference_coordinates,
-    virtual_contact_reference_coordinates,
-)
 from .virtual_contact import (
     contact_coupled_torque,
     compute_virtual_plane_contact,
     construct_reference_plane_trajectory,
-    construct_rotational_equilibrium_trajectory,
-    descale_virtual_sensor_wrench,
-    finite_difference_quaternion_angular_velocity,
     finite_difference_surface_velocity,
     invert_ema_sequence,
-    orientation_power_law_contact_torque,
-    orientation_spring_contact_torque,
-    perturb_reference_plane_trajectory,
-    power_law_coefficient_from_reference,
-    quaternion_nlerp,
     sensor_reaction_to_world_external,
     smooth_force_directions,
     world_external_to_sensor_reaction,
-    world_force_components,
-    x_axis_to_vector_quat,
-    z_axis_to_vector_quat,
 )
 
 
@@ -105,12 +81,41 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # episode-constant, so they are appended once from the current frame rather
         # than duplicated across the history. H = 1 keeps the single-step observation.
         self.obs_history_length = max(1, int(self.cfg.obs_history_length))
-        # ee_pos(3)+ee_quat(4)+optional joint_pos(7)+optional joint_vel(7),
-        # plus the (possibly gain-augmented) action vector fed back into the
-        # proprio observation.
+        # ee_pos(3)+ee_quat(4)+optional joint_pos(7), plus the (possibly
+        # gain-augmented) action vector fed back into the proprio observation.
         self.action_dim = self.actions.shape[-1]
+
+        # Command dead time. `_action_latency_buf[d]` holds the action emitted d
+        # control steps ago, so executing env i's action means reading slot
+        # `_action_latency_steps[i]`. Allocated only when enabled, and sized to
+        # the configured maximum, so the disabled path costs nothing and cannot
+        # silently delay anything.
+        rand_cfg = self.cfg.randomization
+        self._action_latency_enabled = bool(
+            getattr(rand_cfg, "enable_action_latency", False)
+        )
+        lat_range = [int(v) for v in getattr(rand_cfg, "action_latency_range", [0, 0])]
+        if lat_range[0] < 0 or lat_range[1] < lat_range[0]:
+            raise ValueError(
+                "randomization.action_latency_range must be [lo, hi] with "
+                f"0 <= lo <= hi in whole control steps, got {lat_range}"
+            )
+        self._action_latency_bounds = (lat_range[0], lat_range[1])
+        self._action_latency_steps = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long
+        )
+        if self._action_latency_enabled and lat_range[1] > 0:
+            self._action_latency_buf = torch.zeros(
+                (lat_range[1] + 1, self.num_envs, self.action_dim), device=self.device
+            )
+        else:
+            # A zero-width band is not randomization; skip the buffer entirely
+            # rather than paying a shift per step to always read slot 0.
+            self._action_latency_buf = None
         self.include_joint_angles = bool(self.cfg.include_joint_angles)
-        self.include_joint_velocities = bool(self.cfg.include_joint_velocities)
+        self.include_joint_velocities = bool(
+            getattr(self.cfg, "include_joint_velocities", False)
+        )
         self.proprio_dim = (
             7
             + (7 if self.include_joint_angles else 0)
@@ -126,17 +131,20 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             getattr(self.cfg.tracking, "dataset_wrench_convention", "world_external")
         )
         self.virtual_contact_enabled = self.enable_force and self.force_mode == "virtual_contact"
-        self.wrench_dim = 6 if bool(self.cfg.tracking.use_full_wrench) else 3
+        self.wrench_dim = 6
         self.force_dim = self.wrench_dim * self.cfg.tracking.num_future_steps if self.enable_force else 0
         self.force_feedback_dim = self.wrench_dim if self.virtual_contact_enabled else 0
         self.proprio_dim += self.force_feedback_dim
         self._force_mag_max = max(float(self.cfg.tracking.force_mag_range[1]), 1.0e-6)
         self._torque_mag_max = max(float(self.cfg.tracking.torque_mag_max), 1.0e-6)
-        wrench_scale = [self._force_mag_max] * 3
-        if self.wrench_dim == 6:
-            wrench_scale += [self._torque_mag_max] * 3
-        self._wrench_scale = torch.tensor(wrench_scale, device=self.device)
+        self._wrench_scale = torch.tensor(
+            [self._force_mag_max] * 3 + [self._torque_mag_max] * 3,
+            device=self.device,
+        )
         self.controller_context_dim = 6
+        self.controller_context_in_policy = bool(
+            getattr(self.cfg, "controller_context_in_policy", True)
+        )
         self.virtual_contact_privileged_dim = 6 if self.virtual_contact_enabled else 0
         self.privileged_dim = 24 + self.virtual_contact_privileged_dim
         self.proprio_history = torch.zeros(
@@ -145,15 +153,6 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
         self.command_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.command_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
-        self.reference_decimation = int(self.cfg.tracking.reference_decimation)
-        self.policy_steps_per_reference = (
-            self.reference_decimation // int(self.cfg.decimation)
-        )
-        self.reference_dt = self.reference_decimation * float(self.cfg.sim.dt)
-        self._reference_episode_steps = math.ceil(
-            self.max_episode_length / self.policy_steps_per_reference
-        )
-        self._physics_substep_in_policy = 0
 
         # Nominal reset EE pose (from `ctrl.reset_joints`), captured at reset and
         # used as the center of the randomized start-pose sampling box.
@@ -201,13 +200,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.traj_rot_speed = torch.zeros((self.num_envs, 1), device=self.device)
         self.traj_rot_angle = torch.zeros((self.num_envs, 1), device=self.device)
 
-        # Discretized reference trajectory on its native clock. In synchronous
-        # mode this is one waypoint per policy step. Async mode keeps the 15 Hz
-        # dataset samples native while multiple policy steps occur between them.
-        # The tail covers the strict-future observation window.
-        self._traj_len = (
-            self._reference_episode_steps + self.cfg.tracking.num_future_steps
-        )
+        # Discretized reference trajectory: at reset the analytic curve is sampled
+        # onto a fixed grid of control steps (one waypoint per env step) and cached
+        # here. Runtime command/lookahead just index into these buffers by step,
+        # so the policy tracks a discrete pose sequence. The grid is extended past
+        # the episode so the furthest lookahead sample is always in-range.
+        self._traj_len = self.max_episode_length + (self.cfg.tracking.num_future_steps - 1)
         self.traj_pos_buf = torch.zeros((self.num_envs, self._traj_len, 3), device=self.device)
         self.traj_quat_buf = torch.zeros((self.num_envs, self._traj_len, 4), device=self.device)
         self.traj_quat_buf[..., 0] = 1.0
@@ -229,13 +227,6 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.traj_surface_normal_buf = torch.zeros((self.num_envs, self._traj_len, 3), device=self.device)
         self.traj_surface_normal_buf[..., 2] = 1.0
         self.traj_surface_velocity_buf = torch.zeros((self.num_envs, self._traj_len, 3), device=self.device)
-        self.traj_rotational_equilibrium_quat_buf = torch.zeros(
-            (self.num_envs, self._traj_len, 4), device=self.device
-        )
-        self.traj_rotational_equilibrium_quat_buf[..., 0] = 1.0
-        self.traj_rotational_equilibrium_angvel_buf = torch.zeros(
-            (self.num_envs, self._traj_len, 3), device=self.device
-        )
         # Dataset-conditioned target external wrench in world axes. The force
         # half places the moving plane; the torque half is coupled to the force
         # realized by that plane at runtime.
@@ -258,56 +249,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.virtual_surface_normal = torch.zeros((self.num_envs, 3), device=self.device)
         self.virtual_surface_normal[:, 2] = 1.0
         self.virtual_surface_velocity = torch.zeros((self.num_envs, 3), device=self.device)
-        self.virtual_rotational_equilibrium_quat = torch.zeros(
-            (self.num_envs, 4), device=self.device
-        )
-        self.virtual_rotational_equilibrium_quat[:, 0] = 1.0
-        self.virtual_rotational_equilibrium_angvel = torch.zeros(
-            (self.num_envs, 3), device=self.device
-        )
         self.virtual_surface_stiffness = torch.zeros((self.num_envs, 1), device=self.device)
         self.virtual_surface_damping = torch.zeros((self.num_envs, 1), device=self.device)
-        self.virtual_contact_power_exponent = torch.full(
-            (self.num_envs, 1),
-            float(self.cfg.tracking.power_law_exponent),
-            device=self.device,
-        )
-        self.virtual_contact_reference_penetration = torch.full(
-            (self.num_envs, 1),
-            float(self.cfg.tracking.power_law_reference_penetration),
-            device=self.device,
-        )
-        self.virtual_contact_dissipation = torch.full(
-            (self.num_envs, 1),
-            float(self.cfg.tracking.hunt_crossley_dissipation),
-            device=self.device,
-        )
-        self.virtual_contact_surface_offset = torch.zeros(
-            (self.num_envs, 1), device=self.device
-        )
-        self.virtual_contact_normal_tilt = torch.zeros(
-            (self.num_envs, 1), device=self.device
-        )
-        self.virtual_contact_rotational_power_exponent = torch.full(
-            (self.num_envs, 1),
-            float(self.cfg.tracking.virtual_contact_rotational_power_exponent),
-            device=self.device,
-        )
-        self.virtual_contact_rotational_reference_penetration = torch.full(
-            (self.num_envs, 1),
-            float(self.cfg.tracking.virtual_contact_rotational_reference_penetration),
-            device=self.device,
-        )
-        self.virtual_contact_rotational_damping = torch.full(
-            (self.num_envs, 1),
-            float(self.cfg.tracking.virtual_contact_rotational_damping),
-            device=self.device,
-        )
-        self.virtual_contact_rotational_coefficient = torch.full(
-            (self.num_envs, 1),
-            float(self.cfg.tracking.virtual_contact_rotational_stiffness),
-            device=self.device,
-        )
         self.virtual_surface_distance = torch.full((self.num_envs, 1), 1.0, device=self.device)
         self.virtual_contact_force = torch.zeros((self.num_envs, 3), device=self.device)
         self.virtual_contact_torque = torch.zeros((self.num_envs, 3), device=self.device)
@@ -337,7 +280,6 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self._ds_joint_pos = None
         self._ds_lengths = None
         self._ds_num = 0
-        self._disturbance_torque_clip_norm = math.inf
         if self.cfg.tracking.mode == "dataset":
             self._load_dataset_trajectories()
 
@@ -374,6 +316,20 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.gravity_vec = torch.tensor(self.cfg.sim.gravity, device=self.device).repeat(self.num_envs, 1)
         self.link_mass_scales = torch.ones((self.num_envs, self._robot.num_bodies), device=self.device)
         self.joint_friction = torch.zeros((self.num_envs, 7), device=self.device)
+        # Actuator torque path: tau_applied = scale * tau_commanded + bias, per
+        # joint per env. The identity defaults make this an exact no-op, so
+        # nothing that does not write them (all training runs today) changes
+        # behaviour; `sysid_replay_robust_track._install_theta` writes them when
+        # the corresponding theta blocks are fitted.
+        #
+        # Why the model needs somewhere to put this: every other fitted term
+        # describes what *opposes* motion, so an error in the torque actually
+        # delivered has only friction to hide in. The bias term matters
+        # separately because the arm runs with `disable_gravity=True` -- the sim
+        # assumes the control box's gravity compensation is perfect, and any
+        # residual is an unmodelled constant joint torque.
+        self.joint_torque_scale = torch.ones((self.num_envs, 7), device=self.device)
+        self.joint_torque_bias = torch.zeros((self.num_envs, 7), device=self.device)
         # Per-joint reflected rotor inertia written to PhysX (domain randomization).
         # Cached for the critic's privileged observation and logging; the OSC
         # controller stays blind to it (see `arm_armature`).
@@ -404,8 +360,6 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             for key in [
                 "pos_track",
                 "rot_track",
-                "fine_pos_track",
-                "fine_rot_track",
                 "ee_vel",
                 "ee_accel",
                 "action_rate",
@@ -420,10 +374,13 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             ]
         }
 
-        # Per-native-reference-step tracking-error profile. Async policies receive
-        # rewards at their higher action rate, but evaluation metrics remain on the
-        # original reference clock so they are directly comparable to 15 Hz runs.
-        self._perstep_num_bins = int(self._reference_episode_steps)
+        # Per-episode-step tracking-error profile: bin the pos/rot tracking error
+        # by the step index within the episode, then periodically emit a mean±std
+        # line plot to wandb. All envs step in lockstep (fixed-length episodes, no
+        # early termination), so each bin collects one num_envs-sized sample per
+        # episode; accumulating over several episodes yields the spread. This tests
+        # whether the error drops in later stages as the policy gains more context.
+        self._perstep_num_bins = int(self.max_episode_length)
         self._perstep_pos_sum = torch.zeros(self._perstep_num_bins, device=self.device)
         self._perstep_pos_sqsum = torch.zeros(self._perstep_num_bins, device=self.device)
         self._perstep_rot_sum = torch.zeros(self._perstep_num_bins, device=self.device)
@@ -462,7 +419,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # per-episode reference transient into a sawtooth. Averaging over a full
         # episode-length window (aligned with the synchronized resets) removes the
         # phase dependence so the logged scalar is smooth.
-        self._track_err_window = int(self._reference_episode_steps)
+        self._track_err_window = int(self.max_episode_length)
         self._track_err_pos_sum = torch.zeros((), device=self.device)
         self._track_err_rot_sum = torch.zeros((), device=self.device)
         self._track_err_count = 0
@@ -485,7 +442,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self._vis_pos_error_norm = None
         self._vis_rot_error_norm = None
 
-        self.set_debug_vis(self.cfg.debug_vis or self.cfg.debug_vis_force)
+        self.set_debug_vis(self.cfg.debug_vis)
 
     def _setup_scene(self):
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg(), translation=(0.0, 0.0, -1.05))
@@ -738,7 +695,6 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         return self._fit_action_dim(pose_action)
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        self._physics_substep_in_policy = 0
         self.prev_actions[:] = self.actions
         actions, action_rep, compliance = self._parse_action_packet(actions)
         if action_rep not in ("rel_ee_pose", "abs_ee_pose", "delta_ee_pose"):
@@ -754,6 +710,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             actions = self._delta_action_from_abs_ee_pose(actions)
         else:
             actions = self._fit_action_dim(actions)
+        actions = self._apply_action_latency(actions)
         self.actions = self.cfg.ctrl.ema_factor * actions.clamp(-1.0, 1.0) + (
             1.0 - self.cfg.ctrl.ema_factor
         ) * self.actions
@@ -769,6 +726,49 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self._action_target_pos.copy_(target_pos)
             self._action_target_quat.copy_(target_quat)
 
+    def _apply_action_latency(self, actions: torch.Tensor) -> torch.Tensor:
+        """Return the action this step actually executes, `latency` steps stale.
+
+        Applied at the control-step boundary, after the packet has been parsed and
+        widened to the canonical action width but before the EMA blend --- so
+        everything downstream (the executed target, the action fed back into the
+        proprio observation, the action-rate penalty) sees what the arm really did
+        rather than what the policy just asked for. That matches hardware, where
+        the client cannot observe a command the robot has not executed yet.
+
+        Envs whose sampled latency is 0 are unaffected: they read slot 0, which is
+        the action passed in on this very call.
+        """
+        if self._action_latency_buf is None:
+            return actions
+        # Shift the history one slot older, then write this step's action as slot
+        # 0. The clone is required: slice-assigning from an overlapping view of
+        # the same tensor has no defined ordering.
+        self._action_latency_buf[1:] = self._action_latency_buf[:-1].clone()
+        self._action_latency_buf[0] = actions
+        index = self._action_latency_steps.view(1, -1, 1).expand(
+            1, self.num_envs, actions.shape[-1]
+        )
+        return self._action_latency_buf.gather(0, index).squeeze(0)
+
+    def _resample_action_latency(self, env_ids: torch.Tensor):
+        """Draw a fresh integer dead time per env and clear its action history.
+
+        The history must be cleared, not carried: a reset teleports the arm to an
+        unrelated pose, so replaying the previous episode's queued actions would
+        apply commands computed for a state that no longer exists. Zeroing means a
+        delayed env spends its first `latency` steps executing a zero action,
+        which is the same convention `SysIdReplay._command_at` uses when it clamps
+        the shifted row index at the recording's first row.
+        """
+        if self._action_latency_buf is None:
+            return
+        lo, hi = self._action_latency_bounds
+        self._action_latency_steps[env_ids] = torch.randint(
+            lo, hi + 1, (len(env_ids),), device=self.device, dtype=torch.long
+        )
+        self._action_latency_buf[:, env_ids] = 0.0
+
     def _apply_action(self):
         self._compute_intermediate_values()
         self._update_gains_from_action()
@@ -778,31 +778,15 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 self.task_deriv_gains = self.packet_deriv_override
             else:
                 self.task_deriv_gains = factory_utils.get_deriv_gains(self.task_prop_gains)
-        if self.enable_force and not self.virtual_contact_enabled:
+        if self.enable_force:
             # Current step's target wrench (pre-increment episode index), applied
-            # directly in replay-disturbance modes. Preserve the dataset's native
-            # 15 Hz wrench samples with zero-order hold between reference ticks.
-            reference_idx = self._policy_step_to_reference_index(
-                self.episode_length_buf
-            )
-            self.target_wrench[:] = self._traj_wrench_at_index(reference_idx)
+            # directly only in replay-disturbance modes. Virtual-contact mode uses
+            # it as an observation/reward goal and computes the applied wrench from
+            # current plane penetration instead.
+            self.target_wrench[:] = self._traj_wrench_at_index(self.episode_length_buf)
         if self.virtual_contact_enabled:
-            # Evaluate contact at the end of this physics interval. On the last
-            # decimation substep this is exactly the next policy boundary, which
-            # DirectRLEnv exposes to `_get_rewards` after incrementing
-            # `episode_length_buf`. Thus the generated contact and its reward
-            # target share one reference-clock instant.
-            self._update_virtual_contact_force(
-                completed_physics_substeps=self._physics_substep_in_policy + 1
-            )
-            # Match Forge's force-sensor path: `_apply_action` runs once per
-            # physics substep, so filter the synthetic incoming-joint wrench at
-            # the physics rate rather than once per policy/control step. The
-            # configured alpha accounts for the default 60 Hz versus Forge's
-            # 120 Hz physics rate.
-            self._update_virtual_contact_sensor()
+            self._update_virtual_contact_force()
         self._apply_external_wrenches()
-        self._physics_substep_in_policy += 1
         if self.current_action_rep == "abs_ee_pose" or (
             self.current_action_rep == "delta_ee_pose" and self.delta_target_mode == "per_control_step"
         ):
@@ -848,9 +832,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.external_contact_wrench[:, :3] = self.virtual_contact_force
             self.external_contact_wrench[:, 3:] = self.virtual_contact_torque
         else:
-            idx = self._policy_step_to_reference_index(
-                self.episode_length_buf
-            ).clamp(0, self._traj_len - 1)
+            idx = self.episode_length_buf.clamp(0, self._traj_len - 1)
             self.external_contact_wrench[:] = self.traj_applied_wrench_buf[
                 self._env_arange, idx
             ]
@@ -928,6 +910,14 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             nullspace_joint_target=self.nominal_start_joint_pos,
             apply_task_inertia=self.cfg.ctrl.use_task_space_inertia,
         )
+        # Actuator torque path, applied to the arm DOFs only. Identity by
+        # default (scale 1, bias 0), so this is a no-op unless a sys-id fit
+        # writes it. Applied AFTER the OSC and before PhysX's own effort_limit
+        # clamp, which is where a real drive's gain error and residual
+        # gravity-compensation error would enter.
+        self.joint_torque[:, 0:7] = (
+            self.joint_torque[:, 0:7] * self.joint_torque_scale + self.joint_torque_bias
+        )
         self.ctrl_target_joint_pos[:, 7:] = 0.04
         self.joint_torque[:, 7:] = 0.0
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
@@ -976,17 +966,13 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         if self.include_joint_velocities:
             proprio_parts.append(self.joint_vel[:, 0:7])
         if self.virtual_contact_enabled:
-            noise_scale = [float(self.cfg.tracking.force_sensor_noise_std)] * 3
-            if self.wrench_dim == 6:
-                noise_scale += [float(self.cfg.tracking.torque_sensor_noise_std)] * 3
-            sensor_noise_scale = torch.tensor(noise_scale, device=self.device)
-            sensor_noise = sensor_noise_scale * torch.randn_like(self.force_sensor_smooth)
-            self.force_sensor_obs = descale_virtual_sensor_wrench(
-                self.force_sensor_smooth,
-                self.cfg.tracking.virtual_contact_force_scale,
-                self.cfg.tracking.virtual_contact_torque_scale,
+            sensor_noise_scale = torch.tensor(
+                [float(self.cfg.tracking.force_sensor_noise_std)] * 3
+                + [float(self.cfg.tracking.torque_sensor_noise_std)] * 3,
+                device=self.device,
             )
-            self.force_sensor_obs += self.force_sensor_bias + sensor_noise
+            sensor_noise = sensor_noise_scale * torch.randn_like(self.force_sensor_smooth)
+            self.force_sensor_obs = self.force_sensor_smooth + self.force_sensor_bias + sensor_noise
             proprio_parts.append(self.force_sensor_obs / self._wrench_scale)
         proprio_parts.append(self.actions)
         proprio = torch.cat(proprio_parts, dim=-1)
@@ -1001,20 +987,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         ]
         if self.virtual_contact_enabled:
             if str(self.cfg.tracking.contact_model) == "power_law":
-                if bool(self.cfg.tracking.virtual_contact_randomize_parameters):
-                    exponent_max = float(
-                        self.cfg.tracking.power_law_exponent_range[1]
-                    )
-                    penetration_min = float(
-                        self.cfg.tracking.power_law_reference_penetration_range[0]
-                    )
-                    stiffness_max = float(
-                        self.cfg.tracking.power_law_reference_force
-                    ) / penetration_min**exponent_max
-                else:
-                    stiffness_max = max(
-                        float(self.cfg.tracking.power_law_coefficient), 1.0e-6
-                    )
+                stiffness_max = max(float(self.cfg.tracking.power_law_coefficient), 1.0e-6)
             else:
                 stiffness_max = max(float(self.cfg.tracking.virtual_contact_plane_stiffness), 1.0e-6)
             damping_max = 2.0 * max(float(self.cfg.tracking.virtual_contact_damping_ratio), 1.0e-6) * math.sqrt(
@@ -1042,17 +1015,21 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.proprio_history[:, -1] = proprio
             proprio_stacked = self.proprio_history.reshape(self.num_envs, -1)
 
+        # The gain block is critic-only when `controller_context_in_policy` is
+        # False: it stays in `critic_obs` and is simply left out of `policy_obs`,
+        # so the policy must be robust to the sampled Kp rather than reading it.
+        gain_in_policy = [controller_context] if self.controller_context_in_policy else []
         if self.enable_force:
             future_wrench = self._future_wrench()
             policy_obs = torch.cat(
-                [proprio_stacked, future_errors, future_wrench, controller_context], dim=-1
+                [proprio_stacked, future_errors, future_wrench, *gain_in_policy], dim=-1
             )
             critic_obs = torch.cat(
                 [proprio_stacked, future_errors, future_wrench, controller_context, privileged], dim=-1
             )
         else:
             future_wrench = None
-            policy_obs = torch.cat([proprio_stacked, future_errors, controller_context], dim=-1)
+            policy_obs = torch.cat([proprio_stacked, future_errors, *gain_in_policy], dim=-1)
             critic_obs = torch.cat([proprio_stacked, future_errors, controller_context, privileged], dim=-1)
 
         # Fail loud if a NaN/Inf reaches the policy/critic input. If this fires, the
@@ -1067,6 +1044,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             "controller_context": controller_context,
             "privileged": privileged,
         }
+        if self.include_joint_velocities:
+            parts["joint_vel"] = self.joint_vel[:, 0:7]
         if future_wrench is not None:
             parts["future_wrench"] = future_wrench
         if self.virtual_contact_enabled:
@@ -1091,6 +1070,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         self._compute_intermediate_values()
+        if self.virtual_contact_enabled:
+            # Forge filters one incoming-joint wrench sample per control step.
+            # Contact itself is updated at the physics rate, but its synthetic
+            # sensor signal must not run the EMA `decimation` times too fast.
+            self._update_virtual_contact_sensor()
         self._update_command()
         pos_error, rot_error = self._command_errors()
         raw_pos_error_norm = torch.linalg.norm(pos_error, dim=-1)
@@ -1118,34 +1102,16 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         ee_vel_norm = torch.linalg.norm(self.fingertip_midpoint_linvel, dim=-1) + 0.1 * torch.linalg.norm(
             self.fingertip_midpoint_angvel, dim=-1
         )
-        # These finite differences shrink when the policy period is shortened.
-        # Normalize them back to the native-reference (15 Hz) interval so the
-        # established smoothness coefficients retain their physical-time meaning.
-        rate_normalization = float(self.policy_steps_per_reference)
-        ee_accel_norm = rate_normalization * (
-            torch.linalg.norm(
-                self.fingertip_midpoint_linvel
-                - self.prev_fingertip_midpoint_linvel,
-                dim=-1,
-            )
-            + 0.1
-            * torch.linalg.norm(
-                self.fingertip_midpoint_angvel
-                - self.prev_fingertip_midpoint_angvel,
-                dim=-1,
-            )
-        )
+        ee_accel_norm = torch.linalg.norm(
+            self.fingertip_midpoint_linvel - self.prev_fingertip_midpoint_linvel, dim=-1
+        ) + 0.1 * torch.linalg.norm(self.fingertip_midpoint_angvel - self.prev_fingertip_midpoint_angvel, dim=-1)
         self.prev_fingertip_midpoint_linvel = self.fingertip_midpoint_linvel.clone()
         self.prev_fingertip_midpoint_angvel = self.fingertip_midpoint_angvel.clone()
         # Cartesian delta-pose action rate uses only the first 6 dims so it is
         # unaffected by the optional gain dims, which get their own penalty.
-        action_rate = rate_normalization * torch.linalg.norm(
-            self.actions[:, 0:6] - self.prev_actions[:, 0:6], dim=-1
-        )
+        action_rate = torch.linalg.norm(self.actions[:, 0:6] - self.prev_actions[:, 0:6], dim=-1)
         if self.cfg.ctrl.control_gains:
-            gain_rate = rate_normalization * torch.linalg.norm(
-                self.actions[:, 6:12] - self.prev_actions[:, 6:12], dim=-1
-            )
+            gain_rate = torch.linalg.norm(self.actions[:, 6:12] - self.prev_actions[:, 6:12], dim=-1)
         else:
             gain_rate = torch.zeros(self.num_envs, device=self.device)
         joint_vel_norm = torch.linalg.norm(self.joint_vel[:, 0:7], dim=-1)
@@ -1161,33 +1127,27 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         if self.virtual_contact_enabled:
             goal_force = self.target_wrench[:, :3]
             goal_torque = self.target_wrench[:, 3:]
-            measured_wrench = descale_virtual_sensor_wrench(
-                self.force_sensor_smooth,
-                self.cfg.tracking.virtual_contact_force_scale,
-                self.cfg.tracking.virtual_contact_torque_scale,
-            )
-            measured_force = measured_wrench[:, :3]
-            measured_torque = measured_wrench[:, 3:]
+            measured_force = self.force_sensor_smooth[:, :3]
+            measured_torque = self.force_sensor_smooth[:, 3:]
             goal_force_mag = torch.linalg.norm(goal_force, dim=-1)
             actual_force_mag = torch.linalg.norm(self.virtual_contact_force, dim=-1)
             goal_torque_mag = torch.linalg.norm(goal_torque, dim=-1)
             actual_torque_mag = torch.linalg.norm(self.virtual_contact_torque, dim=-1)
-            # Match the complete force vector in the dataset frame in both
-            # force-only and full-wrench modes.
+            # Match complete vectors in the configured dataset frame. Force and
+            # torque use separate temperatures because they have different units.
             force_error = torch.linalg.norm(measured_force - goal_force, dim=-1)
+            torque_error = torch.linalg.norm(measured_torque - goal_torque, dim=-1)
             force_track = (
                 torch.exp(-force_error / max(float(self.cfg.reward.force_error_temp), 1.0e-6))
                 * self.cfg.reward.force_error_scale
             )
-            if self.wrench_dim == 6:
-                torque_error = torch.linalg.norm(measured_torque - goal_torque, dim=-1)
-                torque_track = (
-                    torch.exp(
-                        -torque_error
-                        / max(float(self.cfg.reward.torque_error_temp), 1.0e-6)
-                    )
-                    * self.cfg.reward.torque_error_scale
+            torque_track = (
+                torch.exp(
+                    -torque_error
+                    / max(float(self.cfg.reward.torque_error_temp), 1.0e-6)
                 )
+                * self.cfg.reward.torque_error_scale
+            )
             force_over = (
                 torch.relu(
                     actual_force_mag
@@ -1216,58 +1176,19 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 )
 
             self.extras["force_error"] = force_error.mean()
+            self.extras["torque_error"] = torque_error.mean()
             self.extras["force_goal_mean"] = goal_force_mag.mean()
             self.extras["force_measured_mean"] = actual_force_mag.mean()
-            if self.wrench_dim == 6:
-                self.extras["torque_error"] = torque_error.mean()
-                self.extras["torque_goal_mean"] = goal_torque_mag.mean()
-                self.extras["torque_measured_mean"] = actual_torque_mag.mean()
+            self.extras["torque_goal_mean"] = goal_torque_mag.mean()
+            self.extras["torque_measured_mean"] = actual_torque_mag.mean()
             self.extras["force_over_goal_fraction"] = (
                 actual_force_mag > goal_force_mag + float(self.cfg.reward.force_over_margin)
             ).float().mean()
             self.extras["normal_stiffness_mean"] = normal_gain.mean()
-            if bool(self.cfg.tracking.virtual_contact_randomize_parameters):
-                self.extras["contact_power_exponent_mean"] = (
-                    self.virtual_contact_power_exponent.mean()
-                )
-                self.extras["contact_reference_penetration_mean_mm"] = (
-                    1000.0 * self.virtual_contact_reference_penetration.mean()
-                )
-                self.extras["contact_dissipation_mean"] = (
-                    self.virtual_contact_dissipation.mean()
-                )
-                self.extras["contact_surface_offset_mean_mm"] = (
-                    1000.0 * self.virtual_contact_surface_offset.mean()
-                )
-                self.extras["contact_normal_tilt_mean_deg"] = (
-                    (180.0 / math.pi) * self.virtual_contact_normal_tilt.mean()
-                )
-                if self.wrench_dim == 6:
-                    self.extras["contact_rotational_power_exponent_mean"] = (
-                        self.virtual_contact_rotational_power_exponent.mean()
-                    )
-                    self.extras["contact_rotational_penetration_mean"] = (
-                        self.virtual_contact_rotational_reference_penetration.mean()
-                    )
-                    self.extras["contact_rotational_damping_mean"] = (
-                        self.virtual_contact_rotational_damping.mean()
-                    )
-            elif bool(self.cfg.tracking.virtual_contact_randomize_surface_offset):
-                self.extras["contact_surface_offset_mean_mm"] = (
-                    1000.0 * self.virtual_contact_surface_offset.mean()
-                )
 
         rewards = {
             "pos_track": torch.exp(-pos_error_norm / self.cfg.reward.pos_error_temp) * self.cfg.reward.pos_error_scale,
             "rot_track": torch.exp(-rot_error_norm / self.cfg.reward.rot_error_temp) * self.cfg.reward.rot_error_scale,
-            "fine_pos_track": (
-                torch.exp(-pos_error_norm / self.cfg.reward.fine_pos_error_temp)
-                * self.cfg.reward.fine_pos_error_scale
-            ),
-            "fine_rot_track": (
-                torch.exp(-rot_error_norm / self.cfg.reward.fine_rot_error_temp)
-                * self.cfg.reward.fine_rot_error_scale
-            ),
             "ee_vel": ee_vel_norm * self.cfg.reward.ee_vel_scale,
             "ee_accel": ee_accel_norm * self.cfg.reward.ee_accel_scale,
             "action_rate": action_rate * self.cfg.reward.action_rate_scale,
@@ -1293,55 +1214,33 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 successes,
                 force_error < float(self.cfg.reward.force_success_threshold),
             )
-            if self.wrench_dim == 6:
-                successes = torch.logical_and(
-                    successes,
-                    torque_error < float(self.cfg.reward.torque_success_threshold),
-                )
-        native_metric_mask = is_reference_boundary(
-            self.episode_length_buf, self.policy_steps_per_reference
-        )
-        # RobustTrack episodes have no early termination, so all environments are
-        # synchronized and this scalar is exactly zero or one. Evaluation code can
-        # use it to ignore high-rate intermediate reward steps.
-        native_metric_sample = native_metric_mask.float().mean()
-        self.extras["native_reference_sample"] = native_metric_sample
-        if bool(native_metric_mask[0]):
-            self.extras["curr_successes"] = successes.float().mean()
-            # Start a fresh window once the previous one filled a full native
-            # reference episode. Only native-boundary samples enter the window.
-            if self._track_err_count >= self._track_err_window:
-                self._track_err_pos_sum.zero_()
-                self._track_err_rot_sum.zero_()
-                self._track_err_count = 0
-                for buf in (
-                    self._track_free_pos_sum,
-                    self._track_free_rot_sum,
-                    self._track_free_succ_sum,
-                    self._track_free_count,
-                    self._track_contact_pos_sum,
-                    self._track_contact_rot_sum,
-                    self._track_contact_succ_sum,
-                    self._track_contact_count,
-                ):
-                    buf.zero_()
-            self._track_err_pos_sum += pos_error_norm.mean()
-            self._track_err_rot_sum += rot_error_norm.mean()
-            self._track_err_count += 1
-            self.extras["tracking_pos_error"] = (
-                self._track_err_pos_sum / self._track_err_count
+            successes = torch.logical_and(
+                successes,
+                torque_error < float(self.cfg.reward.torque_success_threshold),
             )
-            self.extras["tracking_rot_error"] = (
-                self._track_err_rot_sum / self._track_err_count
-            )
-            if self.enable_force:
-                self._accumulate_contact_split_metrics(
-                    pos_error_norm, rot_error_norm, successes
-                )
-            self._accumulate_perstep_error(
-                pos_error_norm.detach(), rot_error_norm.detach()
-            )
-            self._accumulate_gain_stats()
+        self.extras["curr_successes"] = successes.float().mean()
+        # Start a fresh window once the previous one filled a full episode length.
+        # Reset happens at the top so the window mean is *complete* on the final
+        # episode step (the phase the rl_games observer actually logs).
+        if self._track_err_count >= self._track_err_window:
+            self._track_err_pos_sum.zero_()
+            self._track_err_rot_sum.zero_()
+            self._track_err_count = 0
+            for buf in (
+                self._track_free_pos_sum, self._track_free_rot_sum, self._track_free_succ_sum,
+                self._track_free_count, self._track_contact_pos_sum, self._track_contact_rot_sum,
+                self._track_contact_succ_sum, self._track_contact_count,
+            ):
+                buf.zero_()
+        self._track_err_pos_sum += pos_error_norm.mean()
+        self._track_err_rot_sum += rot_error_norm.mean()
+        self._track_err_count += 1
+        self.extras["tracking_pos_error"] = self._track_err_pos_sum / self._track_err_count
+        self.extras["tracking_rot_error"] = self._track_err_rot_sum / self._track_err_count
+        if self.enable_force:
+            self._accumulate_contact_split_metrics(pos_error_norm, rot_error_norm, successes)
+        self._accumulate_perstep_error(pos_error_norm.detach(), rot_error_norm.detach())
+        self._accumulate_gain_stats()
         self._vis_pos_error_norm = pos_error_norm.detach()
         self._vis_rot_error_norm = rot_error_norm.detach()
         return reward
@@ -1376,6 +1275,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.prev_fingertip_midpoint_linvel[env_ids] = self.fingertip_midpoint_linvel[env_ids]
         self.prev_fingertip_midpoint_angvel[env_ids] = self.fingertip_midpoint_angvel[env_ids]
         self._randomize_dynamics(env_ids)
+        self._resample_action_latency(env_ids)
         self._randomize_controller(env_ids)
         sample_start = time.perf_counter()
         sample_stats = self._sample_reachable_start_and_trajectory(env_ids)
@@ -1657,7 +1557,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         ) == "random":
             chunk_length = int(getattr(self.cfg.tracking, "dataset_chunk_length", 0))
             if chunk_length > 0:
-                reach_duration = max(chunk_length - 1, 0) * self.reference_dt
+                reach_duration = max(chunk_length - 1, 0) * self.step_dt
         waypoint_times = torch.linspace(0.0, reach_duration, num_wp, device=self.device)
 
         bad_envs = env_ids.clone()
@@ -1791,7 +1691,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                         start_arm_q[bad_envs] = cand_start_q[fb]
                 break
 
-        # Discretize the accepted trajectory onto the native reference grid.
+        # Discretize the (now-final) analytic trajectory onto the per-step grid.
         self._build_trajectory_buffer(env_ids)
 
         # Place every reset env at its reachable start configuration. Dataset
@@ -1804,7 +1704,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             prev_idx = (ds_start - 1).clamp(min=0)
             recorded_prev_q = self._ds_joint_pos[ds_idx, prev_idx]
             start_arm_q[env_ids] = recorded_q
-            start_arm_vel = (recorded_q - recorded_prev_q) / self.reference_dt
+            start_arm_vel = (recorded_q - recorded_prev_q) / self.step_dt
         self.joint_pos[env_ids, 0:7] = start_arm_q[env_ids]
         # Anchor the OSC nullspace posture. "start" uses each env's own cuRobo start
         # config (per-env); "reset_joints"/"default_dof_pos" use a fixed posture so the
@@ -2005,7 +1905,6 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
         storage_length = max(int(en) - int(s) for s, en in zip(starts, ends))
         pos_list, quat_list, phase_list, wr_list, joint_list, raw_lengths = [], [], [], [], [], []
-        torque_norm_samples = []
         for e in range(len(starts)):
             if tcfg.dataset_only_success and success is not None and float(success[e]) < 0.5:
                 continue
@@ -2060,8 +1959,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                         "replay_raw_wrench requires all six force/torque columns, "
                         f"got {tuple(force.shape)}"
                     )
-                seg_force = force[s:en, : self.wrench_dim].to(self.device)
-                if self.wrench_dim == 6 and seg_force.shape[1] == 3:
+                seg_force = force[s:en, :6].to(self.device)
+                if seg_force.shape[1] == 3:
                     seg_force = torch.cat(
                         (seg_force, torch.zeros_like(seg_force)),
                         dim=-1,
@@ -2070,8 +1969,6 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 if bias_samples > 0:
                     bias_count = min(bias_samples, raw_length)
                     seg_force = seg_force - seg_force[:bias_count].mean(dim=0, keepdim=True)
-                if seg_force.shape[1] == 6:
-                    torque_norm_samples.append(seg_force[:, 3:].norm(dim=-1))
                 if chunk_length > 0:
                     wr = seg_force
                     if raw_length < storage_length:
@@ -2096,15 +1993,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self._ds_pos = torch.stack(pos_list)  # (T, L, 3)
         self._ds_quat = torch.stack(quat_list)  # (T, L, 4)
         self._ds_phase = torch.stack(phase_list)  # (T, L), constant through padded tails
-        self._ds_wrench = torch.stack(wr_list) if wr_list else None  # (T, L, wrench_dim) or None
-        torque_clip_percentile = float(
-            getattr(tcfg, "disturbance_torque_clip_percentile", 100.0)
-        )
-        if torque_norm_samples and torque_clip_percentile < 100.0:
-            self._disturbance_torque_clip_norm = torch.quantile(
-                torch.cat(torque_norm_samples),
-                torque_clip_percentile / 100.0,
-            ).item()
+        self._ds_wrench = torch.stack(wr_list) if wr_list else None  # (T, L, 6) or None
         self._ds_joint_pos = torch.stack(joint_list) if joint_list else None  # (T, L, 7)
         self._ds_lengths = (
             torch.tensor(raw_lengths, dtype=torch.long, device=self.device)
@@ -2119,15 +2008,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         force_str = ""
         if self._ds_wrench is not None:
             force_max = self._ds_wrench[..., :3].norm(dim=-1).max().item()
-            force_str = f" | force |.| max {force_max:.2f} N"
-            if self.wrench_dim == 6:
-                torque_max = self._ds_wrench[..., 3:].norm(dim=-1).max().item()
-                force_str += f" | torque |.| max {torque_max:.2f} Nm"
-                if math.isfinite(self._disturbance_torque_clip_norm):
-                    force_str += (
-                        f" | applied torque p{torque_clip_percentile:g} clip "
-                        f"{self._disturbance_torque_clip_norm:.3f} Nm"
-                    )
+            torque_max = self._ds_wrench[..., 3:].norm(dim=-1).max().item()
+            force_str = (
+                f" | force |.| max {force_max:.2f} N"
+                f" | torque |.| max {torque_max:.2f} Nm"
+            )
         warp_str = ""
         if warp_prob > 0.0:
             warp_str = (
@@ -2254,7 +2139,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         """Interpolate the selected demonstration trajectories at `elapsed_time`.
 
         `params["ds_idx"]` is (m,) trajectory indices; `elapsed_time` is (m, 1).
-        The stored sequences already live on the native reference grid, so time maps to a
+        The stored sequences already live on the per-step grid, so time maps to a
         fractional step index and is linearly (pos) / slerp (quat) interpolated.
         """
         idx = params["ds_idx"]
@@ -2265,7 +2150,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 torch.full_like(start, chunk_length - 1),
                 self._ds_lengths[idx] - start - 1,
             ).clamp(min=0)
-            rel_fidx = elapsed_time.squeeze(-1).div(self.reference_dt).clamp(min=0.0)
+            rel_fidx = elapsed_time.squeeze(-1).div(self.step_dt).clamp(min=0.0)
             rel_fidx = torch.minimum(rel_fidx, effective_last.float())
             fidx = start.float() + rel_fidx
             i0 = fidx.floor().long()
@@ -2273,7 +2158,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             traj_phase = rel_fidx / effective_last.float().clamp(min=1.0)
         else:
             length = self._ds_pos.shape[1]
-            fidx = (elapsed_time.squeeze(-1) / self.reference_dt).clamp(0.0, length - 1)
+            fidx = (elapsed_time.squeeze(-1) / self.step_dt).clamp(0.0, length - 1)
             i0 = fidx.floor().long()
             i1 = (i0 + 1).clamp(max=length - 1)
             phase_frac = fidx - i0.float()
@@ -2307,23 +2192,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             # components. Virtual contact overwrites this at runtime with its
             # contact-generated wrench, but retaining the complete target here
             # keeps reset/debug traces consistent.
-            self.traj_applied_wrench_buf[env_ids, :, : self.wrench_dim] = wr
-        if self.force_mode in ("replay_disturbance", "replay_raw_wrench"):
-            if self.wrench_dim == 6 and math.isfinite(
-                self._disturbance_torque_clip_norm
-            ):
-                torque = self.traj_applied_wrench_buf[env_ids, :, 3:]
-                torque_norm = torque.norm(dim=-1, keepdim=True)
-                torque *= (
-                    self._disturbance_torque_clip_norm
-                    / torque_norm.clamp_min(1.0e-12)
-                ).clamp(max=1.0)
-            self.traj_applied_wrench_buf[env_ids, :, :3] *= float(
-                self.cfg.tracking.disturbance_force_scale
-            )
-            self.traj_applied_wrench_buf[env_ids, :, 3:] *= float(
-                self.cfg.tracking.disturbance_torque_scale
-            )
+            self.traj_applied_wrench_buf[env_ids] = wr
         threshold = float(self.cfg.tracking.dataset_contact_force_threshold)
         self.traj_contact_buf[env_ids] = wr[..., :3].norm(dim=-1) > threshold
 
@@ -2343,65 +2212,35 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         return source_idx, phase
 
     def _seed_dataset_proprio_history(self, env_ids: torch.Tensor):
-        """Prefill reset history on the policy-rate grid before each chunk.
+        """Prefill reset history from the samples immediately before each chunk.
 
         `_get_observations` will roll this buffer once and append the actual reset
-        state at chunk time `t`. Fractional native-sample offsets preserve the
-        original physical history span while adding high-rate intermediate frames.
-        Dataset actions used Forge's different representation, so action-feedback
-        slots remain zero rather than being mislabeled.
+        state at chunk time `t`. Loading `t-H ... t-1` here therefore makes the
+        first policy observation contain `t-H+1 ... t`, oldest to newest. Dataset
+        actions were produced by Forge's different action representation, so the
+        action-feedback slots are deliberately zero rather than mislabeled.
         """
         ds_idx = self.traj_ds_idx[env_ids]
         ds_start = self.traj_ds_start[env_ids]
-        offsets = history_seed_offsets(
-            self.obs_history_length, self.policy_steps_per_reference
-        ).to(self.device)
-        source_fidx = ds_start.float().unsqueeze(1) + offsets.unsqueeze(0)
-        source_fidx = source_fidx.clamp(min=0.0)
-        source_fidx = torch.minimum(
-            source_fidx, (self._ds_lengths[ds_idx] - 1).float().unsqueeze(1)
+        offsets = torch.arange(
+            -self.obs_history_length, 0, device=self.device, dtype=torch.long
+        )
+        source_idx = (ds_start.unsqueeze(1) + offsets.unsqueeze(0)).clamp(min=0)
+        source_idx = torch.minimum(
+            source_idx, (self._ds_lengths[ds_idx] - 1).unsqueeze(1)
         )
         batch_idx = ds_idx.unsqueeze(1)
-
-        def interpolate(buffer: torch.Tensor, fidx: torch.Tensor) -> torch.Tensor:
-            i0 = fidx.floor().long()
-            i1 = (i0 + 1).clamp(max=buffer.shape[1] - 1)
-            fraction = (fidx - i0.float()).unsqueeze(-1)
-            value0 = buffer[batch_idx, i0]
-            value1 = buffer[batch_idx, i1]
-            return value0 * (1.0 - fraction) + value1 * fraction
-
-        pos = interpolate(self._ds_pos, source_fidx)
-        quat_i0 = source_fidx.floor().long()
-        quat_i1 = (quat_i0 + 1).clamp(max=self._ds_quat.shape[1] - 1)
-        quat_fraction = source_fidx - quat_i0.float()
-        quat_shape = (len(env_ids), self.obs_history_length, 4)
-        quat = self._quat_slerp(
-            self._ds_quat[batch_idx, quat_i0].reshape(-1, 4),
-            self._ds_quat[batch_idx, quat_i1].reshape(-1, 4),
-            quat_fraction.reshape(-1),
-        ).view(quat_shape)
+        pos = self._ds_pos[batch_idx, source_idx]
+        quat = self._ds_quat[batch_idx, source_idx]
         action = torch.zeros(
             (len(env_ids), self.obs_history_length, self.action_dim), device=self.device
         )
         history_parts = [pos, quat]
         if self.include_joint_angles:
-            history_parts.append(interpolate(self._ds_joint_pos, source_fidx))
-        if self.include_joint_velocities:
-            previous_fidx = (
-                source_fidx - 1.0 / float(self.policy_steps_per_reference)
-            ).clamp(min=0.0)
-            joint_pos = interpolate(self._ds_joint_pos, source_fidx)
-            previous_joint_pos = interpolate(self._ds_joint_pos, previous_fidx)
-            history_parts.append(
-                (joint_pos - previous_joint_pos) / self.step_dt
-            )
+            history_parts.append(self._ds_joint_pos[batch_idx, source_idx])
         if self.virtual_contact_enabled:
             history_parts.append(
-                torch.zeros(
-                    (len(env_ids), self.obs_history_length, self.force_feedback_dim),
-                    device=self.device,
-                )
+                torch.zeros((len(env_ids), self.obs_history_length, 3), device=self.device)
             )
         history_parts.append(action)
         self.proprio_history[env_ids] = torch.cat(history_parts, dim=-1)
@@ -2592,13 +2431,15 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         return self._eval_pose_from_params(params, elapsed_time)
 
     def _build_trajectory_buffer(self, env_ids: torch.Tensor):
-        """Sample the analytic trajectory onto the native grid for `env_ids`.
+        """Sample the analytic trajectory onto the fixed per-step grid for `env_ids`.
 
-        Grid times are `arange(self._traj_len) * reference_dt`. Async runtime
-        interpolates the active command while lookahead reads native knots.
+        The grid times are `arange(self._traj_len) * step_dt`, i.e. one waypoint
+        per control step, extended past the episode so the furthest lookahead is
+        always in-range. After this call the runtime command and lookahead read
+        straight out of `traj_pos_buf`/`traj_quat_buf` by integer step index.
         """
         if self.cfg.tracking.mode == "dataset":
-            # Sequences are already prepared on the native grid. Apply the
+            # Sequences are already prepared on the per-step grid. Apply the
             # accepted candidate's warp in one batch so runtime lookup stays cheap.
             params = {
                 key: getattr(self, buf_name)[env_ids] for key, buf_name in self._DS_TRAJ_PARAM_BUFFERS.items()
@@ -2648,7 +2489,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.traj_quat_buf[env_ids] = quat.view(len(env_ids), self._traj_len, 4)
             return
         for i in range(self._traj_len):
-            elapsed_time = torch.full((self.num_envs, 1), i * self.reference_dt, device=self.device)
+            elapsed_time = torch.full((self.num_envs, 1), i * self.step_dt, device=self.device)
             pos_i, quat_i = self._command_pose_at(elapsed_time)
             self.traj_pos_buf[env_ids, i] = pos_i[env_ids]
             self.traj_quat_buf[env_ids, i] = quat_i[env_ids]
@@ -2662,66 +2503,6 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         """Gather the target wrench in its configured dataset convention."""
         idx = idx.clamp(0, self._traj_len - 1)
         return self.traj_wrench_buf[self._env_arange, idx]
-
-    def _policy_step_to_reference_index(
-        self, policy_step: torch.Tensor
-    ) -> torch.Tensor:
-        """Map policy steps to native reference samples using zero-order hold."""
-        return policy_step_to_reference_index(
-            policy_step, self.policy_steps_per_reference
-        )
-
-    def _reference_coordinates(
-        self,
-        policy_step: torch.Tensor,
-        completed_physics_substeps: int = 0,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return native reference endpoints and interpolation phase.
-
-        ``policy_step`` is the environment counter at the start of a policy
-        action. ``completed_physics_substeps`` selects a point inside that
-        action. At a policy boundary it is zero; inside ``_apply_action`` it is
-        1..decimation so virtual contact follows the native segment at 120 Hz.
-        """
-        i0, i1, phase = reference_coordinates(
-            policy_step,
-            policy_decimation=int(self.cfg.decimation),
-            reference_decimation=self.reference_decimation,
-            completed_physics_substeps=completed_physics_substeps,
-        )
-        i0 = i0.clamp(0, self._traj_len - 1)
-        i1 = i1.clamp(0, self._traj_len - 1)
-        return i0, i1, phase
-
-    def _traj_pose_at_policy_step(
-        self,
-        policy_step: torch.Tensor,
-        completed_physics_substeps: int = 0,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Linearly interpolate position and slerp rotation on the native grid."""
-        i0, i1, phase = self._reference_coordinates(
-            policy_step, completed_physics_substeps
-        )
-        pos0, quat0 = self._traj_pose_at_index(i0)
-        pos1, quat1 = self._traj_pose_at_index(i1)
-        blend = phase.unsqueeze(-1)
-        pos = pos0 * (1.0 - blend) + pos1 * blend
-        quat = self._quat_slerp(quat0, quat1, phase)
-        return pos, quat
-
-    def _traj_wrench_at_policy_step(
-        self,
-        policy_step: torch.Tensor,
-        completed_physics_substeps: int = 0,
-    ) -> torch.Tensor:
-        """Linearly interpolate the virtual-contact wrench goal."""
-        i0, i1, phase = self._reference_coordinates(
-            policy_step, completed_physics_substeps
-        )
-        wrench0 = self._traj_wrench_at_index(i0)
-        wrench1 = self._traj_wrench_at_index(i1)
-        blend = phase.unsqueeze(-1)
-        return wrench0 * (1.0 - blend) + wrench1 * blend
 
     def _smooth_osc(self, tau: torch.Tensor, num_components: int = 3) -> torch.Tensor:
         """A smooth per-step signal in [-1, 1] built from a few random sinusoids.
@@ -2779,7 +2560,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
             # Duration (steps), capped so the band fits within its own segment.
             duration_s = dur_lo + (dur_hi - dur_lo) * torch.rand((n, 1), device=device)
-            duration_steps = (duration_s / self.reference_dt).round().clamp(min=1.0)
+            duration_steps = (duration_s / self.step_dt).round().clamp(min=1.0)
             duration_steps = torch.minimum(duration_steps, seg_len.clamp(min=1.0))  # (n, 1)
 
             # Random onset inside segment b: [b * seg_len, (b + 1) * seg_len - duration].
@@ -2789,7 +2570,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             active = (steps >= onset) & (steps < onset + duration_steps) & use_b  # (n, L)
 
             # Smooth time-varying profile within this band (time measured from onset).
-            tau = (steps - onset).float() * self.reference_dt  # (n, L)
+            tau = (steps - onset).float() * self.step_dt  # (n, L)
             mag_lo, mag_hi = tcfg.force_mag_range
             peak = (mag_lo + (mag_hi - mag_lo) * torch.rand((n, 1), device=device)).clamp(max=20.0)
             mag = peak * (0.75 + 0.25 * self._smooth_osc(tau))  # (n, L)
@@ -2815,107 +2596,22 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             contact = contact & keep
 
         self.traj_wrench_buf[env_ids] = wrench
-        self.traj_applied_wrench_buf[env_ids] = 0.0
-        self.traj_applied_wrench_buf[env_ids, :, : self.wrench_dim] = wrench
+        self.traj_applied_wrench_buf[env_ids] = wrench
         self.traj_contact_buf[env_ids] = contact
 
-    def _sample_virtual_contact_range(
-        self,
-        values,
-        count: int,
-        *,
-        log_uniform: bool = False,
-    ) -> torch.Tensor:
-        """Sample one scalar contact parameter for each resetting environment."""
-        low, high = (float(value) for value in values)
-        unit = torch.rand((count, 1), device=self.device)
-        if log_uniform:
-            return torch.exp(math.log(low) + (math.log(high) - math.log(low)) * unit)
-        return low + (high - low) * unit
-
-    def _sample_virtual_contact_parameters(self, env_ids: torch.Tensor):
-        """Sample or restore episode-constant virtual-contact parameters."""
-        count = len(env_ids)
-        if count == 0:
-            return
-        tcfg = self.cfg.tracking
-        if bool(tcfg.virtual_contact_randomize_parameters):
-            self.virtual_contact_power_exponent[env_ids] = self._sample_virtual_contact_range(
-                tcfg.power_law_exponent_range, count
-            )
-            self.virtual_contact_reference_penetration[env_ids] = (
-                self._sample_virtual_contact_range(
-                    tcfg.power_law_reference_penetration_range,
-                    count,
-                    log_uniform=True,
-                )
-            )
-            self.virtual_contact_dissipation[env_ids] = self._sample_virtual_contact_range(
-                tcfg.hunt_crossley_dissipation_range, count
-            )
-            self.virtual_contact_normal_tilt[env_ids] = self._sample_virtual_contact_range(
-                tcfg.virtual_contact_normal_tilt_range, count
-            )
-            self.virtual_contact_rotational_power_exponent[env_ids] = (
-                self._sample_virtual_contact_range(
-                    tcfg.virtual_contact_rotational_power_exponent_range, count
-                )
-            )
-            self.virtual_contact_rotational_reference_penetration[env_ids] = (
-                self._sample_virtual_contact_range(
-                    tcfg.virtual_contact_rotational_reference_penetration_range,
-                    count,
-                    log_uniform=True,
-                )
-            )
-            self.virtual_contact_rotational_damping[env_ids] = (
-                self._sample_virtual_contact_range(
-                    tcfg.virtual_contact_rotational_damping_range, count
-                )
-            )
-        else:
-            self.virtual_contact_power_exponent[env_ids] = float(tcfg.power_law_exponent)
-            self.virtual_contact_reference_penetration[env_ids] = float(
-                tcfg.power_law_reference_penetration
-            )
-            self.virtual_contact_dissipation[env_ids] = float(
-                tcfg.hunt_crossley_dissipation
-            )
-            self.virtual_contact_normal_tilt[env_ids] = 0.0
-            self.virtual_contact_rotational_power_exponent[env_ids] = float(
-                tcfg.virtual_contact_rotational_power_exponent
-            )
-            self.virtual_contact_rotational_reference_penetration[env_ids] = float(
-                tcfg.virtual_contact_rotational_reference_penetration
-            )
-            self.virtual_contact_rotational_damping[env_ids] = float(
-                tcfg.virtual_contact_rotational_damping
-            )
-        if bool(
-            tcfg.virtual_contact_randomize_parameters
-            or tcfg.virtual_contact_randomize_surface_offset
-        ):
-            self.virtual_contact_surface_offset[env_ids] = self._sample_virtual_contact_range(
-                tcfg.virtual_contact_surface_offset_range, count
-            )
-        else:
-            self.virtual_contact_surface_offset[env_ids] = 0.0
-
     def _sample_virtual_contact_surface(self, env_ids: torch.Tensor):
-        """Construct a randomized virtual plane at every reference timestep.
+        """Construct a deterministic virtual plane at every reference timestep.
 
         A centered moving average stabilizes the demonstrated force direction.
         For the selected elastic coefficient k_p and exponent p, each plane is
         placed (|F_goal| / k_p) ** (1/p) above the reference EE pose along that
-        direction. The nominal plane therefore reproduces the target magnitude;
-        the optional episode-level offset and tilt are applied afterward so the
-        policy must correct the resulting hidden geometry error.
+        direction. At zero relative penetration rate, the reference pose therefore
+        produces the target magnitude.
         """
         n_envs = len(env_ids)
         if n_envs == 0:
             return
         tcfg = self.cfg.tracking
-        self._sample_virtual_contact_parameters(env_ids)
         wrench = self.traj_wrench_buf[env_ids]
         if self.dataset_wrench_convention == "sensor_child_joint_reaction":
             sensor_quat_in_tool = self.force_sensor_quat_in_tool[env_ids].unsqueeze(1).expand(
@@ -2936,14 +2632,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         scaled_external_wrench_world[..., 3:] *= reference_torque_scale
         scaled_force_world = scaled_external_wrench_world[..., :3]
         if str(tcfg.contact_model) == "power_law":
-            contact_exponent = self.virtual_contact_power_exponent[env_ids]
-            contact_coefficient = power_law_coefficient_from_reference(
-                reference_force=float(tcfg.power_law_reference_force),
-                reference_penetration=self.virtual_contact_reference_penetration[
-                    env_ids
-                ],
-                exponent=contact_exponent,
-            )
+            contact_coefficient = float(tcfg.power_law_coefficient)
+            contact_exponent = float(tcfg.power_law_exponent)
         elif str(tcfg.contact_model) == "exponential":
             reference_force = float(tcfg.power_law_reference_force)
             reference_penetration = float(tcfg.power_law_reference_penetration)
@@ -2973,40 +2663,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 direction_force_threshold=float(tcfg.virtual_contact_goal_threshold),
                 power_law_exponent=contact_exponent,
             )
-        if bool(
-            tcfg.virtual_contact_randomize_parameters
-            or tcfg.virtual_contact_randomize_surface_offset
-        ):
-            base_normal = surface_normal[:, 0]
-            random_axis = torch.randn_like(base_normal)
-            random_axis = random_axis - (
-                random_axis * base_normal
-            ).sum(dim=-1, keepdim=True) * base_normal
-            axis_norm = torch.linalg.norm(random_axis, dim=-1, keepdim=True)
-            fallback_axis, _ = self._orthonormal_basis(base_normal)
-            random_axis = torch.where(
-                axis_norm > 1.0e-6,
-                random_axis / axis_norm.clamp_min(1.0e-6),
-                fallback_axis,
-            )
-            tilt_rotation_vector = (
-                random_axis * self.virtual_contact_normal_tilt[env_ids]
-            )
-            surface_point, surface_normal = perturb_reference_plane_trajectory(
-                surface_point,
-                surface_normal,
-                normal_offset=self.virtual_contact_surface_offset[env_ids],
-                tilt_rotation_vector=tilt_rotation_vector,
-            )
         # Plane placement uses the converted/scaled world external force, while
         # observations and metrics retain the original recorded sensor reaction.
-        stiffness = torch.as_tensor(
-            contact_coefficient, dtype=surface_point.dtype, device=self.device
-        )
-        if stiffness.ndim == 0:
-            stiffness = stiffness.expand(n_envs, 1).clone()
-        else:
-            stiffness = stiffness.reshape(n_envs, 1)
+        stiffness = torch.full((n_envs, 1), contact_coefficient, device=self.device)
         damping_ratio = float(tcfg.virtual_contact_damping_ratio)
         effective_mass = max(float(tcfg.virtual_contact_effective_mass), 1.0e-6)
         if str(tcfg.contact_model) == "linear":
@@ -3021,51 +2680,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.traj_surface_point_buf[env_ids] = surface_point
         self.traj_surface_normal_buf[env_ids] = surface_normal
         self.traj_surface_velocity_buf[env_ids] = finite_difference_surface_velocity(
-            surface_point, timestep=self.reference_dt
-        )
-        target_torque_world = (
-            scaled_external_wrench_world[..., 3:]
-            if self.wrench_dim == 6
-            else torch.zeros_like(scaled_force_world)
-        )
-        rotational_power_exponent = (
-            self.virtual_contact_rotational_power_exponent[env_ids]
-            if tcfg.virtual_contact_torque_model == "orientation_power_law"
-            else 1.0
-        )
-        rotational_coefficient = (
-            power_law_coefficient_from_reference(
-                reference_force=float(
-                    tcfg.virtual_contact_rotational_reference_torque
-                ),
-                reference_penetration=self.virtual_contact_rotational_reference_penetration[
-                    env_ids
-                ],
-                exponent=rotational_power_exponent,
-            )
-            if tcfg.virtual_contact_torque_model == "orientation_power_law"
-            else float(tcfg.virtual_contact_rotational_stiffness)
-        )
-        if isinstance(rotational_coefficient, torch.Tensor):
-            self.virtual_contact_rotational_coefficient[env_ids] = rotational_coefficient
-        else:
-            self.virtual_contact_rotational_coefficient[env_ids] = float(
-                rotational_coefficient
-            )
-        rotational_equilibrium_quat = construct_rotational_equilibrium_trajectory(
-            reference_quat_world=self.traj_quat_buf[env_ids],
-            target_torque_world=target_torque_world,
-            rotational_stiffness=rotational_coefficient,
-            power_law_exponent=rotational_power_exponent,
-            torque_scale=float(tcfg.virtual_contact_torque_scale),
-            torque_cap=float(tcfg.virtual_contact_torque_cap),
-        )
-        self.traj_rotational_equilibrium_quat_buf[env_ids] = rotational_equilibrium_quat
-        self.traj_rotational_equilibrium_angvel_buf[env_ids] = (
-            finite_difference_quaternion_angular_velocity(
-                rotational_equilibrium_quat,
-                timestep=self.reference_dt,
-            )
+            surface_point, timestep=self.step_dt
         )
         self.traj_virtual_target_wrench_buf[env_ids] = scaled_external_wrench_world
         self.virtual_surface_stiffness[env_ids] = stiffness
@@ -3078,10 +2693,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.force_sensor_raw[env_ids] = 0.0
         self.force_sensor_smooth[env_ids] = 0.0
         self.force_sensor_obs[env_ids] = 0.0
-        bias_values = [max(0.0, float(tcfg.force_sensor_bias_range))] * 3
-        if self.wrench_dim == 6:
-            bias_values += [max(0.0, float(tcfg.torque_sensor_bias_range))] * 3
-        bias_scale = torch.tensor(bias_values, device=self.device)
+        bias_scale = torch.tensor(
+            [max(0.0, float(tcfg.force_sensor_bias_range))] * 3
+            + [max(0.0, float(tcfg.torque_sensor_bias_range))] * 3,
+            device=self.device,
+        )
         self.force_sensor_bias[env_ids] = bias_scale * (
             2.0 * torch.rand((n_envs, self.wrench_dim), device=self.device) - 1.0
         )
@@ -3091,91 +2707,18 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.traj_contact_buf[env_ids] = goal_mag > float(tcfg.dataset_contact_force_threshold)
 
     def _set_virtual_contact_surface_at_index(self, idx: torch.Tensor):
-        """Select and hold one native-reference virtual-contact state."""
+        """Select the per-timestep plane corresponding to each environment."""
         idx = idx.clamp(0, self._traj_len - 1)
         self.virtual_surface_point[:] = self.traj_surface_point_buf[self._env_arange, idx]
         self.virtual_surface_normal[:] = self.traj_surface_normal_buf[self._env_arange, idx]
         self.virtual_surface_velocity[:] = self.traj_surface_velocity_buf[self._env_arange, idx]
-        self.virtual_rotational_equilibrium_quat[:] = (
-            self.traj_rotational_equilibrium_quat_buf[self._env_arange, idx]
-        )
-        self.virtual_rotational_equilibrium_angvel[:] = (
-            self.traj_rotational_equilibrium_angvel_buf[self._env_arange, idx]
-        )
         target_wrench = self.traj_virtual_target_wrench_buf[self._env_arange, idx]
         self.virtual_target_force[:] = target_wrench[:, :3]
-        if self.wrench_dim == 6:
-            self.virtual_target_torque[:] = target_wrench[:, 3:]
-        else:
-            self.virtual_target_torque.zero_()
-        self.target_wrench[:] = self._traj_wrench_at_index(idx)
+        self.virtual_target_torque[:] = target_wrench[:, 3:]
 
-    def _set_virtual_contact_surface_at_policy_step(
-        self,
-        policy_step: torch.Tensor,
-        completed_physics_substeps: int = 0,
-    ):
-        """Select the virtual-contact state using interpolation or native ZOH."""
-        i0, i1, phase = virtual_contact_reference_coordinates(
-            policy_step,
-            policy_decimation=int(self.cfg.decimation),
-            reference_decimation=self.reference_decimation,
-            completed_physics_substeps=completed_physics_substeps,
-            interpolate=bool(
-                self.cfg.tracking.virtual_contact_interpolate_reference
-            ),
-        )
-        i0 = i0.clamp(0, self._traj_len - 1)
-        i1 = i1.clamp(0, self._traj_len - 1)
-        blend = phase.unsqueeze(-1)
-
-        def interpolate(buffer):
-            value0 = buffer[self._env_arange, i0]
-            value1 = buffer[self._env_arange, i1]
-            return value0 * (1.0 - blend) + value1 * blend
-
-        self.virtual_surface_point[:] = interpolate(self.traj_surface_point_buf)
-        normal = interpolate(self.traj_surface_normal_buf)
-        self.virtual_surface_normal[:] = normal / normal.norm(
-            dim=-1, keepdim=True
-        ).clamp_min(1.0e-6)
-        self.virtual_surface_velocity[:] = interpolate(
-            self.traj_surface_velocity_buf
-        )
-        equilibrium_q0 = self.traj_rotational_equilibrium_quat_buf[
-            self._env_arange, i0
-        ]
-        equilibrium_q1 = self.traj_rotational_equilibrium_quat_buf[
-            self._env_arange, i1
-        ]
-        self.virtual_rotational_equilibrium_quat[:] = quaternion_nlerp(
-            equilibrium_q0,
-            equilibrium_q1,
-            blend,
-        )
-        self.virtual_rotational_equilibrium_angvel[:] = interpolate(
-            self.traj_rotational_equilibrium_angvel_buf
-        )
-        target_wrench = interpolate(self.traj_virtual_target_wrench_buf)
-        self.virtual_target_force[:] = target_wrench[:, :3]
-        if self.wrench_dim == 6:
-            self.virtual_target_torque[:] = target_wrench[:, 3:]
-        else:
-            self.virtual_target_torque.zero_()
-        self.target_wrench[:] = interpolate(self.traj_wrench_buf)
-
-    def _update_virtual_contact_force(
-        self, completed_physics_substeps: int = 0
-    ):
-        """Compute contact at the requested instant within the policy transition.
-
-        The final physics substep uses the same instant as the subsequent
-        post-action pose/wrench reward, avoiding a plane[t] versus wrench[t+1]
-        comparison.
-        """
-        self._set_virtual_contact_surface_at_policy_step(
-            self.episode_length_buf, completed_physics_substeps
-        )
+    def _update_virtual_contact_force(self):
+        """Select the current plane and compute its world external contact force."""
+        self._set_virtual_contact_surface_at_index(self.episode_length_buf)
         distance, contact_force = compute_virtual_plane_contact(
             position=self.fingertip_midpoint_pos,
             linear_velocity=self.fingertip_midpoint_linvel,
@@ -3187,80 +2730,37 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             force_cap=float(self.cfg.tracking.virtual_contact_force_cap),
             surface_velocity=self.virtual_surface_velocity,
             contact_model=str(self.cfg.tracking.contact_model),
-            hunt_crossley_dissipation=self.virtual_contact_dissipation,
-            power_law_exponent=self.virtual_contact_power_exponent,
+            hunt_crossley_dissipation=float(self.cfg.tracking.hunt_crossley_dissipation),
+            power_law_exponent=float(self.cfg.tracking.power_law_exponent),
             exponential_sharpness=float(self.cfg.tracking.exponential_sharpness),
             exponential_reference_force=float(self.cfg.tracking.power_law_reference_force),
             exponential_reference_penetration=float(self.cfg.tracking.power_law_reference_penetration),
             max_damping_multiplier=float(self.cfg.tracking.max_damping_multiplier),
-            force_scale=float(self.cfg.tracking.virtual_contact_force_scale),
         )
 
         self.virtual_surface_distance[:] = distance
         self.virtual_contact_force[:] = contact_force
         self.current_contact[:] = distance.squeeze(-1) < 0.0
-        if self.cfg.tracking.virtual_contact_torque_model == "orientation_spring":
-            self.virtual_contact_torque[:] = orientation_spring_contact_torque(
-                current_quat_world=self.fingertip_midpoint_quat,
-                current_angvel_world=self.fingertip_midpoint_angvel,
-                equilibrium_quat_world=self.virtual_rotational_equilibrium_quat,
-                equilibrium_angvel_world=self.virtual_rotational_equilibrium_angvel,
-                in_contact=self.current_contact,
-                rotational_stiffness=float(
-                    self.cfg.tracking.virtual_contact_rotational_stiffness
-                ),
-                rotational_damping=float(
-                    self.cfg.tracking.virtual_contact_rotational_damping
-                ),
-                torque_scale=float(self.cfg.tracking.virtual_contact_torque_scale),
-                torque_cap=float(self.cfg.tracking.virtual_contact_torque_cap),
-            )
-        elif self.cfg.tracking.virtual_contact_torque_model == "orientation_power_law":
-            self.virtual_contact_torque[:] = orientation_power_law_contact_torque(
-                current_quat_world=self.fingertip_midpoint_quat,
-                current_angvel_world=self.fingertip_midpoint_angvel,
-                equilibrium_quat_world=self.virtual_rotational_equilibrium_quat,
-                equilibrium_angvel_world=self.virtual_rotational_equilibrium_angvel,
-                in_contact=self.current_contact,
-                rotational_coefficient=self.virtual_contact_rotational_coefficient,
-                power_law_exponent=self.virtual_contact_rotational_power_exponent,
-                rotational_damping=self.virtual_contact_rotational_damping,
-                torque_scale=float(self.cfg.tracking.virtual_contact_torque_scale),
-                torque_cap=float(self.cfg.tracking.virtual_contact_torque_cap),
-            )
-        else:
-            self.virtual_contact_torque[:] = contact_coupled_torque(
-                # Compare forces in physical units. At the demonstrated pose the
-                # actual force includes this same post-model physical scale, so the
-                # torque ratio remains one even when force is physically softened.
-                target_force_world=(
-                    self.virtual_target_force
-                    * float(self.cfg.tracking.virtual_contact_force_scale)
-                ),
-                target_torque_world=self.virtual_target_torque,
-                actual_force_world=self.virtual_contact_force,
-                in_contact=self.current_contact,
-                max_multiplier=float(self.cfg.tracking.max_damping_multiplier),
-                torque_cap=float(self.cfg.tracking.virtual_contact_torque_cap),
-                torque_scale=float(self.cfg.tracking.virtual_contact_torque_scale),
-            )
+        self.virtual_contact_torque[:] = contact_coupled_torque(
+            target_force_world=self.virtual_target_force,
+            target_torque_world=self.virtual_target_torque,
+            actual_force_world=self.virtual_contact_force,
+            in_contact=self.current_contact,
+            max_multiplier=float(self.cfg.tracking.max_damping_multiplier),
+            torque_cap=float(self.cfg.tracking.virtual_contact_torque_cap),
+        )
 
     def _update_virtual_contact_sensor(self):
-        """Sample and filter the virtual sensor once per physics substep.
+        """Sample and filter the virtual sensor once per control step.
 
         For Forge data, emulate ``get_link_incoming_joint_force``: negate the
         external world wrench and express it in the current rotating sensor axes.
         Legacy world-external datasets retain their prior world-axis feedback.
-        The caller is ``_apply_action``, matching Forge's per-physics-substep
-        force EMA independently of the policy decimation. The default alpha is
-        adjusted so the 60 Hz filter has Forge's 120 Hz physical-time response.
         """
-        virtual_wrench = self.virtual_contact_force
-        if self.wrench_dim == 6:
-            virtual_wrench = torch.cat(
-                (self.virtual_contact_force, self.virtual_contact_torque),
-                dim=-1,
-            )
+        virtual_wrench = torch.cat(
+            (self.virtual_contact_force, self.virtual_contact_torque),
+            dim=-1,
+        )
         if self.dataset_wrench_convention == "sensor_child_joint_reaction":
             sensor_quat_w = self._robot.data.body_quat_w[:, self.force_sensor_body_idx]
             self.force_sensor_raw[:] = world_external_to_sensor_reaction(
@@ -3291,15 +2791,13 @@ class FrankaRobustTrackEnv(DirectRLEnv):
     def _future_wrench(self) -> torch.Tensor:
         """Reference-window target wrenches normalized by peak.
 
-        Returns either 3 or 6 values per future step in the configured dataset
-        convention. Force is normalized by force_mag_range[1]; full-wrench mode
-        additionally normalizes torque by torque_mag_max. The window is strictly
-        future-facing and starts at the next trajectory waypoint.
+        Returns a (num_envs, 6 * num_future_steps) tensor in the configured
+        dataset-wrench convention. Force is normalized by force_mag_range[1] and
+        torque by torque_mag_max so both halves remain roughly unit range. The
+        first index is selected by `reference_start_offset`.
         """
         num_steps = self.cfg.tracking.num_future_steps
-        base_idx = self._policy_step_to_reference_index(
-            self.episode_length_buf
-        ) + 1
+        base_idx = self.episode_length_buf + self.cfg.tracking.reference_start_offset
         return torch.cat(
             [
                 self._traj_wrench_at_index(base_idx + i) / self._wrench_scale
@@ -3309,35 +2807,26 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         )
 
     def _update_command(self):
-        """Set the active interpolated pose and mode-specific wrench target."""
-        self.command_pos[:], self.command_quat[:] = (
-            self._traj_pose_at_policy_step(self.episode_length_buf)
-        )
+        """Set the current reference pose (and target wrench) to the current step's waypoint."""
+        self.command_pos[:], self.command_quat[:] = self._traj_pose_at_index(self.episode_length_buf)
         if self.enable_force:
+            idx = self.episode_length_buf.clamp(0, self._traj_len - 1)
+            self.target_wrench[:] = self.traj_wrench_buf[self._env_arange, idx]
             if self.virtual_contact_enabled:
-                self._set_virtual_contact_surface_at_policy_step(
-                    self.episode_length_buf
-                )
-            else:
-                idx = self._policy_step_to_reference_index(
-                    self.episode_length_buf
-                ).clamp(0, self._traj_len - 1)
-                self.target_wrench[:] = self.traj_wrench_buf[
-                    self._env_arange, idx
-                ]
+                self._set_virtual_contact_surface_at_index(idx)
+            if not self.virtual_contact_enabled:
                 self.current_contact[:] = self.traj_contact_buf[self._env_arange, idx]
 
     def _future_command_errors(self) -> torch.Tensor:
-        """Errors to the strictly future reference-pose window.
+        """Errors to the configured reference-pose window.
 
-        The window contains native 15 Hz waypoints and begins after the native
-        segment containing the current policy step. Multiple async policy steps
-        therefore see the same four native future samples.
+        The window contains one discretized waypoint per step and begins at
+        `episode_length_buf + reference_start_offset`. Returns a
+        (num_envs, 6 * num_future_steps) tensor of stacked (pos_error,
+        axis_angle_error) pairs, letting the policy infer reference velocity.
         """
         num_steps = self.cfg.tracking.num_future_steps
-        base_idx = self._policy_step_to_reference_index(
-            self.episode_length_buf
-        ) + 1
+        base_idx = self.episode_length_buf + self.cfg.tracking.reference_start_offset
 
         errors = []
         for i in range(num_steps):
@@ -3395,7 +2884,58 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             else:
                 gains = gains * (1.0 + (2.0 * torch.rand_like(gains) - 1.0) * noise)
         self.task_prop_gains[env_ids] = gains
-        self.task_deriv_gains[env_ids] = factory_utils.get_deriv_gains(gains)
+        deriv_gains = factory_utils.get_deriv_gains(gains)
+        # Damping ratio is drawn AFTER Kp, so Kd tracks the sampled stiffness
+        # rather than a fixed nominal: Kd = zeta * 2*sqrt(Kp_sampled).
+        ratio_range = getattr(self.cfg.ctrl, "task_deriv_gains_damping_ratio_range", None)
+        if ratio_range is not None:
+            if len(ratio_range) != 2:
+                raise ValueError("ctrl.task_deriv_gains_damping_ratio_range must be [low, high].")
+            low, high = (float(value) for value in ratio_range)
+            if not 0.0 < low <= high:
+                raise ValueError(
+                    "ctrl.task_deriv_gains_damping_ratio_range must satisfy 0 < low <= high."
+                )
+            # One draw per env, broadcast across all 6 axes -- the hardware sets a
+            # single uniform Kd vector, so per-axis draws would train against a
+            # controller the robot cannot produce.
+            zeta = low + (high - low) * torch.rand((env_ids.numel(), 1), device=self.device)
+            deriv_gains = deriv_gains * zeta
+        self.task_deriv_gains[env_ids] = deriv_gains
+
+    def _sample_scaled_per_joint(
+        self, num_samples: int, per_joint_range, scale_range, num_joints: int = 7
+    ) -> torch.Tensor:
+        """Draw `value_i ~ U(per_joint_range[i]) * U(scale_range)`.
+
+        The scale is a single draw per env shared across all joints, so the
+        arm-wide level is sampled as its own axis instead of being averaged out
+        by independent per-joint draws. `per_joint_range` is either a
+        `(num_joints, 2)` table or a single `[lo, hi]` pair broadcast to every
+        joint, which is what pre-per-joint-table configs supply.
+        """
+        bounds = torch.as_tensor(per_joint_range, device=self.device, dtype=torch.float)
+        if bounds.numel() == 2:
+            bounds = bounds.reshape(1, 2).expand(num_joints, 2)
+        elif tuple(bounds.shape) != (num_joints, 2):
+            raise ValueError(
+                f"Expected a [lo, hi] pair or a ({num_joints}, 2) per-joint table, "
+                f"got shape {tuple(bounds.shape)}"
+            )
+        lower = bounds[:, 0].reshape(1, num_joints)
+        upper = bounds[:, 1].reshape(1, num_joints)
+
+        scale = torch.as_tensor(scale_range, device=self.device, dtype=torch.float).reshape(-1)
+        if scale.numel() != 2:
+            raise ValueError(f"Expected a [lo, hi] scale pair, got {tuple(scale.shape)}")
+        level = scale[0] + (scale[1] - scale[0]) * torch.rand(
+            (num_samples, 1), device=self.device
+        )
+
+        per_joint = lower + (upper - lower) * torch.rand(
+            (num_samples, num_joints), device=self.device
+        )
+        return (per_joint * level).clamp(min=0.0)
 
     def _randomize_dynamics(self, env_ids: torch.Tensor):
         env_ids_cpu = env_ids.cpu()
@@ -3442,6 +2982,24 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             m_b = masses[env_ids_cpu, body_idx].unsqueeze(-1)
             c_b = coms[env_ids_cpu, body_idx, 0:3]
             m_new = m_b + m_p
+            # A negative payload models an OVER-compensated end effector (the
+            # control box cancelling more mass than is really hanging there),
+            # which the sys-id fit asks for in 3 of 5 rounds. It is only
+            # meaningful while the merged body keeps a sane positive mass: the
+            # CoM below divides by `m_new`, so a band whose floor approaches
+            # -m_b sends c_new to infinity and hands PhysX a garbage inertia
+            # rather than failing. Fail loudly instead, and report the mass that
+            # the band has to respect -- it is a property of the robot USD, not
+            # something the launcher can know.
+            if bool((m_new <= 0.25 * m_b).any()):
+                worst = int(torch.argmin(m_new.squeeze(-1)))
+                raise ValueError(
+                    "randomization.payload_mass_range floor is too negative for "
+                    f"this robot: body {payload_body_name!r} has mass "
+                    f"{float(m_b[worst]):.4f} kg and a sampled payload of "
+                    f"{float(m_p[worst]):+.4f} kg leaves {float(m_new[worst]):.4f} kg. "
+                    "Keep the floor above -0.75 * the body mass printed here."
+                )
             c_new = (m_b * c_b + m_p * p) / m_new
             d_b = c_b - c_new
             d_p = p - c_new
@@ -3476,20 +3034,89 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.link_mass_scales[env_ids] = scales.to(self.device)
 
         if rand_cfg.enable_joint_friction:
-            lower, upper = rand_cfg.joint_friction_range
-            joint_friction = lower + (upper - lower) * torch.rand((len(env_ids), 7), device=self.device)
+            # An independent per-joint draw (the band sys-id identifies) times
+            # one common level draw per env, so the whole arm can be uniformly
+            # stiff or loose -- an axis that seven independent draws average
+            # away. getattr so older params/env.pkl without these fields keeps
+            # the legacy sampling it was actually trained with.
+            nominal = getattr(rand_cfg, "joint_friction_nominal", None)
+            if nominal is None:
+                joint_friction = self._sample_scaled_per_joint(
+                    len(env_ids),
+                    rand_cfg.joint_friction_range,
+                    getattr(rand_cfg, "joint_friction_scale_range", (1.0, 1.0)),
+                )
+            else:
+                nominal_t = torch.as_tensor(
+                    nominal, device=self.device, dtype=torch.float
+                ).reshape(1, 7)
+                lower, upper = getattr(
+                    rand_cfg, "joint_friction_scale_range", (0.0, 1.5)
+                )
+                level = lower + (upper - lower) * torch.rand(
+                    (len(env_ids), 1), device=self.device
+                )
+                jitter = float(getattr(rand_cfg, "joint_friction_jitter", 0.0))
+                if jitter > 0.0:
+                    level = level * (
+                        1.0
+                        - jitter
+                        + 2.0
+                        * jitter
+                        * torch.rand((len(env_ids), 7), device=self.device)
+                    )
+                joint_friction = (nominal_t * level).clamp(min=0.0)
         else:
             joint_friction = torch.zeros((len(env_ids), 7), device=self.device)
         self.joint_friction[env_ids] = joint_friction
+        # Sliding Coulomb friction. Written on every reset even when not
+        # randomized, because the USD default is 0 and PhysX applies the
+        # *dynamic* coefficient once a joint moves -- an unwritten column means
+        # a joint that has broken free slides with no Coulomb resistance at all.
+        if getattr(rand_cfg, "enable_joint_dynamic_ratio", False):
+            dynamic_ratio = self._sample_scaled_per_joint(
+                len(env_ids),
+                getattr(rand_cfg, "joint_dynamic_ratio_range", [[1.0, 1.0]] * 7),
+                getattr(rand_cfg, "joint_dynamic_ratio_scale_range", (1.0, 1.0)),
+            ).clamp(0.0, 1.0)
+        else:
+            dynamic_ratio = torch.ones((len(env_ids), 7), device=self.device)
+        # PhysX enforces static >= dynamic and rejects the whole articulation
+        # write when it does not hold, so drop dynamic to zero first: it is <=
+        # every static, old or new, and no intermediate state can be invalid.
+        # (`min` guards float rounding at ratio == 1.)
+        self._robot.write_joint_dynamic_friction_coefficient_to_sim(
+            0.0, joint_ids=self.arm_joint_ids, env_ids=env_ids
+        )
         self._robot.write_joint_friction_coefficient_to_sim(
             joint_friction,
             joint_ids=self.arm_joint_ids,
             env_ids=env_ids,
         )
+        self._robot.write_joint_dynamic_friction_coefficient_to_sim(
+            torch.minimum(dynamic_ratio * joint_friction, joint_friction),
+            joint_ids=self.arm_joint_ids,
+            env_ids=env_ids,
+        )
+
+        if getattr(rand_cfg, "enable_joint_viscous", False):
+            joint_viscous = self._sample_scaled_per_joint(
+                len(env_ids),
+                getattr(rand_cfg, "joint_viscous_range", [[0.0, 0.0]] * 7),
+                getattr(rand_cfg, "joint_viscous_scale_range", (1.0, 1.0)),
+            )
+        else:
+            joint_viscous = torch.zeros((len(env_ids), 7), device=self.device)
+        self._robot.write_joint_viscous_friction_coefficient_to_sim(
+            joint_viscous, joint_ids=self.arm_joint_ids, env_ids=env_ids
+        )
 
         if rand_cfg.enable_joint_armature:
-            lower, upper = rand_cfg.joint_armature_range
-            joint_armature = lower + (upper - lower) * torch.rand((len(env_ids), 7), device=self.device)
+            joint_armature = self._sample_scaled_per_joint(
+                len(env_ids),
+                rand_cfg.joint_armature_range,
+                getattr(rand_cfg, "joint_armature_scale_range", (1.0, 1.0)),
+            )
         else:
             joint_armature = torch.zeros((len(env_ids), 7), device=self.device)
         self.joint_armature[env_ids] = joint_armature
@@ -3538,14 +3165,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         return frame
 
     def _set_debug_vis_impl(self, debug_vis: bool):
-        pose_visible = bool(debug_vis and self.cfg.debug_vis)
-        force_visible = bool(
-            debug_vis
-            and self.cfg.debug_vis_force
-            and self.virtual_contact_enabled
-        )
-
-        if pose_visible:
+        if debug_vis:
             if not hasattr(self, "command_pose_visualizer"):
                 frame_cfg = FRAME_MARKER_CFG.copy()
                 frame_cfg.markers["frame"].scale = (0.08, 0.08, 0.08)
@@ -3570,354 +3190,46 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 future_cfg.markers["sphere"].visual_material.diffuse_color = (0.0, 0.4, 1.0)
                 future_cfg.prim_path = "/Visuals/Command/future_targets"
                 self.future_target_visualizer = VisualizationMarkers(future_cfg)
-        if hasattr(self, "command_pose_visualizer"):
-            self.command_pose_visualizer.set_visibility(pose_visible)
-            self.ee_pose_visualizer.set_visibility(pose_visible)
-            self.traj_path_visualizer.set_visibility(pose_visible)
-            self.future_target_visualizer.set_visibility(pose_visible)
-
-        if force_visible and not hasattr(self, "virtual_contact_plane_visualizer"):
-            force_style = str(self.cfg.debug_vis_force_style)
-            force_source = str(self.cfg.debug_vis_force_source)
-            plane_cfg = CUBOID_MARKER_CFG.copy()
-            plane_size = float(self.cfg.debug_vis_force_plane_size)
-            plane_cfg.markers["cuboid"].size = (0.001, plane_size, plane_size)
-            plane_cfg.markers["cuboid"].visual_material.diffuse_color = (0.0, 1.0, 1.0)
-            plane_cfg.markers["cuboid"].visual_material.opacity = 0.3
-            plane_cfg.prim_path = "/Visuals/VirtualContact/plane"
-            self.virtual_contact_plane_visualizer = VisualizationMarkers(plane_cfg)
-
-            (
-                self.virtual_contact_normal_shaft_visualizer,
-                self.virtual_contact_normal_head_visualizer,
-            ) = self._make_force_arrow_visualizers(
-                "/Visuals/VirtualContact/plane_normal",
-                {"normal": (1.0, 1.0, 0.0)},
-            )
-
-            if bool(self.cfg.debug_vis_force_ee_sphere):
-                ee_sphere_cfg = SPHERE_MARKER_CFG.copy()
-                ee_sphere_cfg.markers["sphere"].radius = float(
-                    self.cfg.debug_vis_force_ee_sphere_radius
-                )
-                ee_sphere_cfg.markers["sphere"].visual_material.diffuse_color = (
-                    1.0,
-                    1.0,
-                    1.0,
-                )
-                ee_sphere_cfg.markers["sphere"].visual_material.emissive_color = (
-                    0.4,
-                    0.4,
-                    0.4,
-                )
-                ee_sphere_cfg.prim_path = "/Visuals/VirtualContact/end_effector"
-                self.virtual_contact_ee_visualizer = VisualizationMarkers(ee_sphere_cfg)
-
-            if force_style in ("vector", "both") and force_source in (
-                "reference",
-                "both",
-            ):
-                (
-                    self.virtual_target_force_shaft_visualizer,
-                    self.virtual_target_force_head_visualizer,
-                ) = self._make_force_arrow_visualizers(
-                    "/Visuals/VirtualContact/reference_force",
-                    {"reference": (0.0, 0.0, 1.0)},
-                )
-
-            if force_style in ("vector", "both") and force_source in (
-                "realized",
-                "both",
-            ):
-                (
-                    self.virtual_actual_force_shaft_visualizer,
-                    self.virtual_actual_force_head_visualizer,
-                ) = self._make_force_arrow_visualizers(
-                    "/Visuals/VirtualContact/realized_force",
-                    {"realized": (1.0, 0.0, 0.0)},
-                )
-
-            if force_style in ("components", "both"):
-                component_colors = {
-                    "force_x": (1.0, 0.0, 0.0),
-                    "force_y": (0.0, 1.0, 0.0),
-                    "force_z": (0.0, 0.0, 1.0),
-                }
-                if force_source in ("reference", "both"):
-                    (
-                        self.virtual_target_force_components_shaft_visualizer,
-                        self.virtual_target_force_components_head_visualizer,
-                    ) = self._make_force_arrow_visualizers(
-                        "/Visuals/VirtualContact/reference_force_components",
-                        component_colors,
-                    )
-                if force_source in ("realized", "both"):
-                    (
-                        self.virtual_actual_force_components_shaft_visualizer,
-                        self.virtual_actual_force_components_head_visualizer,
-                    ) = self._make_force_arrow_visualizers(
-                        "/Visuals/VirtualContact/realized_force_components",
-                        component_colors,
-                    )
-
-            print(
-                "[FrankaRobustTrack] force debug visualization: "
-                "cyan=virtual plane, yellow=outward normal, white=current EE, "
-                f"style={force_style}, source={force_source}; "
-                "components use red=Fx, green=Fy, blue=Fz in world axes"
-            )
-        if hasattr(self, "virtual_contact_plane_visualizer"):
-            self.virtual_contact_plane_visualizer.set_visibility(force_visible)
-            self.virtual_contact_normal_shaft_visualizer.set_visibility(force_visible)
-            self.virtual_contact_normal_head_visualizer.set_visibility(force_visible)
-        if hasattr(self, "virtual_contact_ee_visualizer"):
-            self.virtual_contact_ee_visualizer.set_visibility(force_visible)
-        for prefix in (
-            "virtual_target_force",
-            "virtual_actual_force",
-            "virtual_target_force_components",
-            "virtual_actual_force_components",
-        ):
-            for part in ("shaft", "head"):
-                visualizer = getattr(self, f"{prefix}_{part}_visualizer", None)
-                if visualizer is not None:
-                    visualizer.set_visibility(force_visible)
-
-    def _make_force_arrow_visualizers(
-        self,
-        prim_path: str,
-        marker_colors: dict[str, tuple[float, float, float]],
-    ) -> tuple[VisualizationMarkers, VisualizationMarkers]:
-        """Create separate cylinder-shaft and cone-head marker sets."""
-        shaft_markers = {}
-        head_markers = {}
-        for name, color in marker_colors.items():
-            material = sim_utils.PreviewSurfaceCfg(
-                diffuse_color=color,
-                emissive_color=tuple(0.25 * value for value in color),
-                roughness=0.7,
-            )
-            shaft_markers[name] = sim_utils.CylinderCfg(
-                radius=float(self.cfg.debug_vis_force_shaft_radius),
-                height=1.0,
-                axis="Z",
-                visual_material=material,
-            )
-            head_markers[name] = sim_utils.ConeCfg(
-                radius=float(self.cfg.debug_vis_force_head_radius),
-                height=1.0,
-                axis="Z",
-                visual_material=material.copy(),
-            )
-        shaft_cfg = VisualizationMarkersCfg(
-            prim_path=f"{prim_path}_shaft",
-            markers=shaft_markers,
-        )
-        head_cfg = VisualizationMarkersCfg(
-            prim_path=f"{prim_path}_head",
-            markers=head_markers,
-        )
-        return VisualizationMarkers(shaft_cfg), VisualizationMarkers(head_cfg)
-
-    def _force_debug_arrow_geometry(
-        self,
-        origin_world: torch.Tensor,
-        force_world: torch.Tensor,
-        *,
-        length_scale: float | None = None,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
-        """Return shaft/head positions, scales, and orientation for clear arrows."""
-        magnitude = torch.linalg.norm(force_world, dim=-1)
-        orientation = z_axis_to_vector_quat(force_world)
-        direction = force_world / magnitude.clamp_min(1.0e-8).unsqueeze(-1)
-        if length_scale is None:
-            length_scale = float(self.cfg.debug_vis_force_scale)
-        total_length = magnitude * float(length_scale)
-        max_head_length = float(self.cfg.debug_vis_force_head_length)
-        head_length = torch.minimum(
-            torch.full_like(total_length, max_head_length),
-            0.4 * total_length,
-        )
-        shaft_length = (total_length - head_length).clamp_min(0.0)
-        shaft_position = origin_world + 0.5 * shaft_length.unsqueeze(-1) * direction
-        head_position = origin_world + (
-            shaft_length + 0.5 * head_length
-        ).unsqueeze(-1) * direction
-        shaft_scale = torch.ones_like(force_world)
-        shaft_scale[:, 2] = shaft_length
-        head_scale = torch.ones_like(force_world)
-        head_scale[:, 2] = head_length
-        visible = (magnitude > 1.0e-6).unsqueeze(-1)
-        shaft_scale = torch.where(visible, shaft_scale, torch.zeros_like(shaft_scale))
-        head_scale = torch.where(visible, head_scale, torch.zeros_like(head_scale))
-        return (
-            shaft_position,
-            shaft_scale,
-            head_position,
-            head_scale,
-            orientation,
-        )
-
-    def _visualize_force_arrow(
-        self,
-        shaft_visualizer: VisualizationMarkers,
-        head_visualizer: VisualizationMarkers,
-        origin_world: torch.Tensor,
-        force_world: torch.Tensor,
-        marker_indices: torch.Tensor | None = None,
-        *,
-        length_scale: float | None = None,
-    ):
-        """Render vectors as cylinder shafts capped by conical arrowheads."""
-        (
-            shaft_position,
-            shaft_scale,
-            head_position,
-            head_scale,
-            orientation,
-        ) = self._force_debug_arrow_geometry(
-            origin_world,
-            force_world,
-            length_scale=length_scale,
-        )
-        shaft_visualizer.visualize(
-            shaft_position,
-            orientation,
-            shaft_scale,
-            marker_indices,
-        )
-        head_visualizer.visualize(
-            head_position,
-            orientation,
-            head_scale,
-            marker_indices,
-        )
-
-    def _visualize_force_components(
-        self,
-        shaft_visualizer: VisualizationMarkers,
-        head_visualizer: VisualizationMarkers,
-        origin_world: torch.Tensor,
-        force_world: torch.Tensor,
-    ):
-        """Render signed world Fx/Fy/Fz as red/green/blue component arrows."""
-        component_vectors = world_force_components(force_world).reshape(-1, 3)
-        component_origins = (
-            origin_world.unsqueeze(1).expand(-1, 3, -1).reshape(-1, 3)
-        )
-        marker_indices = (
-            torch.arange(3, device=self.device)
-            .unsqueeze(0)
-            .expand(self.num_envs, -1)
-            .reshape(-1)
-        )
-        self._visualize_force_arrow(
-            shaft_visualizer,
-            head_visualizer,
-            component_origins,
-            component_vectors,
-            marker_indices,
-        )
+            self.command_pose_visualizer.set_visibility(True)
+            self.ee_pose_visualizer.set_visibility(True)
+            self.traj_path_visualizer.set_visibility(True)
+            self.future_target_visualizer.set_visibility(True)
+        else:
+            if hasattr(self, "command_pose_visualizer"):
+                self.command_pose_visualizer.set_visibility(False)
+                self.ee_pose_visualizer.set_visibility(False)
+                self.traj_path_visualizer.set_visibility(False)
+                self.future_target_visualizer.set_visibility(False)
 
     def _debug_vis_callback(self, event):
         # This callback is driven by a timeline event and can fire during
         # shutdown, after the scene has already been torn down.
-        if not hasattr(self, "scene"):
+        if not hasattr(self, "scene") or not hasattr(self, "command_pose_visualizer"):
             return
         env_origins = self.scene.env_origins
 
-        if self.cfg.debug_vis and hasattr(self, "command_pose_visualizer"):
-            # Current reference pose (frame marker).
-            self.command_pose_visualizer.visualize(self.command_pos + env_origins, self.command_quat)
+        # Current reference pose (frame marker).
+        self.command_pose_visualizer.visualize(self.command_pos + env_origins, self.command_quat)
 
-            # Current end-effector pose (frame marker); offset from the command
-            # frame is the live tracking error.
-            self.ee_pose_visualizer.visualize(
-                self.fingertip_midpoint_pos + env_origins,
-                self.fingertip_midpoint_quat,
-            )
+        # Current end-effector pose (frame marker); offset from the command
+        # frame is the live tracking error.
+        self.ee_pose_visualizer.visualize(self.fingertip_midpoint_pos + env_origins, self.fingertip_midpoint_quat)
 
-            # Full discretized reference path over the episode (strided waypoints).
-            num_samples = min(self.cfg.debug_vis_path_samples, self._traj_len)
-            sample_idx = torch.linspace(
-                0, self._traj_len - 1, num_samples, device=self.device
-            ).long()
-            path_points = []
-            for idx in sample_idx:
-                path_points.append(self.traj_pos_buf[:, idx] + env_origins)
-            self.traj_path_visualizer.visualize(torch.cat(path_points, dim=0))
+        # Full discretized reference path over the episode (strided waypoints).
+        num_samples = min(self.cfg.debug_vis_path_samples, self.max_episode_length)
+        sample_idx = torch.linspace(0, self.max_episode_length - 1, num_samples, device=self.device).long()
+        path_points = []
+        for idx in sample_idx:
+            path_points.append(self.traj_pos_buf[:, idx] + env_origins)
+        self.traj_path_visualizer.visualize(torch.cat(path_points, dim=0))
 
-            # Lookahead targets fed to the policy.
-            base_idx = self._policy_step_to_reference_index(
-                self.episode_length_buf
-            ) + 1
-            future_points = []
-            for i in range(self.cfg.tracking.num_future_steps):
-                pos, _ = self._traj_pose_at_index(base_idx + i)
-                future_points.append(pos + env_origins)
-            self.future_target_visualizer.visualize(torch.cat(future_points, dim=0))
-
-        if (
-            self.cfg.debug_vis_force
-            and self.virtual_contact_enabled
-            and hasattr(self, "virtual_contact_plane_visualizer")
-        ):
-            # The plane cuboid's thin local +x axis and the green arrow both
-            # align with the exact outward normal used by the contact equation.
-            plane_orientation = x_axis_to_vector_quat(self.virtual_surface_normal)
-            self.virtual_contact_plane_visualizer.visualize(
-                self.virtual_surface_point + env_origins,
-                plane_orientation,
-            )
-            self._visualize_force_arrow(
-                self.virtual_contact_normal_shaft_visualizer,
-                self.virtual_contact_normal_head_visualizer,
-                self.virtual_surface_point + env_origins,
-                self.virtual_surface_normal,
-                length_scale=float(self.cfg.debug_vis_force_normal_length),
-            )
-            if hasattr(self, "virtual_contact_ee_visualizer"):
-                self.virtual_contact_ee_visualizer.visualize(
-                    self.fingertip_midpoint_pos + env_origins
-                )
-
-            # The target marker starts at the demonstrated pose associated with
-            # this plane. The realized marker starts where its force acts.
-            reference_pos = self.command_pos
-            if hasattr(self, "virtual_target_force_shaft_visualizer"):
-                self._visualize_force_arrow(
-                    self.virtual_target_force_shaft_visualizer,
-                    self.virtual_target_force_head_visualizer,
-                    reference_pos + env_origins,
-                    self.virtual_target_force,
-                )
-            if hasattr(self, "virtual_actual_force_shaft_visualizer"):
-                self._visualize_force_arrow(
-                    self.virtual_actual_force_shaft_visualizer,
-                    self.virtual_actual_force_head_visualizer,
-                    self.fingertip_midpoint_pos + env_origins,
-                    self.virtual_contact_force,
-                )
-            if hasattr(self, "virtual_target_force_components_shaft_visualizer"):
-                self._visualize_force_components(
-                    self.virtual_target_force_components_shaft_visualizer,
-                    self.virtual_target_force_components_head_visualizer,
-                    reference_pos + env_origins,
-                    self.virtual_target_force,
-                )
-            if hasattr(self, "virtual_actual_force_components_shaft_visualizer"):
-                self._visualize_force_components(
-                    self.virtual_actual_force_components_shaft_visualizer,
-                    self.virtual_actual_force_components_head_visualizer,
-                    self.fingertip_midpoint_pos + env_origins,
-                    self.virtual_contact_force,
-                )
+        # Lookahead targets fed to the policy.
+        base_idx = self.episode_length_buf + self.cfg.tracking.reference_start_offset
+        future_points = []
+        for i in range(self.cfg.tracking.num_future_steps):
+            pos, _ = self._traj_pose_at_index(base_idx + i)
+            future_points.append(pos + env_origins)
+        self.future_target_visualizer.visualize(torch.cat(future_points, dim=0))
 
     def _command_errors(self):
         pos_error, rot_error = factory_control.get_pose_error(
@@ -3964,12 +3276,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.extras["contact_fraction"] = contact.float().mean()
 
     def _accumulate_perstep_error(self, pos_error_norm: torch.Tensor, rot_error_norm: torch.Tensor):
-        """Bin tracking error by native reference index and log it periodically."""
+        """Bin the per-step tracking error by episode step and log a profile periodically."""
         if self._perstep_log_every <= 0:
             return
-        step_idx = self._policy_step_to_reference_index(
-            self.episode_length_buf
-        ).clamp(0, self._perstep_num_bins - 1)
+        step_idx = self.episode_length_buf.clamp(0, self._perstep_num_bins - 1)
         self._perstep_pos_sum.index_add_(0, step_idx, pos_error_norm)
         self._perstep_pos_sqsum.index_add_(0, step_idx, pos_error_norm.square())
         self._perstep_rot_sum.index_add_(0, step_idx, rot_error_norm)
@@ -4010,7 +3320,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         rot_std = (self._perstep_rot_sqsum / count_safe - rot_mean.square()).clamp(min=0.0).sqrt()
 
         steps = torch.arange(self._perstep_num_bins, device=self.device)[valid]
-        time_s = (steps.float() * self.reference_dt).cpu().numpy()
+        time_s = (steps.float() * self.step_dt).cpu().numpy()
         pos_mean_np = pos_mean[valid].cpu().numpy()
         pos_std_np = pos_std[valid].cpu().numpy()
         rot_mean_np = rot_mean[valid].cpu().numpy()
@@ -4161,6 +3471,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.extras["log"]["Dynamics/payload_mass"] = self.payload_mass[env_ids].mean()
         self.extras["log"]["Dynamics/joint_friction"] = self.joint_friction[env_ids].mean()
         self.extras["log"]["Dynamics/joint_armature"] = self.joint_armature[env_ids].mean()
+        if self._action_latency_buf is not None:
+            self.extras["log"]["Dynamics/action_latency_steps"] = (
+                self._action_latency_steps[env_ids].float().mean()
+            )
         if self.virtual_contact_enabled:
             self.extras["log"]["VirtualContact/surface_stiffness"] = self.virtual_surface_stiffness[
                 env_ids

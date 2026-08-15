@@ -53,7 +53,25 @@ class CtrlCfg:
     use_task_space_inertia: bool = True
 
     pos_action_threshold = [0.02, 0.02, 0.02]
-    rot_action_threshold = [0.15, 0.15, 0.15]
+    # Per-step rotation authority. The OSC sees a rotation error of
+    # |a_rot| * rot_action_threshold, and on hardware that error runs through the
+    # task-space inertia's translation/rotation coupling block, producing a force
+    # roughly anti-parallel to the one the position error produces. Once |F_rot|
+    # exceeds |F_pos| the net commanded force points away from the target and the
+    # position error cannot close, so a saturated rotation action is far more
+    # damaging on real than in sim. Capping the threshold bounds that damage
+    # regardless of whether the policy learns not to saturate:
+    #   0.15 -> up to ~14.9 deg/step when railed   (source value, unused by 0728)
+    #   0.10 -> up to ~9.9 deg/step                (what 0728 trained with;
+    #                                               matches the 8.2 deg standing
+    #                                               error measured on hardware)
+    #   0.05 -> up to ~5.0 deg/step
+    # A sim rollout of 0728 peaks at |a_rot| = 0.663, i.e. it genuinely uses up to
+    # 0.066 rad/step of correction authority. At 0.05 that demand would need
+    # |a| = 1.33 and get clipped, so 0.05 costs real control authority. 0.10 keeps
+    # the observed peak reachable at |a| = 0.66 while halving the railed-case
+    # damage relative to 0.15.
+    rot_action_threshold = [0.10, 0.10, 0.10]
 
     reset_joints = [0.00871, -0.10368, -0.00794, -1.49139, -0.00083, 1.38774, 0.0]
     default_task_prop_gains = [300.0, 300.0, 300.0, 28.0, 28.0, 28.0]
@@ -68,6 +86,13 @@ class CtrlCfg:
     #   "per_axis" -> draw an independent gain multiplier for each of the 6 axes
     # With no scale range, zero noise keeps the configured default gains.
     task_prop_gains_randomization_mode: str = "per_axis"
+    # Optional reset-time damping-ratio randomization, applied AFTER Kp is drawn.
+    # Kd is normally critical, 2*sqrt(Kp) (`factory_utils.get_deriv_gains`). When
+    # set to [low, high] each env draws one zeta ~ U(low, high) and uses
+    # Kd = zeta * 2*sqrt(Kp), so zeta = 1 is critical and zeta < 1 under-damped.
+    # ONE draw per env shared across all 6 axes, matching the hardware, which
+    # sets a single uniform Kd vector (`factory_osc_kd`). None keeps critical.
+    task_deriv_gains_damping_ratio_range = None
 
     # If True, the policy also outputs the 6 task-space proportional gains
     # (3 translational, 3 rotational) as extra action dims, mapped from the
@@ -99,9 +124,10 @@ class CtrlCfg:
 class TrackingCfg:
     """Discretized end-effector reference trajectory configuration.
 
-    The trajectory is generated analytically per env at reset and sampled onto
-    a native reference grid. Synchronous policies consume one waypoint per
-    action; async policies interpolate their active target between native knots.
+    The trajectory is generated analytically per env at reset and then sampled
+    onto a fixed grid of control steps (one waypoint per env step), so the
+    reference the policy tracks is a discrete sequence of poses rather than a
+    continuously-evaluated function of time.
     """
 
     mode: str = "line"  # line, line_fixed, circle, dataset
@@ -122,23 +148,40 @@ class TrackingCfg:
 
     # Circle trajectory: EE traces a circle in a randomized plane, anchored so
     # that t=0 coincides with the reset pose. Direction (cw/ccw) is randomized.
-    circle_radius_range = [0.05, 0.15]  # m
-    circle_speed_range = [0.20, 0.80]  # rad/s (angular speed)
+    # Narrowed from [0.05, 0.15] x [0.20, 0.80] to bracket the speed band the
+    # hardware can actually track. What matters is the tip speed r*omega:
+    #
+    #   real tracking error vs reference tip speed, equal-horizon (first 100
+    #   steps of every run >= 100 steps), policy mode, corr = +0.946:
+    #        0-20 mm/s  median 10.20 mm
+    #       20-50 mm/s  median 41.09 mm
+    #      50-200 mm/s  median 76.17 mm
+    #
+    # The old ranges put only 6.5% of samples under 20 mm/s and 43.6% above
+    # 50 mm/s, i.e. most of training sat where hardware error is 4-7x worse.
+    # These give 56.5% under 20 mm/s and nothing above 32 mm/s, with the real
+    # operating point (r=0.050, omega=0.273 -> 13.7 mm/s) at about the 10th
+    # percentile so training still skews harder than deployment.
+    #
+    # Do not lower the floor further: hardware sits on a friction-limited error
+    # floor of roughly 8-12 mm that slowing down does not reduce, so smaller and
+    # slower circles only shrink the absolute error while relative tracking gets
+    # worse. Over a 10 s episode omega in [0.20, 0.40] sweeps 115-229 deg, so the
+    # reference is an arc rather than a closed circle -- as it already was at the
+    # old lower bound.
+    circle_radius_range = [0.05, 0.08]  # m
+    circle_speed_range = [0.20, 0.40]  # rad/s (angular speed)
 
     # Optional orientation sweep: constant angular velocity about a randomized
     # axis, capped at a randomized total angle. Set ranges to 0 to hold fixed.
     rot_speed_range = [0.0, 0.20]  # rad/s
     rot_angle_range = [0.0, 0.30]  # rad, max sweep
 
-    # Lookahead: the policy observes `num_future_steps` strictly future native
-    # waypoints: [P_{r+1}, ..., P_{r+H}], where r is the native segment index.
-    # The active reward target advances continuously from P_r to P_{r+1}.
+    # Lookahead: the policy observes `num_future_steps` reference waypoints, one
+    # per trajectory step. `reference_start_offset=0` starts at the current
+    # target [P_t, ...]; offset 1 starts at the next target [P_{t+1}, ...].
     num_future_steps: int = 4
-    # Physics substeps between native reference samples. Zero preserves the
-    # synchronous contract by inheriting the policy/control decimation. Async
-    # dataset tracking uses 8 here (15 Hz at 120 Hz physics) with a smaller
-    # top-level decimation for a 30/60 Hz policy.
-    reference_decimation: int = 0
+    reference_start_offset: int = 0
 
     # "dataset" mode: instead of an analytic line/circle, each env tracks a real
     # end-effector trajectory sampled from an offline demonstration dataset (e.g.
@@ -163,7 +206,7 @@ class TrackingCfg:
     # "episode_start" reproduces full-trajectory training from raw sample zero;
     # "random" samples the reset timestep over the entire raw episode.
     dataset_chunk_start_mode: str = "episode_start"
-    # Training chunk length in native reference poses. When positive, raw dataset
+    # Training chunk length in control-step poses. When positive, raw dataset
     # samples retain their original indices. The start mode selects sample zero or
     # a random timestep over the entire episode. Missing lead-in history repeats
     # the first sample; a chunk extending past the episode repeats its final sample.
@@ -222,9 +265,6 @@ class TrackingCfg:
     # magnitude oscillation plus a gentle direction drift) rather than staying
     # constant, then switches back off at the end of a sampled duration window.
     enable_force: bool = False
-    # True uses force3+torque3 throughout observations, rewards, and application.
-    # False preserves the legacy force-only contract and checkpoint shapes.
-    use_full_wrench: bool = True
     # ``replay_disturbance`` applies the recorded six-axis target wrench directly
     # at the wrist. ``replay_raw_wrench`` loads all six dataset wrench
     # components, inverts their EMA assuming a zero initial wrench, and applies the
@@ -232,15 +272,6 @@ class TrackingCfg:
     # penetration instead.
     force_mode: str = "replay_disturbance"
     dataset_wrench_ema_alpha: float = 0.25
-    # Physical amplitude multipliers used only when replaying a dataset wrench as
-    # an external disturbance. The target wrench exposed to the policy and used
-    # by rewards remains in the original dataset units.
-    disturbance_force_scale: float = 1.0
-    disturbance_torque_scale: float = 1.0
-    # Clip the norm of physically replayed dataset torque to this percentile of
-    # the selected trajectories. This does not modify the dataset or the target
-    # wrench exposed to the policy. 100 disables clipping.
-    disturbance_torque_clip_percentile: float = 100.0
     force_mag_range = [5.0, 20.0]  # N, sampled peak contact magnitude (spec-capped at 20 N)
     torque_mag_max: float = 2.0  # Nm, observation normalization scale
     # Number of contact bands per episode, sampled per env (inclusive range). The
@@ -269,39 +300,13 @@ class TrackingCfg:
     # policy-controlled robot stiffness.
     virtual_contact_goal_threshold: float = 1.0  # N
     virtual_contact_direction_smoothing_window: int = 9  # odd, centered, control samples
-    # True linearly interpolates the dataset-conditioned surface point, surface
-    # velocity, and target wrench at the physics rate, and interpolates then
-    # renormalizes the surface normal. False zero-order holds all four fields at
-    # their native reference samples (15 Hz for the async peg launcher).
-    virtual_contact_interpolate_reference: bool = True
     virtual_contact_plane_stiffness: float = 1500.0  # k_p, N/m
     # Scale only the force used to place the virtual plane. The recorded wrench
     # remains the tracking/metric target. Values > 1 model a stronger physical
     # reaction than the measured dataset wrench at the demonstrated pose.
     virtual_contact_reference_force_scale: float = 1.0
-    # Post-model multiplier on the virtual contact force physically applied to
-    # the wrist. Virtual sensor feedback is divided by the same value before it
-    # reaches the policy/reward, preserving the original dataset wrench units.
-    # The plane geometry and dataset target are unchanged.
-    virtual_contact_force_scale: float = 1.0
-    # Independent post-model multiplier on physically applied contact torque.
-    # Virtual torque feedback is divided by this value, independently of force.
-    virtual_contact_torque_scale: float = 1.0
     # Independent scale for the demonstrated torque coupled to virtual contact.
     virtual_contact_reference_torque_scale: float = 1.0
-    # Legacy replay scales demonstrated torque by normal-force magnitude.
-    # The orientation models instead construct an offset equilibrium orientation
-    # and compute torque from live orientation and angular-velocity error.
-    virtual_contact_torque_model: Literal[
-        "dataset_force_coupled", "orientation_spring", "orientation_power_law"
-    ] = "dataset_force_coupled"
-    virtual_contact_rotational_stiffness: float = 4.0  # Nm/rad
-    virtual_contact_rotational_damping: float = 0.1  # Nm*s/rad
-    # For orientation_power_law, K_p is derived from these reference values:
-    # K_p = tau_ref / theta_ref**p.  The angular penetration is in radians.
-    virtual_contact_rotational_power_exponent: float = 1.5
-    virtual_contact_rotational_reference_torque: float = 0.2  # Nm
-    virtual_contact_rotational_reference_penetration: float = 0.05  # rad
     # Select the normal-force law. The linear model uses a Kelvin-Voigt damping
     # coefficient derived from damping_ratio; Drake Hunt-Crossley and power_law
     # use the separate multiplicative dissipation coefficient below (units s/m).
@@ -324,31 +329,9 @@ class TrackingCfg:
     virtual_contact_force_cap: float = 20.0  # N; zero disables the clamp
     virtual_contact_torque_cap: float = 2.0  # Nm; zero disables the clamp
 
-    # Reset-time, per-environment contact-domain randomization. Parameters are
-    # sampled once and held for the complete episode so the actor can infer the
-    # hidden contact law from its observation history. Disabled by default to
-    # preserve existing checkpoint and replay behavior.
-    virtual_contact_randomize_parameters: bool = False
-    # Narrow ablation switch: randomize only the signed normal surface offset,
-    # leaving the contact law and normal direction fixed.
-    virtual_contact_randomize_surface_offset: bool = False
-    power_law_exponent_range = [1.0, 1.6]
-    power_law_reference_penetration_range = [0.003, 0.010]  # m, log-uniform
-    hunt_crossley_dissipation_range = [0.0, 100.0]  # s/m
-    virtual_contact_surface_offset_range = [-0.002, 0.002]  # m along tilted normal
-    virtual_contact_normal_tilt_range = [0.0, 0.17453292519943295]  # rad, 0--10 deg
-    virtual_contact_rotational_power_exponent_range = [1.1, 2.0]
-    virtual_contact_rotational_reference_penetration_range = [0.2, 0.6]  # rad, log-uniform
-    virtual_contact_rotational_damping_range = [0.0, 0.05]  # Nm*s/rad
-    # TODO: evaluate physical-force-scale randomization as an isolated follow-up;
-    # keep virtual_contact_force_scale fixed for the first adaptive-policy study.
-
-    # Synthetic six-axis wrench sensor shown to the actor. Noise and reset-time
-    # bias are disabled so training matches hierarchical Forge evaluation.
-    # At the default 60 Hz physics rate, this has the same physical-time EMA
-    # response as Forge's alpha=0.25 filter running at 120 Hz:
-    # 1 - (1 - 0.25) ** (120 / 60) = 0.4375.
-    force_sensor_smoothing_factor: float = 0.4375
+    # Synthetic six-axis wrench sensor shown to the actor. Force and torque use
+    # separate noise/bias scales because their units differ.
+    force_sensor_smoothing_factor: float = 0.25
     force_sensor_noise_std: float = 0.0  # N
     force_sensor_bias_range: float = 0.0  # N, per-axis reset-time bias
     torque_sensor_noise_std: float = 0.0  # Nm
@@ -430,12 +413,61 @@ class RandomizationCfg:
     link_mass_scale_range = [0.75, 1.25]
 
     enable_payload: bool = True
-    payload_mass_range = [0.0, 1.5]
+    # This models *uncompensated, unmodeled* end-effector mass, not the hand
+    # itself: the payload is merged into panda_hand's inertia while the
+    # controller keeps the nominal mass matrix (use_gt_mass_matrix=False), and
+    # robot gravity is disabled so the payload's weight enters only as an
+    # external wrench. So payload_mass = 0 is the correct analogue of the real
+    # robot, where the 0.73 kg hand is registered in Franka Desk (hence
+    # gravity-compensated by the control box) and now also present in
+    # panda_arm.urdf (hence inside the controller's Lambda).
+    # [0.0, 1.5] put the true value at the extreme edge of the distribution and
+    # spent most of training compensating a phantom load. 0.5 still covers a
+    # forgotten GelSight assembly (~0.06 kg) or Desk CoM error with wide margin.
+    payload_mass_range = [0.0, 0.5]
     payload_com_range = [[-0.04, 0.04], [-0.04, 0.04], [-0.02, 0.12]]
     payload_body_name: str = "panda_hand"
 
     enable_joint_friction: bool = True
-    joint_friction_range = [0.0, 5.0]
+    # PhysX joint friction is an absolute torque, and real FR3 friction is
+    # strongly non-uniform: panda_arm.urdf declares 5.0 N*m on joint 1 but
+    # 0.5 N*m on joints 4/6/7. Drawing all seven from one scalar range therefore
+    # trains joint 7 at up to 10x any plausible value while sometimes leaving
+    # joint 1 frictionless -- neither resembles the hardware. So each joint gets
+    # its own band and the whole arm gets one shared level:
+    #     level      ~ U(joint_friction_scale_range)       # ONE draw per env
+    #     friction_i ~ U(joint_friction_range[i]) * level  # independent per joint
+    #
+    # The per-joint band is what sys-id identifies (one interval per joint,
+    # around the identified value). The shared `level` is the arm-wide
+    # stiff/loose axis, and it needs its own draw because seven independent
+    # draws average that axis away -- the overall level's std shrinks by
+    # sqrt(7), so the chance of all seven landing in the upper half of their
+    # bands is 0.8%. The hardware failure mode is the *whole arm* sticking, so
+    # that axis is exactly the one that needs coverage.
+    #
+    # `joint_friction_range` accepts either a 7x2 per-joint table (the scheme
+    # above) or a single [lo, hi] pair, which broadcasts to all seven joints.
+    # `joint_friction_scale_range` defaults to a no-op; set it to widen or
+    # narrow the shared level. These pre-sys-id bounds use the URDF-declared
+    # friction as each joint's upper bound -- replace them with the identified
+    # per-joint bands from scripts/sysid_cmaes_robust_track.py.
+    joint_friction_range = [
+        [0.0, 5.0],  # joint 1
+        [0.0, 2.0],  # joint 2
+        [0.0, 2.0],  # joint 3
+        [0.0, 0.5],  # joint 4
+        [0.0, 1.0],  # joint 5
+        [0.0, 0.5],  # joint 6
+        [0.0, 0.5],  # joint 7
+    ]  # N*m
+    joint_friction_scale_range = [1.0, 1.0]  # common level, one draw per env
+    # Legacy scheme, superseded by the per-joint table above: when this is not
+    # None, friction is `nominal_i * U(scale_range) * U(1 - jitter, 1 + jitter)`.
+    # Kept only so a run whose params/env.pkl was written before the per-joint
+    # table replays with the distribution it was actually trained on.
+    joint_friction_nominal = None
+    joint_friction_jitter = 0.3
 
     # Per-joint reflected rotor inertia (kg·m²) added to the diagonal of the arm's
     # joint-space mass matrix in PhysX. Franka harmonic-drive joints have reflected
@@ -444,8 +476,66 @@ class RandomizationCfg:
     # OSC controller stays blind to it — its nominal mass matrix keeps the
     # config-default armature — so the sampled armature is a modeled-vs-real inertia
     # mismatch the policy must be robust to.
+    #
+    # Sampled exactly like friction: a per-joint band times one shared level
+    # draw. Both accept a 7x2 table or a single [lo, hi] pair.
     enable_joint_armature: bool = True
-    joint_armature_range = [0.0, 0.3]
+    joint_armature_range = [
+        [0.0, 0.3],
+        [0.0, 0.3],
+        [0.0, 0.3],
+        [0.0, 0.3],
+        [0.0, 0.3],
+        [0.0, 0.3],
+        [0.0, 0.3],
+    ]  # kg*m^2
+    joint_armature_scale_range = [1.0, 1.0]  # common level, one draw per env
+
+    # Sliding Coulomb friction as a fraction of the breakaway (static) value:
+    # PhysX keeps the two as separate per-DOF coefficients and applies the
+    # dynamic one once a joint is moving. Leaving it at the USD default (0 on
+    # this arm) means a joint that has broken free feels no Coulomb resistance
+    # at all, so this is written on every reset whether randomized or not.
+    # Ratio 1 is the textbook single-coefficient model. It may never exceed 1:
+    # PhysX requires static >= dynamic and rejects the whole articulation write
+    # otherwise, silently leaving the previous values installed.
+    enable_joint_dynamic_ratio: bool = True
+    joint_dynamic_ratio_range = [[1.0, 1.0]] * 7  # dimensionless, capped at 1
+    joint_dynamic_ratio_scale_range = [1.0, 1.0]
+
+    # PhysX viscous joint friction (`friction_props[..., 2]`), a torque
+    # proportional to joint velocity. Distinct from articulation drive damping:
+    # this is the solver's own friction term and does not depend on the drive's
+    # velocity target or stiffness staying at zero. Real harmonic drives have a
+    # substantial viscous component and the env had no way to express it before,
+    # so a policy trained without this has never seen speed-dependent
+    # dissipation.
+    enable_joint_viscous: bool = True
+    joint_viscous_range = [[0.0, 0.0]] * 7
+    joint_viscous_scale_range = [1.0, 1.0]
+
+    # Command dead time, in whole POLICY control steps: the arm executes the
+    # action the policy emitted `latency` steps ago. One step is `decimation *
+    # sim.dt` = 33.3 ms at the deployed 30 Hz, so the unit is coarse and the
+    # plausible band is small.
+    #
+    # Integer only, and drawn per env at reset. A fractional delay would have to
+    # interpolate between two actions, inventing a command neither the policy nor
+    # the robot ever produced -- the same reason `SysIdReplay._set_latency`
+    # rounds its searched value with `np.rint` before indexing the command table.
+    # This samples the integers directly rather than rounding a continuous draw,
+    # which is the discrete analogue: `randint(lo, hi + 1)`, so the range is
+    # INCLUSIVE at both ends and [0, 1] means "half the envs run undelayed, half
+    # run one step late".
+    #
+    # Deliberately NOT part of the observation. Every other randomized dynamics
+    # term is a critic privileged input, but adding a dim here would change the
+    # critic obs width and break `set_full_state_weights` on every existing
+    # checkpoint. Latency is a disturbance to be robust to rather than something
+    # to condition on, so the cost of leaving it out is unexplained return
+    # variance in the critic, not a wrong policy.
+    enable_action_latency: bool = False
+    action_latency_range = [0, 1]  # control steps, inclusive, integer
 
 
 @configclass
@@ -459,14 +549,7 @@ class RewardCfg:
     # kernel saturates to ~0 and provides no gradient (rot error runs ~1 rad, so a
     # tight temp like 0.1 leaves it in a flat dead zone).
     pos_error_temp: float = 0.01  # m
-    rot_error_temp: float = 0.3  # rad
-    # Narrow kernels refine tracking once the broad terms have brought the
-    # policy close to the reference. Rotation uses a broad 0.3-rad recovery
-    # kernel above and an equally weighted 0.1-rad refinement kernel below.
-    fine_pos_error_scale: float = 0.0
-    fine_rot_error_scale: float = 2.0
-    fine_pos_error_temp: float = 0.03  # m
-    fine_rot_error_temp: float = 0.1  # rad
+    rot_error_temp: float = 0.1  # rad
     ee_vel_scale: float = -0.01
     # Penalize step-to-step change in EE velocity (acceleration) for smoother motion.
     ee_accel_scale: float = -0.05
@@ -499,8 +582,8 @@ class RewardCfg:
     contact_normal_pose_weight: float = 0.2
     joint_vel_scale: float = -0.002
     joint_limit_scale: float = -0.05
-    success_pos_threshold: float = 0.001
-    success_rot_threshold: float = 0.05
+    success_pos_threshold: float = 0.003
+    success_rot_threshold: float = 0.1
 
 
 @configclass
@@ -520,10 +603,23 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
     # frame. Disable this when training a tracker that should rely only on the
     # fingertip pose and its previous action history.
     include_joint_angles: bool = True
-    # Include the seven arm joint velocities in each proprioceptive history
-    # frame. Disabled by default to preserve the observation contract of
-    # existing policies.
+    # Include measured arm joint velocities (rad/s) immediately after joint
+    # angles in each proprioceptive frame.
     include_joint_velocities: bool = False
+
+    # Whether the executed task-space Kp is part of the POLICY observation. The
+    # critic sees it either way -- when this is False the 6 gain dims move to
+    # the privileged block rather than disappearing, exactly like joint friction
+    # and armature.
+    #
+    # True makes the policy gain-*adaptive*: it can read Kp and adjust. That is
+    # also what pinned the 0803 checkpoint to a single gain on hardware, because
+    # the slice is normalized with training statistics and an unrandomized Kp
+    # gives it std ~0.008, so any deployed gain other than the training value
+    # normalizes to thousands of sigma and saturates every action. False makes
+    # the policy gain-*robust* instead: it never sees Kp, so no normalization
+    # blowup is possible and randomization alone has to buy the robustness.
+    controller_context_in_policy: bool = True
     # Debug guard that synchronizes policy/critic tensors back to the CPU each
     # step. Offline replay disables it after startup validation for throughput.
     validate_observations: bool = True
@@ -532,21 +628,6 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
     # lookahead targets, and the full episode path (sampled in time).
     debug_vis: bool = False
     debug_vis_path_samples: int = 40
-    # Virtual-contact force visualization. Component mode renders signed Fx/Fy/Fz
-    # as red/green/blue arrows along the world axes. Vector mode renders their
-    # resultant. Yellow is used for the plane outward-normal arrow, and the
-    # translucent cyan patch is the active virtual plane.
-    debug_vis_force: bool = False
-    debug_vis_force_style: Literal["components", "vector", "both"] = "components"
-    debug_vis_force_source: Literal["reference", "realized", "both"] = "reference"
-    debug_vis_force_scale: float = 0.02  # rendered arrow length, m/N
-    debug_vis_force_shaft_radius: float = 0.0025  # cylindrical shaft radius, m
-    debug_vis_force_head_radius: float = 0.008  # conical arrowhead radius, m
-    debug_vis_force_head_length: float = 0.018  # maximum arrowhead length, m
-    debug_vis_force_plane_size: float = 0.08  # square plane side length, m
-    debug_vis_force_normal_length: float = 0.06  # rendered unit-normal arrow, m
-    debug_vis_force_ee_sphere: bool = True
-    debug_vis_force_ee_sphere_radius: float = 0.002  # current EE marker radius, m
 
     # Per-episode-step tracking-error profile logged to wandb as a mean±std line
     # plot. The pos/rot tracking error is binned by the step index within the
@@ -554,11 +635,12 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
     # logged and the accumulators are reset. Set <= 0 to disable the logging.
     log_perstep_error_episodes: int = 5
     # observation_space / state_space are recomputed in __post_init__. Only the
-    # proprioceptive part (20 dims by default, 27 with joint velocities, or 13
-    # when both joint fields are disabled) is stacked over obs_history_length
-    # frames. The lookahead future errors (6 * num_future_steps), controller
-    # gains (6), and the critic's privileged dims are episode-constant/current
-    # context, so they are appended once rather than duplicated across history.
+    # proprioceptive part (20 dims by default, or 13 without joint angles) is
+    # stacked over obs_history_length frames so the network can infer
+    # velocities/dynamics from the past. The lookahead future errors
+    # (6 * num_future_steps), controller gains (6), and the critic's privileged
+    # dims are episode-constant/current context, so they are appended once rather
+    # than duplicated across the history.
     observation_space = 50
     state_space = 74
 
@@ -697,42 +779,18 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             self.include_joint_angles = bool(env.include_joint_angles)
         if env.get("include_joint_velocities", None) is not None:
             self.include_joint_velocities = bool(env.include_joint_velocities)
+        if env.get("controller_context_in_policy", None) is not None:
+            self.controller_context_in_policy = bool(env.controller_context_in_policy)
         if env.get("debug_vis", None) is not None:
             self.debug_vis = env.debug_vis
         if env.get("debug_vis_path_samples", None) is not None:
             self.debug_vis_path_samples = env.debug_vis_path_samples
-        if env.get("debug_vis_force", None) is not None:
-            self.debug_vis_force = bool(env.debug_vis_force)
-        if env.get("debug_vis_force_style", None) is not None:
-            self.debug_vis_force_style = str(env.debug_vis_force_style)
-        if env.get("debug_vis_force_source", None) is not None:
-            self.debug_vis_force_source = str(env.debug_vis_force_source)
-        if env.get("debug_vis_force_scale", None) is not None:
-            self.debug_vis_force_scale = float(env.debug_vis_force_scale)
-        if env.get("debug_vis_force_shaft_radius", None) is not None:
-            self.debug_vis_force_shaft_radius = float(env.debug_vis_force_shaft_radius)
-        if env.get("debug_vis_force_head_radius", None) is not None:
-            self.debug_vis_force_head_radius = float(env.debug_vis_force_head_radius)
-        if env.get("debug_vis_force_head_length", None) is not None:
-            self.debug_vis_force_head_length = float(env.debug_vis_force_head_length)
-        if env.get("debug_vis_force_plane_size", None) is not None:
-            self.debug_vis_force_plane_size = float(env.debug_vis_force_plane_size)
-        if env.get("debug_vis_force_normal_length", None) is not None:
-            self.debug_vis_force_normal_length = float(env.debug_vis_force_normal_length)
-        if env.get("debug_vis_force_ee_sphere", None) is not None:
-            self.debug_vis_force_ee_sphere = bool(env.debug_vis_force_ee_sphere)
-        if env.get("debug_vis_force_ee_sphere_radius", None) is not None:
-            self.debug_vis_force_ee_sphere_radius = float(
-                env.debug_vis_force_ee_sphere_radius
-            )
         if env.get("log_perstep_error_episodes", None) is not None:
             self.log_perstep_error_episodes = int(env.log_perstep_error_episodes)
         # Physics-step control: `decimation` sim substeps per control step and the
         # physics `sim.dt`. step_dt = decimation * sim.dt sets the control rate, so to
         # match the factory/forge peg-collection env exactly use dt=1/120 + decimation=8
         # (120 Hz physics, 15 Hz control) instead of the default 1/60 + 4.
-        if env.get("episode_length_s", None) is not None:
-            self.episode_length_s = float(env.episode_length_s)
         if env.get("decimation", None) is not None:
             self.decimation = int(env.decimation)
         sim = env.get("sim", OmegaConf.create({}))
@@ -753,6 +811,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "task_prop_gains_noise_level",
             "task_prop_gains_randomization_scale_range",
             "task_prop_gains_randomization_mode",
+            "task_deriv_gains_damping_ratio_range",
             "control_gains",
             "task_prop_gains_min",
             "task_prop_gains_max",
@@ -774,7 +833,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "rot_speed_range",
             "rot_angle_range",
             "num_future_steps",
-            "reference_decimation",
+            "reference_start_offset",
             "dataset_path",
             "dataset_pose_key",
             "dataset_state_key",
@@ -795,12 +854,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "dataset_force_bias_samples",
             "dataset_contact_force_threshold",
             "enable_force",
-            "use_full_wrench",
             "force_mode",
             "dataset_wrench_ema_alpha",
-            "disturbance_force_scale",
-            "disturbance_torque_scale",
-            "disturbance_torque_clip_percentile",
             "force_mag_range",
             "torque_mag_max",
             "force_num_bands_range",
@@ -810,18 +865,9 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "force_dir_drift",
             "virtual_contact_goal_threshold",
             "virtual_contact_direction_smoothing_window",
-            "virtual_contact_interpolate_reference",
             "virtual_contact_plane_stiffness",
             "virtual_contact_reference_force_scale",
-            "virtual_contact_force_scale",
-            "virtual_contact_torque_scale",
             "virtual_contact_reference_torque_scale",
-            "virtual_contact_torque_model",
-            "virtual_contact_rotational_stiffness",
-            "virtual_contact_rotational_damping",
-            "virtual_contact_rotational_power_exponent",
-            "virtual_contact_rotational_reference_torque",
-            "virtual_contact_rotational_reference_penetration",
             "contact_model",
             "virtual_contact_damping_ratio",
             "hunt_crossley_dissipation",
@@ -835,16 +881,6 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "virtual_contact_transition_width",
             "virtual_contact_force_cap",
             "virtual_contact_torque_cap",
-            "virtual_contact_randomize_parameters",
-            "virtual_contact_randomize_surface_offset",
-            "power_law_exponent_range",
-            "power_law_reference_penetration_range",
-            "hunt_crossley_dissipation_range",
-            "virtual_contact_surface_offset_range",
-            "virtual_contact_normal_tilt_range",
-            "virtual_contact_rotational_power_exponent_range",
-            "virtual_contact_rotational_reference_penetration_range",
-            "virtual_contact_rotational_damping_range",
             "force_sensor_smoothing_factor",
             "force_sensor_noise_std",
             "force_sensor_bias_range",
@@ -887,8 +923,20 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "payload_body_name",
             "enable_joint_friction",
             "joint_friction_range",
+            "joint_friction_nominal",
+            "joint_friction_scale_range",
+            "joint_friction_jitter",
             "enable_joint_armature",
             "joint_armature_range",
+            "joint_armature_scale_range",
+            "enable_joint_dynamic_ratio",
+            "joint_dynamic_ratio_range",
+            "joint_dynamic_ratio_scale_range",
+            "enable_joint_viscous",
+            "joint_viscous_range",
+            "joint_viscous_scale_range",
+            "enable_action_latency",
+            "action_latency_range",
         ]:
             if randomization.get(key, None) is not None:
                 value = randomization[key]
@@ -900,10 +948,6 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "rot_error_scale",
             "pos_error_temp",
             "rot_error_temp",
-            "fine_pos_error_scale",
-            "fine_rot_error_scale",
-            "fine_pos_error_temp",
-            "fine_rot_error_temp",
             "ee_vel_scale",
             "ee_accel_scale",
             "action_rate_scale",
@@ -932,51 +976,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
 
     def __post_init__(self):
         self.update_env_params()
-        for name in (
-            "pos_error_temp",
-            "rot_error_temp",
-            "fine_pos_error_temp",
-            "fine_rot_error_temp",
-        ):
-            if float(getattr(self.reward, name)) <= 0.0:
-                raise ValueError(f"reward.{name} must be positive")
-        if self.debug_vis_force_style not in ("components", "vector", "both"):
-            raise ValueError(
-                "debug_vis_force_style must be 'components', 'vector', or 'both'"
-            )
-        if self.debug_vis_force_source not in ("reference", "realized", "both"):
-            raise ValueError(
-                "debug_vis_force_source must be 'reference', 'realized', or 'both'"
-            )
-        if float(self.debug_vis_force_scale) <= 0.0:
-            raise ValueError("debug_vis_force_scale must be positive")
-        if float(self.debug_vis_force_shaft_radius) <= 0.0:
-            raise ValueError("debug_vis_force_shaft_radius must be positive")
-        if float(self.debug_vis_force_head_radius) <= 0.0:
-            raise ValueError("debug_vis_force_head_radius must be positive")
-        if float(self.debug_vis_force_head_length) <= 0.0:
-            raise ValueError("debug_vis_force_head_length must be positive")
-        if float(self.debug_vis_force_plane_size) <= 0.0:
-            raise ValueError("debug_vis_force_plane_size must be positive")
-        if float(self.debug_vis_force_normal_length) <= 0.0:
-            raise ValueError("debug_vis_force_normal_length must be positive")
-        if float(self.debug_vis_force_ee_sphere_radius) <= 0.0:
-            raise ValueError("debug_vis_force_ee_sphere_radius must be positive")
         self.tracking.num_future_steps = int(self.tracking.num_future_steps)
-        self.tracking.reference_decimation = int(
-            self.tracking.reference_decimation
-        )
-        if self.tracking.reference_decimation == 0:
-            self.tracking.reference_decimation = self.decimation
-        if self.tracking.reference_decimation < self.decimation:
-            raise ValueError(
-                "tracking.reference_decimation must be at least env.decimation"
-            )
-        if self.tracking.reference_decimation % self.decimation != 0:
-            raise ValueError(
-                "tracking.reference_decimation must be an integer multiple of "
-                "env.decimation"
-            )
+        self.tracking.reference_start_offset = int(self.tracking.reference_start_offset)
         self.tracking.force_mode = str(self.tracking.force_mode)
         if self.tracking.force_mode not in (
             "replay_disturbance",
@@ -1002,22 +1003,6 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             )
         if not 0.0 < float(self.tracking.dataset_wrench_ema_alpha) <= 1.0:
             raise ValueError("tracking.dataset_wrench_ema_alpha must be in (0, 1]")
-        if float(self.tracking.disturbance_force_scale) < 0.0:
-            raise ValueError("tracking.disturbance_force_scale must be non-negative")
-        if float(self.tracking.disturbance_torque_scale) < 0.0:
-            raise ValueError("tracking.disturbance_torque_scale must be non-negative")
-        torque_clip_percentile = float(
-            self.tracking.disturbance_torque_clip_percentile
-        )
-        if not 0.0 < torque_clip_percentile <= 100.0:
-            raise ValueError(
-                "tracking.disturbance_torque_clip_percentile must be in (0, 100]"
-            )
-        self.tracking.use_full_wrench = bool(self.tracking.use_full_wrench)
-        if self.tracking.force_mode == "replay_raw_wrench" and not self.tracking.use_full_wrench:
-            raise ValueError(
-                "tracking.force_mode='replay_raw_wrench' requires use_full_wrench=True"
-            )
         if float(self.tracking.torque_mag_max) <= 0.0:
             raise ValueError("tracking.torque_mag_max must be positive")
         self.tracking.dataset_force_bias_samples = int(self.tracking.dataset_force_bias_samples)
@@ -1034,45 +1019,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
                 raise ValueError("tracking.virtual_contact_plane_stiffness must be positive")
             if float(self.tracking.virtual_contact_reference_force_scale) <= 0.0:
                 raise ValueError("tracking.virtual_contact_reference_force_scale must be positive")
-            if float(self.tracking.virtual_contact_force_scale) <= 0.0:
-                raise ValueError("tracking.virtual_contact_force_scale must be positive")
-            if float(self.tracking.virtual_contact_torque_scale) <= 0.0:
-                raise ValueError("tracking.virtual_contact_torque_scale must be positive")
             if float(self.tracking.virtual_contact_reference_torque_scale) <= 0.0:
                 raise ValueError("tracking.virtual_contact_reference_torque_scale must be positive")
-            self.tracking.virtual_contact_torque_model = str(
-                self.tracking.virtual_contact_torque_model
-            )
-            if self.tracking.virtual_contact_torque_model not in (
-                "dataset_force_coupled",
-                "orientation_spring",
-                "orientation_power_law",
-            ):
-                raise ValueError(
-                    "tracking.virtual_contact_torque_model must be "
-                    "'dataset_force_coupled', 'orientation_spring', or "
-                    "'orientation_power_law'"
-                )
-            if float(self.tracking.virtual_contact_rotational_stiffness) <= 0.0:
-                raise ValueError(
-                    "tracking.virtual_contact_rotational_stiffness must be positive"
-                )
-            if float(self.tracking.virtual_contact_rotational_damping) < 0.0:
-                raise ValueError(
-                    "tracking.virtual_contact_rotational_damping must be non-negative"
-                )
-            if float(self.tracking.virtual_contact_rotational_power_exponent) <= 0.0:
-                raise ValueError(
-                    "tracking.virtual_contact_rotational_power_exponent must be positive"
-                )
-            if float(self.tracking.virtual_contact_rotational_reference_torque) <= 0.0:
-                raise ValueError(
-                    "tracking.virtual_contact_rotational_reference_torque must be positive"
-                )
-            if float(self.tracking.virtual_contact_rotational_reference_penetration) <= 0.0:
-                raise ValueError(
-                    "tracking.virtual_contact_rotational_reference_penetration must be positive"
-                )
             self.tracking.contact_model = str(self.tracking.contact_model)
             if self.tracking.contact_model not in (
                 "linear",
@@ -1109,41 +1057,6 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
                 raise ValueError("tracking.virtual_contact_torque_cap must be non-negative")
             if float(self.tracking.virtual_contact_transition_width) < 0.0:
                 raise ValueError("tracking.virtual_contact_transition_width must be non-negative")
-            self.tracking.virtual_contact_randomize_parameters = bool(
-                self.tracking.virtual_contact_randomize_parameters
-            )
-            self.tracking.virtual_contact_randomize_surface_offset = bool(
-                self.tracking.virtual_contact_randomize_surface_offset
-            )
-            randomization_ranges = {
-                "power_law_exponent_range": (True, False),
-                "power_law_reference_penetration_range": (True, True),
-                "hunt_crossley_dissipation_range": (False, False),
-                "virtual_contact_surface_offset_range": (False, False),
-                "virtual_contact_normal_tilt_range": (False, False),
-                "virtual_contact_rotational_power_exponent_range": (True, False),
-                "virtual_contact_rotational_reference_penetration_range": (True, True),
-                "virtual_contact_rotational_damping_range": (False, False),
-            }
-            for name, (positive, log_uniform) in randomization_ranges.items():
-                values = list(getattr(self.tracking, name))
-                if len(values) != 2:
-                    raise ValueError(f"tracking.{name} must be [low, high]")
-                low, high = (float(value) for value in values)
-                if low > high:
-                    raise ValueError(f"tracking.{name} must satisfy low <= high")
-                if positive and low <= 0.0:
-                    raise ValueError(f"tracking.{name} lower bound must be positive")
-                if not positive and name != "virtual_contact_surface_offset_range" and low < 0.0:
-                    raise ValueError(f"tracking.{name} lower bound must be non-negative")
-                if log_uniform and low <= 0.0:
-                    raise ValueError(f"tracking.{name} log-uniform bounds must be positive")
-                setattr(self.tracking, name, [low, high])
-            if self.tracking.virtual_contact_randomize_parameters:
-                if self.tracking.contact_model != "power_law":
-                    raise ValueError(
-                        "virtual-contact parameter randomization requires contact_model='power_law'"
-                    )
             if not 0.0 <= float(self.tracking.force_sensor_smoothing_factor) <= 1.0:
                 raise ValueError("tracking.force_sensor_smoothing_factor must be in [0, 1]")
             if float(self.tracking.torque_sensor_noise_std) < 0.0:
@@ -1152,6 +1065,11 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
                 raise ValueError("tracking.torque_sensor_bias_range must be non-negative")
         if self.tracking.num_future_steps < 1:
             raise ValueError("tracking.num_future_steps must be at least 1")
+        if self.tracking.reference_start_offset not in (0, 1):
+            raise ValueError(
+                "tracking.reference_start_offset must be 0 (current-inclusive) "
+                "or 1 (future-only)"
+            )
         self.tool_frame = str(self.tool_frame).strip() or "auto"
         self.robot.spawn.usd_path = f"{ASSET_DIR}/{self.robot_usd_path}"
         self.sim.render_interval = self.decimation
@@ -1161,15 +1079,14 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
         action_dim = 6 + (6 if self.ctrl.control_gains else 0)
         self.action_space = action_dim
 
-        # Proprio obs: ee_pos(3)+ee_quat(4)+optional joint_pos(7)
-        # +optional joint_vel(7)+actions(action_dim). Each lookahead pose
-        # contributes a (pos_error, axis_angle_error) pair = 6 dims.
+        # Proprio obs: ee_pos(3)+ee_quat(4)+optional joint_pos(7)+optional
+        # joint_vel(7)+actions(action_dim). Each
+        # lookahead pose contributes a (pos_error, axis_angle_error) pair = 6 dims.
         # The 6 current task gains are fed once to both policy and critic. The
         # critic adds 24 privileged dims: payload_mass(1)+payload_com(3)
         # +joint_friction(7)+joint_armature(7)+pos_threshold(3)+rot_threshold(3).
-        wrench_dim = 6 if self.tracking.use_full_wrench else 3
         force_feedback_dim = (
-            wrench_dim
+            6
             if self.tracking.enable_force and self.tracking.force_mode == "virtual_contact"
             else 0
         )
@@ -1188,16 +1105,18 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             else 0
         )
         privileged_dim = 24 + virtual_contact_privileged_dim
-        # Wrench tracking contributes either force3 (legacy) or force3+torque3
-        # per future step to both observations.
-        force_dim = (
-            wrench_dim * self.tracking.num_future_steps
-            if self.tracking.enable_force
-            else 0
-        )
+        # Wrench-tracking add-on uses the same reference start offset as the pose
+        # window and contributes force3+torque3 per step to both observations.
+        force_dim = 6 * self.tracking.num_future_steps if self.tracking.enable_force else 0
         history = max(1, int(self.obs_history_length))
         # Only proprio is stacked over history; future errors + target wrench +
         # controller gains (policy+critic) and privileged dims (critic) are appended
         # once from the current frame.
-        self.observation_space = proprio_dim * history + future_dim + force_dim + controller_context_dim
-        self.state_space = self.observation_space + privileged_dim
+        # The gain block is always in the critic; `controller_context_in_policy`
+        # decides whether the policy sees it too, so it moves between the two
+        # sums rather than being added or dropped outright.
+        policy_gain_dim = controller_context_dim if self.controller_context_in_policy else 0
+        self.observation_space = proprio_dim * history + future_dim + force_dim + policy_gain_dim
+        self.state_space = (
+            proprio_dim * history + future_dim + force_dim + controller_context_dim + privileged_dim
+        )
