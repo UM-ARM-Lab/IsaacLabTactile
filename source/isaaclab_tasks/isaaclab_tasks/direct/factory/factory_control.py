@@ -35,6 +35,7 @@ def compute_dof_torque(
     nullspace_joint_target=None,
     return_debug=False,
     apply_task_inertia=False,
+    use_singularity_robust_inverse=False,
 ):
     """Compute Franka DOF torque to move fingertips towards target pose.
 
@@ -85,7 +86,16 @@ def compute_dof_torque(
     arm_mass_matrix_inv = torch.inverse(arm_mass_matrix)
     jacobian_T = torch.transpose(jacobian, dim0=1, dim1=2)
     task_inertia = jacobian @ arm_mass_matrix_inv @ jacobian_T
-    arm_mass_matrix_task = torch.inverse(task_inertia)  # ETH eq. 3.86; geometric Jacobian is assumed
+    if use_singularity_robust_inverse:
+        task_inertia_det = torch.linalg.det(task_inertia)
+        inverse_candidate = torch.inverse(task_inertia)
+        pinv_candidate = torch.linalg.pinv(task_inertia, rcond=1.0e-2)
+        use_inverse = task_inertia_det.abs().ge(1.0e-2).view(-1, 1, 1)
+        arm_mass_matrix_task = torch.where(
+            use_inverse, inverse_candidate, pinv_candidate
+        )
+    else:
+        arm_mass_matrix_task = torch.inverse(task_inertia)
     j_eef_inv = arm_mass_matrix_task @ jacobian @ arm_mass_matrix_inv
 
     if not torch.isfinite(arm_mass_matrix_task).all():
@@ -143,6 +153,9 @@ def compute_dof_torque(
             "dead_zone_thresholds": dead_zone_thresholds,
             "task_inertia_diag": torch.diagonal(arm_mass_matrix_task, dim1=-2, dim2=-1),
             "task_inertia_det": torch.linalg.det(task_inertia).unsqueeze(-1),
+            "task_inertia_used_pinv": (
+                torch.linalg.det(task_inertia).abs().lt(1.0e-2).unsqueeze(-1)
+            ),
         }
     return dof_torque, task_wrench
 

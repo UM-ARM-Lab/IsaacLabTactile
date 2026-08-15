@@ -975,6 +975,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             device=self.device,
             nullspace_joint_target=self.nominal_start_joint_pos,
             apply_task_inertia=self.cfg.ctrl.use_task_space_inertia,
+            use_singularity_robust_inverse=(
+                self.cfg.ctrl.singularity_robust_inverse
+            ),
         )
         # Model actuator gain error and residual gravity-compensation torque after
         # OSC, before PhysX applies its effort limit.

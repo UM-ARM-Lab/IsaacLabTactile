@@ -51,6 +51,7 @@ class CtrlCfg:
     # mass and the critical-damping gains (Kd = 2·√Kp) actually hold. Off gives the
     # legacy Jacobian-transpose PD, which is under-damped and oscillates in free space.
     use_task_space_inertia: bool = True
+    singularity_robust_inverse: bool = False
 
     pos_action_threshold = [0.02, 0.02, 0.02]
     rot_action_threshold = [0.15, 0.15, 0.15]
@@ -785,6 +786,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "delta_target_mode",
             "use_gt_mass_matrix",
             "use_task_space_inertia",
+            "singularity_robust_inverse",
             "pos_action_threshold",
             "rot_action_threshold",
             "default_task_prop_gains",
