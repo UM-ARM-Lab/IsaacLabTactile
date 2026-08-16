@@ -138,10 +138,17 @@ class TrackingCfg:
     # same straight-line reference every reset.
     line_dir = [1.0, 0.0, 0.0]
 
-    # Circle trajectory: EE traces a circle in a randomized plane, anchored so
-    # that t=0 coincides with the reset pose. Direction (cw/ccw) is randomized.
+    # Circle trajectory: EE traces a circle in a randomized plane. With the
+    # default zero start-time offset, t=0 coincides with the sampled anchor pose.
+    # Direction (cw/ccw) is randomized.
     circle_radius_range = [0.05, 0.15]  # m
     circle_speed_range = [0.20, 0.80]  # rad/s (angular speed)
+    # Optional temporal phase offset for analytic circles. Zero preserves the
+    # historical reset-at-the-start behavior.
+    circle_start_time_range = [0.0, 0.0]  # s
+    # Finite source-clip duration. References beyond this time hold the final
+    # pose, matching the padded-tail behavior of fixed-length dataset clips.
+    circle_reference_duration_s: float = 10.0
 
     # Optional orientation sweep: constant angular velocity about a randomized
     # axis, capped at a randomized total angle. Set ranges to 0 to hold fixed.
@@ -850,6 +857,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "line_dir",
             "circle_radius_range",
             "circle_speed_range",
+            "circle_start_time_range",
+            "circle_reference_duration_s",
             "rot_speed_range",
             "rot_angle_range",
             "num_future_steps",

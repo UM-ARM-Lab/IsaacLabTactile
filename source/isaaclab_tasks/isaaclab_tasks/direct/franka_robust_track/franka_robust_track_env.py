@@ -224,6 +224,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.traj_v[:, 1] = 1.0
         self.traj_radius = torch.zeros((self.num_envs, 1), device=self.device)
         self.traj_omega = torch.zeros((self.num_envs, 1), device=self.device)
+        self.traj_start_time = torch.zeros((self.num_envs, 1), device=self.device)
         self.traj_rot_axis = torch.zeros((self.num_envs, 3), device=self.device)
         self.traj_rot_axis[:, 2] = 1.0
         self.traj_rot_speed = torch.zeros((self.num_envs, 1), device=self.device)
@@ -2694,6 +2695,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             "v": torch.zeros((m, 3), device=device),
             "radius": torch.zeros((m, 1), device=device),
             "omega": torch.zeros((m, 1), device=device),
+            "start_time": torch.zeros((m, 1), device=device),
         }
         params["u"][:, 0] = 1.0
         params["v"][:, 1] = 1.0
@@ -2735,6 +2737,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 torch.ones((m, 1), device=device),
             )
             params["omega"] = omega * direction_sign
+            start_time_lo, start_time_hi = tcfg.circle_start_time_range
+            params["start_time"] = start_time_lo + (
+                start_time_hi - start_time_lo
+            ) * torch.rand((m, 1), device=device)
         else:
             raise ValueError(f"Unsupported tracking mode: {tcfg.mode}")
 
@@ -2757,6 +2763,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         "v": "traj_v",
         "radius": "traj_radius",
         "omega": "traj_omega",
+        "start_time": "traj_start_time",
         "rot_axis": "traj_rot_axis",
         "rot_speed": "traj_rot_speed",
         "rot_angle": "traj_rot_angle",
@@ -2784,8 +2791,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         """Evaluate the reference pose at `elapsed_time` for the given trajectory params.
 
         `params` maps the trajectory keys to tensors with a shared leading dim `M`;
-        `elapsed_time` is (M, 1). The trajectory is anchored at `start_pos`/
-        `start_quat`, so all modes pass through it at ``elapsed_time == 0``.
+        `elapsed_time` is (M, 1). Unless an analytic circle has a nonzero
+        `start_time`, the trajectory passes through `start_pos`/`start_quat` at
+        ``elapsed_time == 0``.
         """
         mode = self.cfg.tracking.mode
         if mode == "dataset":
@@ -2796,14 +2804,27 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             displacement = torch.minimum(params["speed"] * elapsed_time, params["length"])
             pos = start_pos + params["dir"] * displacement
         elif mode == "circle":
-            theta = params["omega"] * elapsed_time
+            circle_time = torch.clamp(
+                elapsed_time + params["start_time"],
+                max=float(
+                    getattr(
+                        self.cfg.tracking,
+                        "circle_reference_duration_s",
+                        self.max_episode_length_s,
+                    )
+                ),
+            )
+            theta = params["omega"] * circle_time
             pos = start_pos + params["radius"] * (
                 (torch.cos(theta) - 1.0) * params["u"] + torch.sin(theta) * params["v"]
             )
         else:
             raise ValueError(f"Unsupported tracking mode: {mode}")
 
-        sweep_angle = torch.minimum(params["rot_speed"] * elapsed_time, params["rot_angle"]).squeeze(-1)
+        orientation_time = circle_time if mode == "circle" else elapsed_time
+        sweep_angle = torch.minimum(
+            params["rot_speed"] * orientation_time, params["rot_angle"]
+        ).squeeze(-1)
         delta_quat = torch_utils.quat_from_angle_axis(sweep_angle, params["rot_axis"])
         quat = torch_utils.quat_mul(delta_quat, start_quat)
         return pos, quat
