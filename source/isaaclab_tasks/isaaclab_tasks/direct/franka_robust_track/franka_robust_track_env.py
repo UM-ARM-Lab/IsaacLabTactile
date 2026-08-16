@@ -138,6 +138,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self._action_latency_buf = None
         self.include_joint_angles = bool(self.cfg.include_joint_angles)
         self.include_joint_velocities = bool(self.cfg.include_joint_velocities)
+        self.controller_context_in_policy = bool(self.cfg.controller_context_in_policy)
         self.proprio_dim = (
             7
             + (7 if self.include_joint_angles else 0)
@@ -163,7 +164,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         if self.wrench_dim == 6:
             wrench_scale += [self._torque_mag_max] * 3
         self._wrench_scale = torch.tensor(wrench_scale, device=self.device)
-        self.controller_context_dim = 6
+        self.controller_context_dim = 6 if self.controller_context_in_policy else 0
         self.virtual_contact_privileged_dim = 6 if self.virtual_contact_enabled else 0
         self.privileged_dim = 24 + self.virtual_contact_privileged_dim
         self.proprio_history = torch.zeros(
@@ -1204,6 +1205,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
     def _get_observations(self) -> dict:
         proprio, future_errors, controller_context, privileged = self._compute_obs_parts()
+        policy_controller_context = (
+            controller_context
+            if self.controller_context_in_policy
+            else controller_context[:, :0]
+        )
         if self.obs_history_length == 1:
             proprio_stacked = proprio
         else:
@@ -1216,15 +1222,19 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         if self.enable_force:
             future_wrench = self._future_wrench()
             policy_obs = torch.cat(
-                [proprio_stacked, future_errors, future_wrench, controller_context], dim=-1
+                [proprio_stacked, future_errors, future_wrench, policy_controller_context], dim=-1
             )
             critic_obs = torch.cat(
-                [proprio_stacked, future_errors, future_wrench, controller_context, privileged], dim=-1
+                [proprio_stacked, future_errors, future_wrench, policy_controller_context, privileged], dim=-1
             )
         else:
             future_wrench = None
-            policy_obs = torch.cat([proprio_stacked, future_errors, controller_context], dim=-1)
-            critic_obs = torch.cat([proprio_stacked, future_errors, controller_context, privileged], dim=-1)
+            policy_obs = torch.cat(
+                [proprio_stacked, future_errors, policy_controller_context], dim=-1
+            )
+            critic_obs = torch.cat(
+                [proprio_stacked, future_errors, policy_controller_context, privileged], dim=-1
+            )
 
         # Fail loud if a NaN/Inf reaches the policy/critic input. If this fires, the
         # crash is env-side (controller / sim state) rather than the policy std
