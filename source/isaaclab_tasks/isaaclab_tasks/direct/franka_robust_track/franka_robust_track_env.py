@@ -27,8 +27,11 @@ import isaacsim.core.utils.torch as torch_utils
 
 from isaaclab_tasks.direct.factory import factory_control, factory_utils
 
+from .actuator_shaping import shape_torque_held_command
 from .franka_robust_track_env_cfg import FrankaRobustTrackEnvCfg
+from .inertial_models import map_urdf_inertials
 from .reference_clock import (
+    axis_aligned_containment_mask,
     history_seed_offsets,
     is_reference_boundary,
     policy_step_to_reference_index,
@@ -94,6 +97,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self._action_target_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(
             self.num_envs, 1
         )
+        self._previous_action_target_pos = self._action_target_pos.clone()
+        self._previous_action_target_quat = self._action_target_quat.clone()
         self.packet_stiffness_override = None
         self.packet_deriv_override = None
         self.ctrl_target_joint_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
@@ -377,6 +382,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.joint_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
         self.joint_vel = torch.zeros_like(self.joint_pos)
         self.joint_torque = torch.zeros_like(self.joint_pos)
+        self.joint_torque_commanded = torch.zeros((self.num_envs, 7), device=self.device)
+        self.actuator_desired_torque = torch.zeros((self.num_envs, 7), device=self.device)
         self.applied_wrench = torch.zeros((self.num_envs, 6), device=self.device)
 
         self.pos_threshold = torch.tensor(self.cfg.ctrl.pos_action_threshold, device=self.device).repeat(self.num_envs, 1)
@@ -393,12 +400,15 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
         self.payload_mass = torch.zeros((self.num_envs, 1), device=self.device)
         self.payload_com = torch.zeros((self.num_envs, 3), device=self.device)
+        # Residual payload first moment h=m*r in the payload-body frame, kg*m.
+        # Unlike a fitted CoM, h produces the linear gravity moment h x g and
+        # remains well-conditioned when the fitted residual mass is zero.
+        self.payload_first_moment = torch.zeros((self.num_envs, 3), device=self.device)
         self.gravity_vec = torch.tensor(self.cfg.sim.gravity, device=self.device).repeat(self.num_envs, 1)
         self.link_mass_scales = torch.ones((self.num_envs, self._robot.num_bodies), device=self.device)
         self.joint_friction = torch.zeros((self.num_envs, 7), device=self.device)
-        # Sys-id actuator path. Identity unless a replay/fitter writes identified
-        # per-joint torque gain and residual gravity-compensation bias values.
-        self.joint_torque_scale = torch.ones((self.num_envs, 7), device=self.device)
+        # Sys-id residual gravity-compensation torque. Zero unless a replay or
+        # fitter writes an identified per-joint bias.
         self.joint_torque_bias = torch.zeros((self.num_envs, 7), device=self.device)
         # Per-joint reflected rotor inertia written to PhysX (domain randomization).
         # Cached for the critic's privileged observation and logging; the OSC
@@ -414,7 +424,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self._randomized_mass_matrix_validated = False
 
         self._resolve_robot_indices()
-        factory_utils.set_body_inertias(self._robot, self.scene.num_envs)
+        if self.cfg.plant_model_urdf is None:
+            factory_utils.set_body_inertias(self._robot, self.scene.num_envs)
+        else:
+            self._apply_plant_inertial_model(self.cfg.plant_model_urdf)
         self._cache_default_dynamics()
         self._compute_intermediate_values()
         # Fixed rotation from the configured tool/dataset frame to the force
@@ -592,10 +605,57 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # Link-frame offset from the current link CoM (the PhysX jacobian reference point) to the
         # nominal link CoM. Nonzero only for the payload body after a payload merge.
         self.nominal_com_offsets = torch.zeros((self.num_envs, num_links, 3), device=self.device)
+        if self.cfg.ctrl.nominal_model_urdf is not None:
+            masses, coms, inertias, _ = map_urdf_inertials(
+                list(self._robot.body_names)[1:],
+                self.cfg.ctrl.nominal_model_urdf,
+                aliases={"panda_fingertip_centered": "panda_fingertip"},
+            )
+            dtype = self.nominal_link_masses.dtype
+            self.nominal_link_masses[:] = torch.as_tensor(masses, device=self.device, dtype=dtype)
+            self.nominal_link_inertias[:] = torch.as_tensor(inertias, device=self.device, dtype=dtype)
+            current_coms = self.default_coms[:, 1:, :3].to(self.device)
+            urdf_coms = torch.as_tensor(coms, device=self.device, dtype=dtype)
+            self.nominal_com_offsets[:] = urdf_coms - current_coms
         # Nominal (config-default) armature the controller's reconstructed mass matrix uses. Cached
         # once so the controller stays blind to the per-env armature randomization written to PhysX
         # in `_randomize_dynamics` (that mismatch is a disturbance the policy must reject).
         self.arm_armature = self._robot.root_physx_view.get_dof_armatures().to(self.device)[:, 0:7]
+
+    def _apply_plant_inertial_model(self, path: str) -> None:
+        """Replace USD inertials with the selected model before caching defaults."""
+        body_names = list(self._robot.body_names)
+        masses_np, coms_np, inertias_np, present = map_urdf_inertials(
+            body_names,
+            path,
+            aliases={"panda_fingertip_centered": "panda_fingertip"},
+        )
+        masses = self._robot.root_physx_view.get_masses()
+        coms = self._robot.root_physx_view.get_coms()
+        inertias = self._robot.root_physx_view.get_inertias()
+        mapped_masses = torch.as_tensor(masses_np, device=masses.device, dtype=masses.dtype)
+        mapped_coms = torch.as_tensor(coms_np, device=coms.device, dtype=coms.dtype)
+        mapped_inertias = torch.as_tensor(
+            inertias_np.reshape(len(body_names), 9),
+            device=inertias.device,
+            dtype=inertias.dtype,
+        )
+        present_t = torch.as_tensor(present, device=masses.device)
+        non_base = torch.arange(len(body_names), device=masses.device) > 0
+        missing = non_base & ~present_t
+        masses[:, present_t] = mapped_masses[present_t]
+        coms[:, present_t, :3] = mapped_coms[present_t]
+        inertias[:, present_t] = mapped_inertias[present_t]
+        negligible = missing | (non_base & present_t & (mapped_masses <= 0.0))
+        masses[:, negligible] = 1.0e-6
+        coms[:, negligible, :3] = 0.0
+        inertias[:, negligible] = 0.0
+        for diagonal_index in (0, 4, 8):
+            inertias[:, negligible, diagonal_index] = 1.0e-9
+        env_ids = torch.arange(self.scene.num_envs)
+        self._robot.root_physx_view.set_masses(masses, env_ids)
+        self._robot.root_physx_view.set_coms(coms, env_ids)
+        self._robot.root_physx_view.set_inertias(inertias, env_ids)
 
     def _compute_intermediate_values(self):
         # Legacy tensor names are retained for checkpoint/downstream compatibility,
@@ -792,6 +852,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             # hold their (threshold-clipped) target throughout those substeps;
             # otherwise the converted delta is repeatedly re-anchored to the
             # moving EE and the supposedly absolute target drifts.
+            self._previous_action_target_pos.copy_(self._action_target_pos)
+            self._previous_action_target_quat.copy_(self._action_target_quat)
             target_pos, target_quat = self._get_action_target_pose()
             self._action_target_pos.copy_(target_pos)
             self._action_target_quat.copy_(target_quat)
@@ -854,7 +916,17 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         if self.current_action_rep == "abs_ee_pose" or (
             self.current_action_rep == "delta_ee_pose" and self.delta_target_mode == "per_control_step"
         ):
-            target_pos, target_quat = self._action_target_pos, self._action_target_quat
+            delay = int(self.cfg.ctrl.target_update_delay_substeps)
+            if delay < 0 or delay >= int(self.cfg.decimation):
+                raise ValueError(
+                    "ctrl.target_update_delay_substeps must be in "
+                    f"[0, decimation), got {delay} for decimation={self.cfg.decimation}"
+                )
+            if self._physics_substep_in_policy <= delay:
+                target_pos = self._previous_action_target_pos
+                target_quat = self._previous_action_target_quat
+            else:
+                target_pos, target_quat = self._action_target_pos, self._action_target_quat
         else:
             target_pos, target_quat = self._get_action_target_pose()
 
@@ -869,7 +941,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         """Apply the payload weight (and optional target tracking wrench) as external forces.
 
         Robot gravity is disabled (nominal gravity compensation is assumed perfect), so the payload
-        shows up exactly as its uncompensated weight `m * g`, acting at the payload CoM. In virtual
+        shows up as force `m * g` and moment `h x g`, where `h=m*r` is the first moment. The legacy
+        payload CoM is converted to `m*r` here only so archived configurations replay exactly. In virtual
         contact mode, the computed world-frame force and contact-coupled torque
         are applied at the wrist.
 
@@ -880,13 +953,15 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         datasets and virtual-contact forces are rotated into link axes below.
         """
         payload_quat_w = self._robot.data.body_quat_w[:, self.payload_body_idx]
-        payload_force_b = math_utils.quat_apply_inverse(payload_quat_w, self.payload_mass * self.gravity_vec)
+        gravity_b = math_utils.quat_apply_inverse(payload_quat_w, self.gravity_vec)
+        payload_force_b = self.payload_mass * gravity_b
+        payload_h_b = self.payload_mass * self.payload_com + self.payload_first_moment
+        payload_torque_b = torch.cross(payload_h_b, gravity_b, dim=-1)
 
         if not self.enable_force:
             self._robot.set_external_force_and_torque(
                 forces=payload_force_b.unsqueeze(1),
-                torques=torch.zeros((self.num_envs, 1, 3), device=self.device),
-                positions=self.payload_com.unsqueeze(1),
+                torques=payload_torque_b.unsqueeze(1),
                 body_ids=[self.payload_body_idx],
             )
             return
@@ -918,14 +993,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
         forces = torch.stack([payload_force_b, fs_force_b], dim=1)
         torques = torch.zeros((self.num_envs, 2, 3), device=self.device)
+        torques[:, 0] = payload_torque_b
         torques[:, 1] = fs_torque_b
-        positions = torch.stack(
-            [self.payload_com, torch.zeros((self.num_envs, 3), device=self.device)], dim=1
-        )
         self._robot.set_external_force_and_torque(
             forces=forces,
             torques=torques,
-            positions=positions,
             body_ids=[self.payload_body_idx, self.force_sensor_body_idx],
         )
 
@@ -979,15 +1051,58 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 self.cfg.ctrl.singularity_robust_inverse
             ),
         )
-        # Model actuator gain error and residual gravity-compensation torque after
-        # OSC, before PhysX applies its effort limit.
-        self.joint_torque[:, 0:7] = (
-            self.joint_torque[:, 0:7] * self.joint_torque_scale + self.joint_torque_bias
+        # Model residual gravity-compensation torque after OSC, before PhysX
+        # applies its effort limit.
+        self.joint_torque[:, 0:7] += self.joint_torque_bias
+        limits = torch.as_tensor(
+            self.cfg.ctrl.torque_command_limits,
+            device=self.device,
+            dtype=self.joint_torque.dtype,
         )
+        self.joint_torque_commanded[:] = torch.clamp(
+            self.joint_torque[:, 0:7], -limits, limits
+        )
+        if self.cfg.ctrl.apply_libfranka_torque_shaping:
+            hardware_hz = float(self.cfg.ctrl.actuator_hardware_hz)
+            ticks_float = self.physics_dt * hardware_hz
+            ticks = int(round(ticks_float))
+            if ticks < 1 or not math.isclose(ticks_float, ticks, abs_tol=1.0e-6):
+                raise ValueError(
+                    "libfranka torque shaping requires physics_dt * "
+                    f"actuator_hardware_hz to be an integer, got {ticks_float}"
+                )
+            interval_torque, final_desired = shape_torque_held_command(
+                self.joint_torque_commanded,
+                self.actuator_desired_torque,
+                ticks=ticks,
+                hardware_dt=1.0 / hardware_hz,
+                cutoff_hz=float(self.cfg.ctrl.actuator_filter_cutoff_hz),
+                max_rate=float(self.cfg.ctrl.actuator_torque_rate_limit),
+            )
+            self.actuator_desired_torque[:] = final_desired
+            self.joint_torque[:, 0:7] = interval_torque
+        else:
+            self.joint_torque[:, 0:7] = self.joint_torque_commanded
         self.ctrl_target_joint_pos[:, 7:] = 0.04
         self.joint_torque[:, 7:] = 0.0
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
         self._robot.set_joint_effort_target(self.joint_torque)
+
+    def reset_actuator_shaping(
+        self, env_ids: torch.Tensor, desired_torque: torch.Tensor | None = None
+    ) -> None:
+        """Reset or seed the previous ``tau_J_d`` used by libfranka shaping."""
+        if desired_torque is None:
+            self.actuator_desired_torque[env_ids] = 0.0
+        else:
+            self.actuator_desired_torque[env_ids] = desired_torque
+
+    def reset_target_schedule(self, env_ids: torch.Tensor) -> None:
+        """Seed both target phases at the current controlled pose."""
+        self._action_target_pos[env_ids] = self.fingertip_midpoint_pos[env_ids]
+        self._action_target_quat[env_ids] = self.fingertip_midpoint_quat[env_ids]
+        self._previous_action_target_pos[env_ids] = self.fingertip_midpoint_pos[env_ids]
+        self._previous_action_target_quat[env_ids] = self.fingertip_midpoint_quat[env_ids]
 
     def _apply_dls_ik(self, target_pos: torch.Tensor, target_quat: torch.Tensor):
         pos_error, axis_angle_error = factory_control.get_pose_error(
@@ -1427,6 +1542,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
         self.actions[env_ids] = 0.0
         self.prev_actions[env_ids] = 0.0
+        self.reset_actuator_shaping(env_ids)
         # Seed prev velocity with the current (post-reset) velocity so the first
         # step after reset sees zero velocity change instead of a spurious spike.
         self.prev_fingertip_midpoint_linvel[env_ids] = self.fingertip_midpoint_linvel[env_ids]
@@ -1436,6 +1552,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self._randomize_controller(env_ids)
         sample_start = time.perf_counter()
         sample_stats = self._sample_reachable_start_and_trajectory(env_ids)
+        self.reset_target_schedule(env_ids)
         sample_time = time.perf_counter() - sample_start
         # The sampled reset may carry a nonzero recorded velocity. Seed the
         # smoothness reference after that reset so the first policy step does not
@@ -1706,6 +1823,13 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         sing_check = bool(getattr(cfg, "singularity_check", False))
         min_manip = float(getattr(cfg, "min_manipulability", 0.0))
         max_cond = float(getattr(cfg, "max_jac_cond", float("inf")))
+        containment_enabled = bool(getattr(cfg, "enable_ee_containment", False))
+        if containment_enabled:
+            containment_box = torch.as_tensor(
+                cfg.ee_containment_box, device=self.device, dtype=torch.float32
+            )
+            if containment_box.shape != (3, 2):
+                raise ValueError("init.ee_containment_box must have shape (3, 2)")
         # cuRobo arm-joint solution for each env's start pose; filled during the check.
         start_arm_q = self.joint_pos[:, 0:7].clone()
         reach_duration = self.max_episode_length_s
@@ -1724,6 +1848,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         total_reach_fail = 0
         total_cont_fail = 0
         total_sing_fail = 0
+        total_containment_fail = 0
         # Per-joint |Δq| accumulated over waypoint transitions where both endpoints
         # were reachable, to report the average continuity of the sampled chains.
         joint_jump_sum = torch.zeros(7, device=self.device)
@@ -1748,6 +1873,25 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             # candidates are not actually bound to specific envs.
             params = self._sample_candidate_params(bad_envs, k)
             cand_env_ids = bad_envs.repeat_interleave(k)
+            containment_ok = torch.ones(
+                n_bad * k, dtype=torch.bool, device=self.device
+            )
+            if containment_enabled:
+                num_containment_checks = max(
+                    2, int(math.ceil(reach_duration / self.reference_dt)) + 1
+                )
+                containment_times = torch.linspace(
+                    0.0,
+                    reach_duration,
+                    num_containment_checks,
+                    device=self.device,
+                )
+                for check_time in containment_times:
+                    elapsed_time = check_time.expand(n_bad * k, 1)
+                    pos_i, _ = self._eval_pose_from_params(params, elapsed_time)
+                    containment_ok &= axis_aligned_containment_mask(
+                        pos_i, containment_box
+                    )
             recorded_start_q = None
             if self._uses_recorded_dataset_reset():
                 recorded_start_q = self._ds_joint_pos[
@@ -1806,11 +1950,14 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 prev_q = arm_q
                 prev_success = success
 
-            accept = reach_ok & cont_ok & sing_ok
+            accept = reach_ok & cont_ok & sing_ok & containment_ok
             total_good += int(accept.sum().item())
             total_reach_fail += int((~reach_ok).sum().item())
             total_cont_fail += int((reach_ok & ~cont_ok).sum().item())
             total_sing_fail += int((reach_ok & cont_ok & ~sing_ok).sum().item())
+            total_containment_fail += int(
+                (reach_ok & cont_ok & sing_ok & ~containment_ok).sum().item()
+            )
 
             # The whole pool of n_bad*k candidates is fungible: the start pose and
             # trajectory are env-independent and the IK is solved in the (shared)
@@ -1842,6 +1989,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                         pick = torch.randint(store_q.shape[0], (bad_envs.shape[0],), device=self.device)
                         self._assign_params_to_envs(bad_envs, store, pick)
                         start_arm_q[bad_envs] = store_q[pick]
+                    elif containment_enabled:
+                        raise RuntimeError(
+                            "No trajectory satisfied init.ee_containment_box after "
+                            f"{cfg.max_reach_attempts} reachability attempts"
+                        )
                     else:
                         fb = torch.arange(bad_envs.shape[0], device=self.device)
                         self._assign_params_to_envs(bad_envs, params, fb)
@@ -1903,6 +2055,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.extras["log"]["Init/candidates_unreachable"] = torch.tensor(float(total_reach_fail), device=self.device)
         self.extras["log"]["Init/candidates_discontinuous"] = torch.tensor(float(total_cont_fail), device=self.device)
         self.extras["log"]["Init/candidates_singular"] = torch.tensor(float(total_sing_fail), device=self.device)
+        self.extras["log"]["Init/candidates_outside_ee_containment"] = torch.tensor(
+            float(total_containment_fail), device=self.device
+        )
         if self.cfg.tracking.mode == "dataset":
             sampled_start = self.traj_ds_start[env_ids].float()
             self.extras["log"]["Init/dataset_chunk_start_mean"] = sampled_start.mean()
@@ -3571,6 +3726,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.payload_mass[env_ids] = 0.0
             self.payload_com[env_ids] = 0.0
             self.nominal_com_offsets[env_ids, self.payload_body_idx - 1] = 0.0
+        # First moment is a sys-id residual, not part of payload domain
+        # randomization. Never let a prior replay candidate leak across resets.
+        self.payload_first_moment[env_ids] = 0.0
 
         self._robot.root_physx_view.set_masses(masses, env_ids_cpu)
         self._robot.root_physx_view.set_inertias(inertias, env_ids_cpu)

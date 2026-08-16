@@ -5,6 +5,15 @@ from __future__ import annotations
 import torch
 
 
+def axis_aligned_containment_mask(
+    position: torch.Tensor, box: torch.Tensor
+) -> torch.Tensor:
+    """Return whether each position lies inside an XYZ ``(3, 2)`` box."""
+    if position.shape[-1] != 3 or box.shape != (3, 2):
+        raise ValueError("position must end in 3 and box must have shape (3, 2)")
+    return ((position >= box[:, 0]) & (position <= box[:, 1])).all(dim=-1)
+
+
 def policy_step_to_reference_index(
     policy_step: torch.Tensor, policy_steps_per_reference: int
 ) -> torch.Tensor:

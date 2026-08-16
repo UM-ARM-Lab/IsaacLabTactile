@@ -45,6 +45,19 @@ class CtrlCfg:
     # True to instead feed the controller PhysX's ground-truth generalized mass matrix
     # (payload merge + link-mass scaling included), i.e. a perfectly-modeled controller.
     use_gt_mass_matrix: bool = False
+    # Optional exact inertial model for the nominal OSC mass matrix. This is
+    # separate from the PhysX plant so the controller can omit a physical tool
+    # exactly as the NUC metadata model does.
+    nominal_model_urdf: str | None = None
+    apply_libfranka_torque_shaping: bool = False
+    torque_command_limits = [86.0, 86.0, 86.0, 86.0, 11.5, 11.5, 11.5]
+    actuator_hardware_hz: float = 1000.0
+    actuator_filter_cutoff_hz: float = 100.0
+    actuator_torque_rate_limit: float = 1000.0
+    # Number of 100 Hz controller ticks for which a newly published 25 Hz
+    # target remains invisible. At the matched 4:1 schedule, 0 and 1 are the
+    # two distinct asynchronous publication phases.
+    target_update_delay_substeps: int = 0
 
     # Use the full operational-space control law: premultiply the task-space PD wrench
     # by the task inertia Λ = (J M⁻¹ Jᵀ)⁻¹ so the closed-loop task dynamics are unit
@@ -412,6 +425,13 @@ class InitCfg:
     # tracked demonstration is followed on the same elbow/wrist branch it was collected on.
     seed_ik_with_reset_joints: bool = False
 
+    # Optional whole-trajectory workspace gate. When enabled, every reference
+    # position over the active episode must remain inside this axis-aligned box
+    # in the robot base frame. This does not restrict the circle plane: vertical
+    # motion is accepted as long as it remains within the configured bounds.
+    enable_ee_containment: bool = False
+    ee_containment_box = [[0.35, 0.60], [-0.25, 0.25], [0.35, 0.50]]
+
     # Singularity filter. On top of reachability + continuity, reject any candidate
     # trajectory whose per-waypoint arm configuration is too close to a kinematic
     # singularity. Near-singular configs are where the OSC task-space inertia
@@ -713,6 +733,9 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
     # mimic checkpoints retain their serialized asset config, and launchers can
     # still request ``franka_mimic.usd`` explicitly for reproduction.
     robot_usd_path: str = "franka_gelsight_mini_assembled_z13_x10.usd"
+    # Optional inertial override for the PhysX plant. USD-only bodies absent
+    # from this model are reduced to numerically valid negligible placeholders.
+    plant_model_urdf: str | None = None
     # Frame whose pose/Jacobian defines the controlled and observed EE. "auto"
     # preserves the legacy rigid-body priority: panda_fingertip_centered,
     # force_sensor, then panda_hand. "fr3_wsg_tcp" is a virtual frame computed from
@@ -728,6 +751,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
 
         if env.get("robot_usd_path", None) is not None:
             self.robot_usd_path = env.robot_usd_path
+        if env.get("plant_model_urdf", None) is not None:
+            self.plant_model_urdf = str(env.plant_model_urdf)
         if env.get("tool_frame", None) is not None:
             self.tool_frame = str(env.tool_frame)
         if env.get("obs_history_length", None) is not None:
@@ -785,6 +810,13 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "action_rep",
             "delta_target_mode",
             "use_gt_mass_matrix",
+            "nominal_model_urdf",
+            "apply_libfranka_torque_shaping",
+            "torque_command_limits",
+            "actuator_hardware_hz",
+            "actuator_filter_cutoff_hz",
+            "actuator_torque_rate_limit",
+            "target_update_delay_substeps",
             "use_task_space_inertia",
             "singularity_robust_inverse",
             "pos_action_threshold",
@@ -911,6 +943,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "ik_use_cuda_graph",
             "max_reach_attempts",
             "seed_ik_with_reset_joints",
+            "enable_ee_containment",
+            "ee_containment_box",
             "singularity_check",
             "min_manipulability",
             "max_jac_cond",
