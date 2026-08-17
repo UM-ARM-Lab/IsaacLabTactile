@@ -149,6 +149,11 @@ class TrackingCfg:
     # Finite source-clip duration. References beyond this time hold the final
     # pose, matching the padded-tail behavior of fixed-length dataset clips.
     circle_reference_duration_s: float = 10.0
+    # Optional trajectory-buffer capacity independent of the training episode.
+    # Short-episode policies set this to the full reference duration so periodic
+    # evaluation can run one continuous full trajectory without reallocating the
+    # Isaac environment. Zero keeps the historical episode-sized allocation.
+    reference_buffer_duration_s: float = 0.0
 
     # Optional orientation sweep: constant angular velocity about a randomized
     # axis, capped at a randomized total angle. Set ranges to 0 to hold fixed.

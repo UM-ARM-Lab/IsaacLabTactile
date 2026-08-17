@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 
 import gymnasium as gym
 import numpy as np
@@ -181,6 +182,15 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self._reference_episode_steps = math.ceil(
             self.max_episode_length / self.policy_steps_per_reference
         )
+        reference_buffer_duration_s = float(
+            getattr(self.cfg.tracking, "reference_buffer_duration_s", 0.0)
+        )
+        reference_buffer_steps = math.ceil(
+            reference_buffer_duration_s / self.reference_dt
+        )
+        self._reference_buffer_steps = max(
+            self._reference_episode_steps, reference_buffer_steps
+        )
         self._physics_substep_in_policy = 0
 
         # Nominal reset EE pose (from `ctrl.reset_joints`), captured at reset and
@@ -235,7 +245,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # dataset samples native while multiple policy steps occur between them.
         # The tail covers the strict-future observation window.
         self._traj_len = (
-            self._reference_episode_steps + self.cfg.tracking.num_future_steps
+            self._reference_buffer_steps + self.cfg.tracking.num_future_steps
         )
         self.traj_pos_buf = torch.zeros((self.num_envs, self._traj_len, 3), device=self.device)
         self.traj_quat_buf = torch.zeros((self.num_envs, self._traj_len, 4), device=self.device)
@@ -1490,6 +1500,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.extras["native_reference_sample"] = native_metric_sample
         if bool(native_metric_mask[0]):
             self.extras["curr_successes"] = successes.float().mean()
+            self.extras["curr_tracking_pos_error"] = pos_error_norm.mean()
+            self.extras["curr_tracking_rot_error"] = rot_error_norm.mean()
             # Start a fresh window once the previous one filled a full native
             # reference episode. Only native-boundary samples enter the window.
             if self._track_err_count >= self._track_err_window:
@@ -1531,6 +1543,36 @@ class FrankaRobustTrackEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         return torch.zeros_like(time_out), time_out
+
+    @contextmanager
+    def deterministic_eval_context(
+        self, *, episode_steps: int, circle_phase_zero: bool = False
+    ):
+        """Temporarily expose a longer continuous episode for deterministic eval."""
+        episode_steps = int(episode_steps)
+        if episode_steps <= 0:
+            raise ValueError("episode_steps must be positive")
+        required_reference_steps = math.ceil(
+            episode_steps / self.policy_steps_per_reference
+        )
+        if required_reference_steps > self._reference_buffer_steps:
+            raise ValueError(
+                "deterministic eval requires "
+                f"{required_reference_steps} reference steps, but the buffer has "
+                f"{self._reference_buffer_steps}; increase "
+                "tracking.reference_buffer_duration_s"
+            )
+
+        original_episode_length_s = self.cfg.episode_length_s
+        original_phase_range = list(self.cfg.tracking.circle_start_time_range)
+        self.cfg.episode_length_s = episode_steps * self.step_dt
+        if circle_phase_zero:
+            self.cfg.tracking.circle_start_time_range = [0.0, 0.0]
+        try:
+            yield
+        finally:
+            self.cfg.episode_length_s = original_episode_length_s
+            self.cfg.tracking.circle_start_time_range = original_phase_range
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         import time
