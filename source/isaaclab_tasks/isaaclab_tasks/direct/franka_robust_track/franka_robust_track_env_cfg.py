@@ -969,6 +969,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "ik_use_cuda_graph",
             "max_reach_attempts",
             "seed_ik_with_reset_joints",
+            "reset_joint_pos_noise",
+            "reset_joint_vel_noise",
             "enable_ee_containment",
             "ee_containment_box",
             "singularity_check",
