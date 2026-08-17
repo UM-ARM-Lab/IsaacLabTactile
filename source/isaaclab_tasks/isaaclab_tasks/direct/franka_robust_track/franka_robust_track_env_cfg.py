@@ -870,6 +870,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "circle_speed_range",
             "circle_start_time_range",
             "circle_reference_duration_s",
+            "reference_buffer_duration_s",
             "rot_speed_range",
             "rot_angle_range",
             "num_future_steps",
