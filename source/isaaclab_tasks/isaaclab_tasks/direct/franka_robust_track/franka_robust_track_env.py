@@ -1565,7 +1565,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
         original_episode_length_s = self.cfg.episode_length_s
         original_phase_range = list(self.cfg.tracking.circle_start_time_range)
-        self.cfg.episode_length_s = episode_steps * self.step_dt
+        # DirectRLEnv declares timeout at max_episode_length - 1. Keep one
+        # internal guard step so the evaluator can execute exactly episode_steps
+        # continuous actions before the environment resets.
+        self.cfg.episode_length_s = (episode_steps + 1) * self.step_dt
         if circle_phase_zero:
             self.cfg.tracking.circle_start_time_range = [0.0, 0.0]
         try:
