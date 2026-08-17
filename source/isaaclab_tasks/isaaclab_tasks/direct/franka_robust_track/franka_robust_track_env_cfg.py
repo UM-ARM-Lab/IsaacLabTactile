@@ -432,6 +432,12 @@ class InitCfg:
     # tracked demonstration is followed on the same elbow/wrist branch it was collected on.
     seed_ik_with_reset_joints: bool = False
 
+    # Uniform reset-state perturbations applied after a reachable IK start is
+    # selected.  The reference trajectory is intentionally left unchanged.
+    # A scalar is used for all seven arm joints; zero preserves the baseline.
+    reset_joint_pos_noise: float = 0.0  # rad, half-width of q perturbation
+    reset_joint_vel_noise: float = 0.0  # rad/s, half-width of qdot perturbation
+
     # Optional whole-trajectory workspace gate. When enabled, every reference
     # position over the active episode must remain inside this axis-aligned box
     # in the robot base frame. This does not restrict the circle plane: vertical

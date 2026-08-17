@@ -1579,8 +1579,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # Seed proprio history without retaining stale frames from the prior
         # episode. Dataset chunks use their real lead-in; other modes repeat the
         # current reset frame. `_get_observations` then appends the current frame.
+        reset_perturbed = bool(
+            getattr(self.cfg.init, "reset_joint_pos_noise", 0.0)
+            or getattr(self.cfg.init, "reset_joint_vel_noise", 0.0)
+        )
         if self.obs_history_length > 1:
-            if self._uses_recorded_dataset_reset():
+            if self._uses_recorded_dataset_reset() and not reset_perturbed:
                 self._seed_dataset_proprio_history(env_ids)
             else:
                 proprio, _, _, _ = self._compute_obs_parts()
@@ -2025,6 +2029,25 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             recorded_prev_q = self._ds_joint_pos[ds_idx, prev_idx]
             start_arm_q[env_ids] = recorded_q
             start_arm_vel = (recorded_q - recorded_prev_q) / self.reference_dt
+
+        # Perturb only the physical reset state, after IK/reachability selection.
+        # This keeps the sampled reference trajectory intact while exposing the
+        # controller to reset errors.  Soft limits provide the verified PhysX
+        # safety margin, so a perturbation can never push an arm joint outside it.
+        q_noise = float(getattr(self.cfg.init, "reset_joint_pos_noise", 0.0))
+        qd_noise = float(getattr(self.cfg.init, "reset_joint_vel_noise", 0.0))
+        if q_noise or qd_noise:
+            if q_noise:
+                q_delta = (2.0 * torch.rand_like(start_arm_q[env_ids, 0:7]) - 1.0) * q_noise
+                joint_limits = self._robot.data.soft_joint_pos_limits[env_ids, 0:7]
+                start_arm_q[env_ids] = torch.minimum(
+                    torch.maximum(start_arm_q[env_ids] + q_delta, joint_limits[..., 0]),
+                    joint_limits[..., 1],
+                )
+            if qd_noise:
+                start_arm_vel = start_arm_vel + (
+                    2.0 * torch.rand_like(start_arm_vel) - 1.0
+                ) * qd_noise
         self.joint_pos[env_ids, 0:7] = start_arm_q[env_ids]
         # Anchor the OSC nullspace posture. "start" uses each env's own cuRobo start
         # config (per-env); "reset_joints"/"default_dof_pos" use a fixed posture so the
@@ -2050,10 +2073,15 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         reset_joint_pos = self.joint_pos[env_ids].clone()
         reset_joint_vel = self.joint_vel[env_ids].clone()
         self.step_sim_no_action()
-        if self._uses_recorded_dataset_reset():
+        reset_perturbed = bool(
+            getattr(self.cfg.init, "reset_joint_pos_noise", 0.0)
+            or getattr(self.cfg.init, "reset_joint_vel_noise", 0.0)
+        )
+        if self._uses_recorded_dataset_reset() or reset_perturbed:
             # The refresh step above makes PhysX/Jacobians reflect the sampled
             # configuration, but a nonzero qdot also advances q by one physics
-            # step. Restore the exact dataset state before the first observation.
+            # step. Restore the exact requested reset state before the first
+            # observation.
             self._robot.write_joint_state_to_sim(
                 reset_joint_pos, reset_joint_vel, env_ids=env_ids
             )
