@@ -1144,6 +1144,14 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
                     raise ValueError(
                         "virtual-contact parameter randomization requires contact_model='power_law'"
                     )
+                if (
+                    self.tracking.use_full_wrench
+                    and self.tracking.virtual_contact_torque_model != "orientation_power_law"
+                ):
+                    raise ValueError(
+                        "full-wrench virtual-contact parameter randomization requires "
+                        "virtual_contact_torque_model='orientation_power_law'"
+                    )
             if not 0.0 <= float(self.tracking.force_sensor_smoothing_factor) <= 1.0:
                 raise ValueError("tracking.force_sensor_smoothing_factor must be in [0, 1]")
             if float(self.tracking.torque_sensor_noise_std) < 0.0:
