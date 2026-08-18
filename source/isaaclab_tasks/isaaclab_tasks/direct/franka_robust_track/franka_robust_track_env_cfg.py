@@ -54,10 +54,13 @@ class CtrlCfg:
     actuator_hardware_hz: float = 1000.0
     actuator_filter_cutoff_hz: float = 100.0
     actuator_torque_rate_limit: float = 1000.0
-    # Number of 100 Hz controller ticks for which a newly published 25 Hz
-    # target remains invisible. At the matched 4:1 schedule, 0 and 1 are the
-    # two distinct asynchronous publication phases.
+    # Number of controller/physics ticks for which a newly published policy
+    # target remains invisible. `delay_range` is sampled independently per env
+    # and has inclusive bounds; equal bounds express a fixed delay. The old
+    # scalar is retained only as a fallback when loading historical configs.
     target_update_delay_substeps: int = 0
+    delay_range = None
+    delay_mode: str = "per_episode"
 
     # Use the full operational-space control law: premultiply the task-space PD wrench
     # by the task inertia Λ = (J M⁻¹ Jᵀ)⁻¹ so the closed-loop task dynamics are unit
@@ -94,6 +97,10 @@ class CtrlCfg:
     # each step. If False, gains stay at `default_task_prop_gains` (plus optional
     # reset-time noise). This grows the action space by 6.
     control_gains: bool = False
+    # "per_axis" preserves the historical six gain actions; "scalar" uses one
+    # action and applies the same scheduled Kp to all six task-space axes.
+    control_gain_action_mode: str = "per_axis"
+    control_gain_damping_ratio: float = 0.75
     task_prop_gains_min = [100.0, 100.0, 100.0, 10.0, 10.0, 10.0]
     task_prop_gains_max = [600.0, 600.0, 600.0, 60.0, 60.0, 60.0]
     joint_pos_kp: float = 80.0
@@ -862,6 +869,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "actuator_filter_cutoff_hz",
             "actuator_torque_rate_limit",
             "target_update_delay_substeps",
+            "delay_range",
+            "delay_mode",
             "use_task_space_inertia",
             "singularity_robust_inverse",
             "pos_action_threshold",
@@ -872,6 +881,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "task_prop_gains_randomization_mode",
             "task_deriv_gains_damping_ratio_range",
             "control_gains",
+            "control_gain_action_mode",
+            "control_gain_damping_ratio",
             "task_prop_gains_min",
             "task_prop_gains_max",
             "reset_joints",
@@ -1315,9 +1326,15 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
         self.robot.spawn.usd_path = f"{ASSET_DIR}/{self.robot_usd_path}"
         self.sim.render_interval = self.decimation
 
-        # Action space: 6 Cartesian delta-pose dims (pos3 + rot3), plus 6 gain dims
-        # when ctrl.control_gains is enabled (policy schedules its own PD gains).
-        action_dim = 6 + (6 if self.ctrl.control_gains else 0)
+        gain_action_mode = str(self.ctrl.control_gain_action_mode)
+        if gain_action_mode not in ("scalar", "per_axis"):
+            raise ValueError(
+                "ctrl.control_gain_action_mode must be 'scalar' or 'per_axis', "
+                f"got {gain_action_mode!r}"
+            )
+        gain_action_dim = 1 if gain_action_mode == "scalar" else 6
+        # Action space: 6 Cartesian delta-pose dims plus optional gain scheduling.
+        action_dim = 6 + (gain_action_dim if self.ctrl.control_gains else 0)
         self.action_space = action_dim
 
         # Proprio obs: ee_pos(3)+ee_quat(4)+optional joint_pos(7)

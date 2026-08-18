@@ -102,6 +102,37 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         )
         self._previous_action_target_pos = self._action_target_pos.clone()
         self._previous_action_target_quat = self._action_target_quat.clone()
+        delay_range = getattr(self.cfg.ctrl, "delay_range", None)
+        if delay_range is None:
+            fixed_delay = int(self.cfg.ctrl.target_update_delay_substeps)
+            delay_range = [fixed_delay, fixed_delay]
+        else:
+            delay_range = [int(value) for value in delay_range]
+        if (
+            len(delay_range) != 2
+            or delay_range[0] < 0
+            or delay_range[1] < delay_range[0]
+            or delay_range[1] >= int(self.cfg.decimation)
+        ):
+            raise ValueError(
+                "ctrl.delay_range must be inclusive [lo, hi] "
+                "with 0 <= lo <= hi < decimation; got "
+                f"{delay_range} for decimation={self.cfg.decimation}"
+            )
+        delay_mode = str(
+            getattr(self.cfg.ctrl, "delay_mode", "per_episode")
+        )
+        if delay_mode not in ("per_episode", "per_step"):
+            raise ValueError(
+                "ctrl.delay_mode must be 'per_episode' or "
+                f"'per_step', got {delay_mode!r}"
+            )
+        self._target_update_delay_bounds = (delay_range[0], delay_range[1])
+        self._target_update_delay_sampling_mode = delay_mode
+        self._target_update_delay_randomized = delay_range[0] != delay_range[1]
+        self._target_update_delay_steps = torch.full(
+            (self.num_envs,), delay_range[0], device=self.device, dtype=torch.long
+        )
         self.packet_stiffness_override = None
         self.packet_deriv_override = None
         self.ctrl_target_joint_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
@@ -849,6 +880,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._physics_substep_in_policy = 0
+        if (
+            self._target_update_delay_randomized
+            and self._target_update_delay_sampling_mode == "per_step"
+        ):
+            self._resample_target_update_delay(self._robot._ALL_INDICES)
         self.prev_actions[:] = self.actions
         actions, action_rep, compliance = self._parse_action_packet(actions)
         if action_rep not in ("rel_ee_pose", "abs_ee_pose", "delta_ee_pose"):
@@ -903,6 +939,16 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         )
         self._action_latency_buf[:, env_ids] = 0.0
 
+    def _resample_target_update_delay(self, env_ids: torch.Tensor):
+        """Draw the controller-substep delay for the selected environments."""
+        lo, hi = self._target_update_delay_bounds
+        if lo == hi:
+            self._target_update_delay_steps[env_ids] = lo
+            return
+        self._target_update_delay_steps[env_ids] = torch.randint(
+            lo, hi + 1, (len(env_ids),), device=self.device, dtype=torch.long
+        )
+
     def _apply_action(self):
         self._compute_intermediate_values()
         self._update_gains_from_action()
@@ -940,17 +986,17 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         if self.current_action_rep == "abs_ee_pose" or (
             self.current_action_rep == "delta_ee_pose" and self.delta_target_mode == "per_control_step"
         ):
-            delay = int(self.cfg.ctrl.target_update_delay_substeps)
-            if delay < 0 or delay >= int(self.cfg.decimation):
-                raise ValueError(
-                    "ctrl.target_update_delay_substeps must be in "
-                    f"[0, decimation), got {delay} for decimation={self.cfg.decimation}"
-                )
-            if self._physics_substep_in_policy <= delay:
-                target_pos = self._previous_action_target_pos
-                target_quat = self._previous_action_target_quat
-            else:
-                target_pos, target_quat = self._action_target_pos, self._action_target_quat
+            use_previous = self._physics_substep_in_policy <= self._target_update_delay_steps
+            target_pos = torch.where(
+                use_previous.unsqueeze(-1),
+                self._previous_action_target_pos,
+                self._action_target_pos,
+            )
+            target_quat = torch.where(
+                use_previous.unsqueeze(-1),
+                self._previous_action_target_quat,
+                self._action_target_quat,
+            )
         else:
             target_pos, target_quat = self._get_action_target_pose()
 
@@ -1026,18 +1072,23 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         )
 
     def _update_gains_from_action(self):
-        """Map the gain action dims (6:12) to task PD gains when gain control is on.
+        """Map the gain action suffix to task PD gains when gain control is on.
 
-        The 6 gain actions are clamped to [-1, 1] and affinely mapped onto
+        Gain actions are clamped to [-1, 1] and affinely mapped onto
         [gain_min, gain_max]; the derivative gains are recomputed for critical
         damping. No-op when `ctrl.control_gains` is False.
         """
         if not self.cfg.ctrl.control_gains:
             return
-        gain_actions = self.actions[:, 6:12].clamp(-1.0, 1.0)
+        gain_actions = self.actions[:, 6:].clamp(-1.0, 1.0)
+        if str(self.cfg.ctrl.control_gain_action_mode) == "scalar":
+            gain_actions = gain_actions.expand(-1, 6)
         normalized = 0.5 * (gain_actions + 1.0)
         self.task_prop_gains = self.gain_min + (self.gain_max - self.gain_min) * normalized
-        self.task_deriv_gains = factory_utils.get_deriv_gains(self.task_prop_gains)
+        self.task_deriv_gains = (
+            float(self.cfg.ctrl.control_gain_damping_ratio)
+            * factory_utils.get_deriv_gains(self.task_prop_gains)
+        )
 
     def _get_action_target_pose(self):
         pos_actions = self.actions[:, 0:3] * self.pos_threshold
@@ -1705,6 +1756,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.ee_jerk_initialized[env_ids] = False
         self._randomize_dynamics(env_ids)
         self._resample_action_latency(env_ids)
+        if self._target_update_delay_sampling_mode == "per_episode":
+            self._resample_target_update_delay(env_ids)
         self._randomize_controller(env_ids)
         sample_start = time.perf_counter()
         sample_stats = self._sample_reachable_start_and_trajectory(env_ids)
@@ -4730,6 +4783,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.extras["log"]["Dynamics/action_latency_steps"] = (
                 self._action_latency_steps[env_ids].float().mean()
             )
+        self.extras["log"]["Dynamics/target_update_delay_substeps"] = (
+            self._target_update_delay_steps[env_ids].float().mean()
+        )
         if self.virtual_contact_enabled:
             self.extras["log"]["VirtualContact/surface_stiffness"] = self.virtual_surface_stiffness[
                 env_ids
