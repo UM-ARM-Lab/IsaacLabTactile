@@ -442,6 +442,10 @@ class InitCfg:
     # A scalar is used for all seven arm joints; zero preserves the baseline.
     reset_joint_pos_noise: float = 0.0  # rad, half-width of q perturbation
     reset_joint_vel_noise: float = 0.0  # rad/s, half-width of qdot perturbation
+    # Per-environment probability that both configured reset perturbations are
+    # applied. One shared Bernoulli draw gates q and qdot so the remaining resets
+    # stay exactly clean. A default of one preserves historical configurations.
+    reset_noise_prob: float = 1.0
 
     # Optional whole-trajectory workspace gate. When enabled, every reference
     # position over the active episode must remain inside this axis-aligned box
@@ -972,6 +976,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "seed_ik_with_reset_joints",
             "reset_joint_pos_noise",
             "reset_joint_vel_noise",
+            "reset_noise_prob",
             "enable_ee_containment",
             "ee_containment_box",
             "singularity_check",

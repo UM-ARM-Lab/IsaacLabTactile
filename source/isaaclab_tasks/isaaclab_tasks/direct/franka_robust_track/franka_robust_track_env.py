@@ -1549,6 +1549,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         """Use the common clean reset and nominal aligned controller for eval."""
         original_reset_pos_noise = self.cfg.init.reset_joint_pos_noise
         original_reset_vel_noise = self.cfg.init.reset_joint_vel_noise
+        original_reset_noise_prob = self.cfg.init.reset_noise_prob
         original_gain_noise = self.cfg.ctrl.task_prop_gains_noise_level
         original_gain_scale_range = (
             self.cfg.ctrl.task_prop_gains_randomization_scale_range
@@ -1559,6 +1560,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
         self.cfg.init.reset_joint_pos_noise = 0.0
         self.cfg.init.reset_joint_vel_noise = 0.0
+        self.cfg.init.reset_noise_prob = 0.0
         self.cfg.ctrl.task_prop_gains_noise_level = [0.0] * len(
             self.cfg.ctrl.default_task_prop_gains
         )
@@ -1571,6 +1573,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         finally:
             self.cfg.init.reset_joint_pos_noise = original_reset_pos_noise
             self.cfg.init.reset_joint_vel_noise = original_reset_vel_noise
+            self.cfg.init.reset_noise_prob = original_reset_noise_prob
             self.cfg.ctrl.task_prop_gains_noise_level = original_gain_noise
             self.cfg.ctrl.task_prop_gains_randomization_scale_range = (
                 original_gain_scale_range
@@ -1659,13 +1662,18 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # Seed proprio history without retaining stale frames from the prior
         # episode. Dataset chunks use their real lead-in; other modes repeat the
         # current reset frame. `_get_observations` then appends the current frame.
-        reset_perturbed = bool(
-            getattr(self.cfg.init, "reset_joint_pos_noise", 0.0)
-            or getattr(self.cfg.init, "reset_joint_vel_noise", 0.0)
-        )
         if self.obs_history_length > 1:
-            if self._uses_recorded_dataset_reset() and not reset_perturbed:
-                self._seed_dataset_proprio_history(env_ids)
+            reset_perturbed_mask = sample_stats["reset_perturbed_mask"]
+            if self._uses_recorded_dataset_reset():
+                clean_env_ids = env_ids[~reset_perturbed_mask]
+                perturbed_env_ids = env_ids[reset_perturbed_mask]
+                if clean_env_ids.numel():
+                    self._seed_dataset_proprio_history(clean_env_ids)
+                if perturbed_env_ids.numel():
+                    proprio, _, _, _ = self._compute_obs_parts()
+                    self.proprio_history[perturbed_env_ids] = proprio[
+                        perturbed_env_ids
+                    ].unsqueeze(1)
             else:
                 proprio, _, _, _ = self._compute_obs_parts()
                 self.proprio_history[env_ids] = proprio[env_ids].unsqueeze(1)
@@ -2116,9 +2124,26 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # safety margin, so a perturbation can never push an arm joint outside it.
         q_noise = float(getattr(self.cfg.init, "reset_joint_pos_noise", 0.0))
         qd_noise = float(getattr(self.cfg.init, "reset_joint_vel_noise", 0.0))
+        reset_noise_prob = float(getattr(self.cfg.init, "reset_noise_prob", 1.0))
+        if not 0.0 <= reset_noise_prob <= 1.0:
+            raise ValueError(
+                f"init.reset_noise_prob must be in [0, 1], got {reset_noise_prob}"
+            )
+        reset_perturbed_mask = torch.zeros(
+            len(env_ids), dtype=torch.bool, device=self.device
+        )
         if q_noise or qd_noise:
+            reset_perturbed_mask = (
+                torch.rand(len(env_ids), device=self.device)
+                < reset_noise_prob
+            )
+            reset_noise_gate = reset_perturbed_mask.unsqueeze(-1)
             if q_noise:
-                q_delta = (2.0 * torch.rand_like(start_arm_q[env_ids, 0:7]) - 1.0) * q_noise
+                q_delta = (
+                    (2.0 * torch.rand_like(start_arm_q[env_ids, 0:7]) - 1.0)
+                    * q_noise
+                    * reset_noise_gate
+                )
                 joint_limits = self._robot.data.soft_joint_pos_limits[env_ids, 0:7]
                 start_arm_q[env_ids] = torch.minimum(
                     torch.maximum(start_arm_q[env_ids] + q_delta, joint_limits[..., 0]),
@@ -2127,7 +2152,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             if qd_noise:
                 start_arm_vel = start_arm_vel + (
                     2.0 * torch.rand_like(start_arm_vel) - 1.0
-                ) * qd_noise
+                ) * qd_noise * reset_noise_gate
+        self.extras["log"]["Init/reset_perturbed_fraction"] = (
+            reset_perturbed_mask.float().mean()
+        )
         self.joint_pos[env_ids, 0:7] = start_arm_q[env_ids]
         # Anchor the OSC nullspace posture. "start" uses each env's own cuRobo start
         # config (per-env); "reset_joints"/"default_dof_pos" use a fixed posture so the
@@ -2153,9 +2181,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         reset_joint_pos = self.joint_pos[env_ids].clone()
         reset_joint_vel = self.joint_vel[env_ids].clone()
         self.step_sim_no_action()
-        reset_perturbed = bool(
-            getattr(self.cfg.init, "reset_joint_pos_noise", 0.0)
-            or getattr(self.cfg.init, "reset_joint_vel_noise", 0.0)
+        reset_perturbed = bool(q_noise or qd_noise) and (
+            reset_noise_prob > 0.0
         )
         if self._uses_recorded_dataset_reset() or reset_perturbed:
             # The refresh step above makes PhysX/Jacobians reflect the sampled
@@ -2196,6 +2223,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             "total": int(len(env_ids)),
             "attempts": attempt,
             "avg_joint_jump": avg_joint_jump.tolist(),
+            "reset_perturbed_mask": reset_perturbed_mask,
         }
 
     @staticmethod
