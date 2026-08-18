@@ -1545,6 +1545,41 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         return torch.zeros_like(time_out), time_out
 
     @contextmanager
+    def common_eval_context(self):
+        """Use the common clean reset and nominal aligned controller for eval."""
+        original_reset_pos_noise = self.cfg.init.reset_joint_pos_noise
+        original_reset_vel_noise = self.cfg.init.reset_joint_vel_noise
+        original_gain_noise = self.cfg.ctrl.task_prop_gains_noise_level
+        original_gain_scale_range = (
+            self.cfg.ctrl.task_prop_gains_randomization_scale_range
+        )
+        original_damping_ratio_range = (
+            self.cfg.ctrl.task_deriv_gains_damping_ratio_range
+        )
+
+        self.cfg.init.reset_joint_pos_noise = 0.0
+        self.cfg.init.reset_joint_vel_noise = 0.0
+        self.cfg.ctrl.task_prop_gains_noise_level = [0.0] * len(
+            self.cfg.ctrl.default_task_prop_gains
+        )
+        self.cfg.ctrl.task_prop_gains_randomization_scale_range = [1.0, 1.0]
+        # The aligned real controller uses Kp=400 and Kd=30. Since
+        # get_deriv_gains(400) is 40, zeta=0.75 restores the nominal Kd.
+        self.cfg.ctrl.task_deriv_gains_damping_ratio_range = [0.75, 0.75]
+        try:
+            yield
+        finally:
+            self.cfg.init.reset_joint_pos_noise = original_reset_pos_noise
+            self.cfg.init.reset_joint_vel_noise = original_reset_vel_noise
+            self.cfg.ctrl.task_prop_gains_noise_level = original_gain_noise
+            self.cfg.ctrl.task_prop_gains_randomization_scale_range = (
+                original_gain_scale_range
+            )
+            self.cfg.ctrl.task_deriv_gains_damping_ratio_range = (
+                original_damping_ratio_range
+            )
+
+    @contextmanager
     def deterministic_eval_context(
         self, *, episode_steps: int, circle_phase_zero: bool = False
     ):
