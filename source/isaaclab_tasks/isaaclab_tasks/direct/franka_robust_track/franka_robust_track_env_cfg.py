@@ -554,8 +554,13 @@ class RewardCfg:
     fine_pos_error_temp: float = 0.03  # m
     fine_rot_error_temp: float = 0.1  # rad
     ee_vel_scale: float = -0.01
-    # Penalize step-to-step change in EE velocity (acceleration) for smoother motion.
-    ee_accel_scale: float = -0.05
+    # Physical finite-difference derivatives at the policy timestep. The caps
+    # prevent reset/contact transients from dominating the tracking objective.
+    ee_derivative_mode: str = "physical"  # physical, normalized_difference
+    ee_accel_scale: float = -10.0
+    ee_accel_clip: float = 0.025  # combined linear + 0.1 angular, m/s^2-like
+    ee_jerk_scale: float = -10.0
+    ee_jerk_clip: float = 0.1  # combined linear + 0.1 angular, m/s^3-like
     action_rate_scale: float = -0.02
     # Penalize step-to-step change in the commanded controller gains (only active
     # when ctrl.control_gains is True) to encourage smooth gain scheduling instead
@@ -1039,7 +1044,11 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "fine_pos_error_temp",
             "fine_rot_error_temp",
             "ee_vel_scale",
+            "ee_derivative_mode",
             "ee_accel_scale",
+            "ee_accel_clip",
+            "ee_jerk_scale",
+            "ee_jerk_clip",
             "action_rate_scale",
             "joint_vel_scale",
             "joint_limit_scale",
@@ -1072,6 +1081,14 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "fine_pos_error_temp",
             "fine_rot_error_temp",
         ):
+            if float(getattr(self.reward, name)) <= 0.0:
+                raise ValueError(f"reward.{name} must be positive")
+        if self.reward.ee_derivative_mode not in ("physical", "normalized_difference"):
+            raise ValueError(
+                "reward.ee_derivative_mode must be 'physical' or "
+                f"'normalized_difference', got {self.reward.ee_derivative_mode!r}"
+            )
+        for name in ("ee_accel_clip", "ee_jerk_clip"):
             if float(getattr(self.reward, name)) <= 0.0:
                 raise ValueError(f"reward.{name} must be positive")
         if self.debug_vis_force_style not in ("components", "vector", "both"):

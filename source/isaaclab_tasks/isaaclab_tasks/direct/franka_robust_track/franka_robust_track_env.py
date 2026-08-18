@@ -31,6 +31,7 @@ from isaaclab_tasks.direct.factory import factory_control, factory_utils
 from .actuator_shaping import shape_torque_held_command
 from .franka_robust_track_env_cfg import FrankaRobustTrackEnvCfg
 from .inertial_models import map_urdf_inertials
+from .motion_regularization import ee_acceleration_and_jerk_norms
 from .reference_clock import (
     axis_aligned_containment_mask,
     history_seed_offsets,
@@ -396,6 +397,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # are retained because these tensors also feed existing checkpoints/code.
         self.prev_fingertip_midpoint_linvel = torch.zeros((self.num_envs, 3), device=self.device)
         self.prev_fingertip_midpoint_angvel = torch.zeros((self.num_envs, 3), device=self.device)
+        self.prev_fingertip_midpoint_linaccel = torch.zeros((self.num_envs, 3), device=self.device)
+        self.prev_fingertip_midpoint_angaccel = torch.zeros((self.num_envs, 3), device=self.device)
+        self.ee_jerk_initialized = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.fingertip_midpoint_jacobian = torch.zeros((self.num_envs, 6, 7), device=self.device)
         self.arm_mass_matrix = torch.eye(7, device=self.device).repeat(self.num_envs, 1, 1)
         self.joint_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
@@ -466,6 +470,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 "fine_rot_track",
                 "ee_vel",
                 "ee_accel",
+                "ee_jerk",
                 "action_rate",
                 "gain_rate",
                 "force_track",
@@ -1347,23 +1352,41 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         )
         # These finite differences shrink when the policy period is shortened.
         # Normalize them back to the native-reference (15 Hz) interval so the
-        # established smoothness coefficients retain their physical-time meaning.
+        # action-rate coefficient retains its established meaning. EE motion
+        # derivatives use the physical policy timestep for new configurations.
         rate_normalization = float(self.policy_steps_per_reference)
-        ee_accel_norm = rate_normalization * (
-            torch.linalg.norm(
-                self.fingertip_midpoint_linvel
-                - self.prev_fingertip_midpoint_linvel,
-                dim=-1,
-            )
-            + 0.1
-            * torch.linalg.norm(
-                self.fingertip_midpoint_angvel
-                - self.prev_fingertip_midpoint_angvel,
-                dim=-1,
-            )
+        derivative_mode = str(self.cfg.reward.ee_derivative_mode)
+        difference_interval = (
+            float(self.step_dt)
+            if derivative_mode == "physical"
+            else 1.0 / rate_normalization
+        )
+        acceleration_clip = (
+            float(self.cfg.reward.ee_accel_clip) if derivative_mode == "physical" else None
+        )
+        jerk_clip = float(self.cfg.reward.ee_jerk_clip) if derivative_mode == "physical" else None
+        (
+            ee_accel_norm,
+            ee_jerk_norm,
+            current_linear_acceleration,
+            current_angular_acceleration,
+        ) = ee_acceleration_and_jerk_norms(
+            self.fingertip_midpoint_linvel,
+            self.fingertip_midpoint_angvel,
+            self.prev_fingertip_midpoint_linvel,
+            self.prev_fingertip_midpoint_angvel,
+            self.prev_fingertip_midpoint_linaccel,
+            self.prev_fingertip_midpoint_angaccel,
+            difference_interval,
+            self.ee_jerk_initialized,
+            acceleration_clip=acceleration_clip,
+            jerk_clip=jerk_clip,
         )
         self.prev_fingertip_midpoint_linvel = self.fingertip_midpoint_linvel.clone()
         self.prev_fingertip_midpoint_angvel = self.fingertip_midpoint_angvel.clone()
+        self.prev_fingertip_midpoint_linaccel = current_linear_acceleration
+        self.prev_fingertip_midpoint_angaccel = current_angular_acceleration
+        self.ee_jerk_initialized.fill_(True)
         # Cartesian delta-pose action rate uses only the first 6 dims so it is
         # unaffected by the optional gain dims, which get their own penalty.
         action_rate = rate_normalization * torch.linalg.norm(
@@ -1497,6 +1520,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             ),
             "ee_vel": ee_vel_norm * self.cfg.reward.ee_vel_scale,
             "ee_accel": ee_accel_norm * self.cfg.reward.ee_accel_scale,
+            "ee_jerk": ee_jerk_norm * self.cfg.reward.ee_jerk_scale,
             "action_rate": action_rate * self.cfg.reward.action_rate_scale,
             "gain_rate": gain_rate * self.cfg.reward.gain_rate_scale,
             "force_track": force_track,
@@ -1676,6 +1700,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # step after reset sees zero velocity change instead of a spurious spike.
         self.prev_fingertip_midpoint_linvel[env_ids] = self.fingertip_midpoint_linvel[env_ids]
         self.prev_fingertip_midpoint_angvel[env_ids] = self.fingertip_midpoint_angvel[env_ids]
+        self.prev_fingertip_midpoint_linaccel[env_ids] = 0.0
+        self.prev_fingertip_midpoint_angaccel[env_ids] = 0.0
+        self.ee_jerk_initialized[env_ids] = False
         self._randomize_dynamics(env_ids)
         self._resample_action_latency(env_ids)
         self._randomize_controller(env_ids)
