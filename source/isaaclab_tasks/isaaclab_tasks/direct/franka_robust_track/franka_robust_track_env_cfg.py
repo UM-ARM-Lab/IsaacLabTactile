@@ -609,6 +609,11 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
     # critic observations. Disable this when gains are fixed and the policy
     # should use the legacy observation contract.
     controller_context_in_policy: bool = True
+    # Give the asymmetric critic the sampled controller state without exposing
+    # it to the actor. When enabled, the critic receives both the six
+    # proportional and six derivative task-space gains. If the policy already
+    # receives Kp, only Kd is appended again on the critic-only path.
+    controller_context_in_critic: bool = False
     # Debug guard that synchronizes policy/critic tensors back to the CPU each
     # step. Offline replay disables it after startup validation for throughput.
     validate_observations: bool = True
@@ -789,6 +794,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             self.include_joint_velocities = bool(env.include_joint_velocities)
         if env.get("controller_context_in_policy", None) is not None:
             self.controller_context_in_policy = bool(env.controller_context_in_policy)
+        if env.get("controller_context_in_critic", None) is not None:
+            self.controller_context_in_critic = bool(env.controller_context_in_critic)
         if env.get("debug_vis", None) is not None:
             self.debug_vis = env.debug_vis
         if env.get("debug_vis_path_samples", None) is not None:
@@ -1285,8 +1292,10 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
         # Proprio obs: ee_pos(3)+ee_quat(4)+optional joint_pos(7)
         # +optional joint_vel(7)+actions(action_dim). Each lookahead pose
         # contributes a (pos_error, axis_angle_error) pair = 6 dims.
-        # The 6 current task gains are fed once to both policy and critic. The
-        # critic adds 24 privileged dims: payload_mass(1)+payload_com(3)
+        # The six current proportional gains optionally enter the policy. The
+        # asymmetric critic can additionally receive the complete sampled
+        # controller state (Kp and Kd). The critic also adds 24 privileged dims:
+        # payload_mass(1)+payload_com(3)
         # +joint_friction(7)+joint_armature(7)+pos_threshold(3)+rot_threshold(3).
         wrench_dim = 6 if self.tracking.use_full_wrench else 3
         force_feedback_dim = (
@@ -1302,7 +1311,12 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             + force_feedback_dim
         )
         future_dim = 6 * self.tracking.num_future_steps
-        controller_context_dim = 6 if self.controller_context_in_policy else 0
+        policy_controller_context_dim = 6 if self.controller_context_in_policy else 0
+        critic_controller_context_dim = (
+            (6 if self.controller_context_in_policy else 12)
+            if self.controller_context_in_critic
+            else 0
+        )
         virtual_contact_privileged_dim = (
             6
             if self.tracking.enable_force and self.tracking.force_mode == "virtual_contact"
@@ -1318,7 +1332,16 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
         )
         history = max(1, int(self.obs_history_length))
         # Only proprio is stacked over history; future errors + target wrench +
-        # controller gains (policy+critic) and privileged dims (critic) are appended
-        # once from the current frame.
-        self.observation_space = proprio_dim * history + future_dim + force_dim + controller_context_dim
-        self.state_space = self.observation_space + privileged_dim
+        # controller gains and privileged dims are appended once from the
+        # current frame rather than duplicated through history.
+        self.observation_space = (
+            proprio_dim * history
+            + future_dim
+            + force_dim
+            + policy_controller_context_dim
+        )
+        self.state_space = (
+            self.observation_space
+            + critic_controller_context_dim
+            + privileged_dim
+        )

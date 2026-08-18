@@ -140,6 +140,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.include_joint_angles = bool(self.cfg.include_joint_angles)
         self.include_joint_velocities = bool(self.cfg.include_joint_velocities)
         self.controller_context_in_policy = bool(self.cfg.controller_context_in_policy)
+        self.controller_context_in_critic = bool(self.cfg.controller_context_in_critic)
         self.proprio_dim = (
             7
             + (7 if self.include_joint_angles else 0)
@@ -166,6 +167,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             wrench_scale += [self._torque_mag_max] * 3
         self._wrench_scale = torch.tensor(wrench_scale, device=self.device)
         self.controller_context_dim = 6 if self.controller_context_in_policy else 0
+        self.critic_controller_context_dim = (
+            (6 if self.controller_context_in_policy else 12)
+            if self.controller_context_in_critic
+            else 0
+        )
         self.virtual_contact_privileged_dim = 6 if self.virtual_contact_enabled else 0
         self.privileged_dim = 24 + self.virtual_contact_privileged_dim
         self.proprio_history = torch.zeros(
@@ -1221,6 +1227,18 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             if self.controller_context_in_policy
             else controller_context[:, :0]
         )
+        if self.controller_context_in_critic:
+            # The critic already inherits Kp through the policy observation when
+            # controller context is actor-visible. Otherwise provide both Kp and
+            # Kd as critic-only privileged state. Gains are sampled at reset and
+            # stay fixed for the episode.
+            critic_controller_context = (
+                self.task_deriv_gains
+                if self.controller_context_in_policy
+                else torch.cat((self.task_prop_gains, self.task_deriv_gains), dim=-1)
+            )
+        else:
+            critic_controller_context = controller_context[:, :0]
         if self.obs_history_length == 1:
             proprio_stacked = proprio
         else:
@@ -1236,7 +1254,15 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 [proprio_stacked, future_errors, future_wrench, policy_controller_context], dim=-1
             )
             critic_obs = torch.cat(
-                [proprio_stacked, future_errors, future_wrench, policy_controller_context, privileged], dim=-1
+                [
+                    proprio_stacked,
+                    future_errors,
+                    future_wrench,
+                    policy_controller_context,
+                    critic_controller_context,
+                    privileged,
+                ],
+                dim=-1,
             )
         else:
             future_wrench = None
@@ -1244,7 +1270,14 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 [proprio_stacked, future_errors, policy_controller_context], dim=-1
             )
             critic_obs = torch.cat(
-                [proprio_stacked, future_errors, policy_controller_context, privileged], dim=-1
+                [
+                    proprio_stacked,
+                    future_errors,
+                    policy_controller_context,
+                    critic_controller_context,
+                    privileged,
+                ],
+                dim=-1,
             )
 
         # Fail loud if a NaN/Inf reaches the policy/critic input. If this fires, the
@@ -1257,6 +1290,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             "actions": self.actions,
             "future_errors": future_errors,
             "controller_context": controller_context,
+            "task_deriv_gains": self.task_deriv_gains,
             "privileged": privileged,
         }
         if future_wrench is not None:
