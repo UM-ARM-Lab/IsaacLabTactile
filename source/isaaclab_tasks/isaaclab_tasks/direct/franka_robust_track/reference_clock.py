@@ -53,6 +53,61 @@ def history_seed_offsets(
     )
 
 
+def valid_step_weighted_start_times(
+    unit_samples: torch.Tensor,
+    *,
+    start_time_lo: float,
+    start_time_hi: float,
+    reference_duration: float,
+    episode_duration: float,
+) -> torch.Tensor:
+    """Map uniform samples to start times weighted by valid episode duration.
+
+    A zero-width range is an intentional fixed start, notably the phase-zero
+    common evaluation. It must remain valid even when training uses weighted
+    padding for non-degenerate start ranges.
+    """
+    start_time_lo = float(start_time_lo)
+    start_time_hi = float(start_time_hi)
+    reference_duration = float(reference_duration)
+    episode_duration = float(episode_duration)
+    if start_time_lo > start_time_hi:
+        raise ValueError("start_time_lo must not exceed start_time_hi")
+    if episode_duration <= 0.0:
+        raise ValueError("episode_duration must be positive")
+    if start_time_lo == start_time_hi:
+        return torch.full_like(unit_samples, start_time_lo)
+
+    weighted_hi = min(start_time_hi, reference_duration)
+    weighted_lo = start_time_lo
+    if weighted_lo >= weighted_hi:
+        raise ValueError(
+            "start-time range must overlap times before reference_duration"
+        )
+
+    full_valid_hi = min(
+        weighted_hi,
+        max(weighted_lo, reference_duration - episode_duration),
+    )
+    full_area = episode_duration * (full_valid_hi - weighted_lo)
+    tail_lo = max(weighted_lo, reference_duration - episode_duration)
+    tail_remaining_lo = reference_duration - tail_lo
+    tail_remaining_hi = reference_duration - weighted_hi
+    tail_area = 0.5 * (tail_remaining_lo**2 - tail_remaining_hi**2)
+    total_area = full_area + tail_area
+    area_sample = total_area * unit_samples
+
+    uniform_time = weighted_lo + area_sample / episode_duration
+    tail_area_sample = torch.clamp(area_sample - full_area, min=0.0)
+    tail_time = reference_duration - torch.sqrt(
+        torch.clamp(
+            tail_remaining_lo**2 - 2.0 * tail_area_sample,
+            min=0.0,
+        )
+    )
+    return torch.where(area_sample < full_area, uniform_time, tail_time)
+
+
 def reference_coordinates(
     policy_step: torch.Tensor,
     *,

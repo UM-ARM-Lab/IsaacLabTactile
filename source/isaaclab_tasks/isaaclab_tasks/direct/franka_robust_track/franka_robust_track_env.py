@@ -37,6 +37,7 @@ from .reference_clock import (
     is_reference_boundary,
     policy_step_to_reference_index,
     reference_coordinates,
+    valid_step_weighted_start_times,
     virtual_contact_reference_coordinates,
 )
 from .virtual_contact import (
@@ -2918,42 +2919,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 # starts by their number of valid (non-pad) policy steps. The
                 # inverse CDF has a uniform-density prefix and a linearly
                 # decreasing tail, so it is exact and requires no rejection loop.
-                reference_duration = float(tcfg.circle_reference_duration_s)
-                episode_duration = float(self.max_episode_length_s)
-                weighted_hi = min(float(start_time_hi), reference_duration)
-                weighted_lo = float(start_time_lo)
-                if weighted_lo >= weighted_hi:
-                    raise ValueError(
-                        "tracking.circle_start_time_range must overlap times before "
-                        "circle_reference_duration_s when using valid_steps sampling"
-                    )
-
-                full_valid_hi = min(
-                    weighted_hi,
-                    max(weighted_lo, reference_duration - episode_duration),
-                )
-                full_area = episode_duration * (full_valid_hi - weighted_lo)
-                tail_lo = max(weighted_lo, reference_duration - episode_duration)
-                tail_remaining_lo = reference_duration - tail_lo
-                tail_remaining_hi = reference_duration - weighted_hi
-                tail_area = 0.5 * (
-                    tail_remaining_lo**2 - tail_remaining_hi**2
-                )
-                total_area = full_area + tail_area
-                area_sample = total_area * torch.rand((m, 1), device=device)
-
-                uniform_time = weighted_lo + area_sample / episode_duration
-                tail_area_sample = torch.clamp(area_sample - full_area, min=0.0)
-                tail_time = reference_duration - torch.sqrt(
-                    torch.clamp(
-                        tail_remaining_lo**2 - 2.0 * tail_area_sample,
-                        min=0.0,
-                    )
-                )
-                params["start_time"] = torch.where(
-                    area_sample < full_area,
-                    uniform_time,
-                    tail_time,
+                params["start_time"] = valid_step_weighted_start_times(
+                    torch.rand((m, 1), device=device),
+                    start_time_lo=start_time_lo,
+                    start_time_hi=start_time_hi,
+                    reference_duration=tcfg.circle_reference_duration_s,
+                    episode_duration=self.max_episode_length_s,
                 )
             else:
                 params["start_time"] = start_time_lo + (
