@@ -146,6 +146,11 @@ class TrackingCfg:
     # Optional temporal phase offset for analytic circles. Zero preserves the
     # historical reset-at-the-start behavior.
     circle_start_time_range = [0.0, 0.0]  # s
+    # Sampling distribution within circle_start_time_range. ``uniform`` keeps
+    # the historical behavior. ``valid_steps`` weights each start by the
+    # non-padded portion of one training episode, so starts near the finite
+    # reference tail remain possible without over-representing terminal holds.
+    circle_start_time_sampling: str = "uniform"  # uniform, valid_steps
     # Finite source-clip duration. References beyond this time hold the final
     # pose, matching the padded-tail behavior of fixed-length dataset clips.
     circle_reference_duration_s: float = 10.0
@@ -880,6 +885,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "circle_radius_range",
             "circle_speed_range",
             "circle_start_time_range",
+            "circle_start_time_sampling",
             "circle_reference_duration_s",
             "reference_buffer_duration_s",
             "rot_speed_range",
@@ -1091,6 +1097,14 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
         if float(self.debug_vis_force_ee_sphere_radius) <= 0.0:
             raise ValueError("debug_vis_force_ee_sphere_radius must be positive")
         self.tracking.num_future_steps = int(self.tracking.num_future_steps)
+        self.tracking.circle_start_time_sampling = str(
+            self.tracking.circle_start_time_sampling
+        )
+        if self.tracking.circle_start_time_sampling not in ("uniform", "valid_steps"):
+            raise ValueError(
+                "tracking.circle_start_time_sampling must be 'uniform' or "
+                f"'valid_steps', got {self.tracking.circle_start_time_sampling!r}"
+            )
         self.tracking.reference_decimation = int(
             self.tracking.reference_decimation
         )
