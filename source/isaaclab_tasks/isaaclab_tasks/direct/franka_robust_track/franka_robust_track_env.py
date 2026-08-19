@@ -12,6 +12,8 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+from force_tool.utils.action_penalties import action_alternation_penalty
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
@@ -89,6 +91,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
         self.actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self.prev_actions = torch.zeros_like(self.actions)
+        self.prev_prev_actions = torch.zeros_like(self.actions)
         self.current_action_rep = str(getattr(self.cfg.ctrl, "action_rep", "delta_ee_pose"))
         self.delta_target_mode = str(getattr(self.cfg.ctrl, "delta_target_mode", "per_physics_step"))
         if self.delta_target_mode not in ("per_physics_step", "per_control_step"):
@@ -503,6 +506,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 "ee_accel",
                 "ee_jerk",
                 "action_rate",
+                "action_alternation",
                 "gain_rate",
                 "force_track",
                 "torque_track",
@@ -885,6 +889,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             and self._target_update_delay_sampling_mode == "per_step"
         ):
             self._resample_target_update_delay(self._robot._ALL_INDICES)
+        self.prev_prev_actions[:] = self.prev_actions
         self.prev_actions[:] = self.actions
         actions, action_rep, compliance = self._parse_action_packet(actions)
         if action_rep not in ("rel_ee_pose", "abs_ee_pose", "delta_ee_pose"):
@@ -1451,6 +1456,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         action_rate = rate_normalization * torch.linalg.norm(
             self.actions[:, 0:6] - self.prev_actions[:, 0:6], dim=-1
         )
+        action_alternation = action_alternation_penalty(
+            self.actions, self.prev_actions, self.prev_prev_actions
+        )
         if self.cfg.ctrl.control_gains:
             gain_rate = rate_normalization * torch.linalg.norm(
                 self.actions[:, 6:12] - self.prev_actions[:, 6:12], dim=-1
@@ -1581,6 +1589,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             "ee_accel": ee_accel_norm * self.cfg.reward.ee_accel_scale,
             "ee_jerk": ee_jerk_norm * self.cfg.reward.ee_jerk_scale,
             "action_rate": action_rate * self.cfg.reward.action_rate_scale,
+            "action_alternation": (
+                action_alternation * self.cfg.reward.action_alternation_scale
+            ),
             "gain_rate": gain_rate * self.cfg.reward.gain_rate_scale,
             "force_track": force_track,
             "torque_track": torque_track,
@@ -1754,6 +1765,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
         self.actions[env_ids] = 0.0
         self.prev_actions[env_ids] = 0.0
+        self.prev_prev_actions[env_ids] = 0.0
         self.reset_actuator_shaping(env_ids)
         # Seed prev velocity with the current (post-reset) velocity so the first
         # step after reset sees zero velocity change instead of a spurious spike.

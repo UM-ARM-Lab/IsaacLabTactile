@@ -570,6 +570,9 @@ class RewardCfg:
     ee_jerk_scale: float = -10.0
     ee_jerk_clip: float = 0.1  # <= 0 disables clipping
     action_rate_scale: float = -0.02
+    # Penalize consecutive action increments that reverse sign. Unlike action
+    # rate, this directly targets Nyquist-like bang-bang alternation.
+    action_alternation_scale: float = 0.0
     # Penalize step-to-step change in the commanded controller gains (only active
     # when ctrl.control_gains is True) to encourage smooth gain scheduling instead
     # of chattering stiffness. Computed on the normalized [-1, 1] gain actions.
@@ -1062,6 +1065,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "ee_jerk_scale",
             "ee_jerk_clip",
             "action_rate_scale",
+            "action_alternation_scale",
             "joint_vel_scale",
             "joint_limit_scale",
             "gain_rate_scale",
