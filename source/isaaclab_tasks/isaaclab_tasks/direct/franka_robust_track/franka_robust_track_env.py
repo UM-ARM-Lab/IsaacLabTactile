@@ -1412,10 +1412,18 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             if derivative_mode == "physical"
             else 1.0 / rate_normalization
         )
+        acceleration_clip_value = float(self.cfg.reward.ee_accel_clip)
+        jerk_clip_value = float(self.cfg.reward.ee_jerk_clip)
         acceleration_clip = (
-            float(self.cfg.reward.ee_accel_clip) if derivative_mode == "physical" else None
+            acceleration_clip_value
+            if derivative_mode == "physical" and acceleration_clip_value > 0.0
+            else None
         )
-        jerk_clip = float(self.cfg.reward.ee_jerk_clip) if derivative_mode == "physical" else None
+        jerk_clip = (
+            jerk_clip_value
+            if derivative_mode == "physical" and jerk_clip_value > 0.0
+            else None
+        )
         (
             ee_accel_norm,
             ee_jerk_norm,
@@ -1882,12 +1890,15 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         cfg = self.cfg.init
         # cuRobo/warp default to cuda:0 for the solver and kernel launches, so pin
         # the worker to our physics GPU via CUDA_VISIBLE_DEVICES and address it as
-        # cuda:0 inside the worker. This avoids the device mismatch (e.g. goal
-        # tensors on cuda:1 while kernels launch on cuda:0) when self.device != cuda:0.
+        # cuda:0 inside the worker. Preserve an existing mask: launch wrappers use
+        # it to map logical cuda:0 to the assigned physical GPU. Overwriting that
+        # mask with self.device.index (which is 0 inside the container) sends every
+        # worker to physical GPU 0 on a multi-GPU node.
         device = torch.device(self.device)
         gpu_index = device.index if device.index is not None else 0
         worker_env = os.environ.copy()
-        worker_env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+        if not worker_env.get("CUDA_VISIBLE_DEVICES", "").strip():
+            worker_env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
         # The worker shares the GPU with the training/sim process, whose footprint
         # grows over training. expandable_segments lets the worker's allocator
         # return freed memory and fragment less, reducing collisions that OOM'd

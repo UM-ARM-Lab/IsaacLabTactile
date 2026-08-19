@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import math
 from typing import Literal
 
 import isaaclab.sim as sim_utils
@@ -565,9 +566,9 @@ class RewardCfg:
     # prevent reset/contact transients from dominating the tracking objective.
     ee_derivative_mode: str = "physical"  # physical, normalized_difference
     ee_accel_scale: float = -10.0
-    ee_accel_clip: float = 0.025  # combined linear + 0.1 angular, m/s^2-like
+    ee_accel_clip: float = 0.025  # <= 0 disables clipping
     ee_jerk_scale: float = -10.0
-    ee_jerk_clip: float = 0.1  # combined linear + 0.1 angular, m/s^3-like
+    ee_jerk_clip: float = 0.1  # <= 0 disables clipping
     action_rate_scale: float = -0.02
     # Penalize step-to-step change in the commanded controller gains (only active
     # when ctrl.control_gains is True) to encourage smooth gain scheduling instead
@@ -1100,8 +1101,8 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
                 f"'normalized_difference', got {self.reward.ee_derivative_mode!r}"
             )
         for name in ("ee_accel_clip", "ee_jerk_clip"):
-            if float(getattr(self.reward, name)) <= 0.0:
-                raise ValueError(f"reward.{name} must be positive")
+            if not math.isfinite(float(getattr(self.reward, name))):
+                raise ValueError(f"reward.{name} must be finite")
         if self.debug_vis_force_style not in ("components", "vector", "both"):
             raise ValueError(
                 "debug_vis_force_style must be 'components', 'vector', or 'both'"
