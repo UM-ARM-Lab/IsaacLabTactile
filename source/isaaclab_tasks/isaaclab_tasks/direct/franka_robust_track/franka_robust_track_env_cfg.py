@@ -565,6 +565,10 @@ class RewardCfg:
     # Physical finite-difference derivatives at the policy timestep. The caps
     # prevent reset/contact transients from dominating the tracking objective.
     ee_derivative_mode: str = "physical"  # physical, normalized_difference
+    # hard_clip preserves historical behavior. log1p uses the clip values as
+    # characteristic scales and retains a diminishing, non-flat penalty above
+    # them: scale * log(1 + norm / scale).
+    ee_derivative_penalty_mode: str = "hard_clip"  # hard_clip, log1p
     ee_accel_scale: float = -10.0
     ee_accel_clip: float = 0.025  # <= 0 disables clipping
     ee_jerk_scale: float = -10.0
@@ -1060,6 +1064,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "fine_rot_error_temp",
             "ee_vel_scale",
             "ee_derivative_mode",
+            "ee_derivative_penalty_mode",
             "ee_accel_scale",
             "ee_accel_clip",
             "ee_jerk_scale",
@@ -1104,9 +1109,20 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
                 "reward.ee_derivative_mode must be 'physical' or "
                 f"'normalized_difference', got {self.reward.ee_derivative_mode!r}"
             )
+        if self.reward.ee_derivative_penalty_mode not in ("hard_clip", "log1p"):
+            raise ValueError(
+                "reward.ee_derivative_penalty_mode must be 'hard_clip' or "
+                f"'log1p', got {self.reward.ee_derivative_penalty_mode!r}"
+            )
         for name in ("ee_accel_clip", "ee_jerk_clip"):
             if not math.isfinite(float(getattr(self.reward, name))):
                 raise ValueError(f"reward.{name} must be finite")
+        if self.reward.ee_derivative_penalty_mode == "log1p":
+            for name in ("ee_accel_clip", "ee_jerk_clip"):
+                if float(getattr(self.reward, name)) <= 0.0:
+                    raise ValueError(
+                        f"reward.{name} must be positive for log1p derivative penalties"
+                    )
         if self.debug_vis_force_style not in ("components", "vector", "both"):
             raise ValueError(
                 "debug_vis_force_style must be 'components', 'vector', or 'both'"

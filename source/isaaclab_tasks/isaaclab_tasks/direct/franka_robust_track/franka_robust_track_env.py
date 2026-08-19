@@ -1412,6 +1412,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # derivatives use the physical policy timestep for new configurations.
         rate_normalization = float(self.policy_steps_per_reference)
         derivative_mode = str(self.cfg.reward.ee_derivative_mode)
+        derivative_penalty_mode = str(self.cfg.reward.ee_derivative_penalty_mode)
         difference_interval = (
             float(self.step_dt)
             if derivative_mode == "physical"
@@ -1445,6 +1446,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.ee_jerk_initialized,
             acceleration_clip=acceleration_clip,
             jerk_clip=jerk_clip,
+            penalty_mode=derivative_penalty_mode,
         )
         self.prev_fingertip_midpoint_linvel = self.fingertip_midpoint_linvel.clone()
         self.prev_fingertip_midpoint_angvel = self.fingertip_midpoint_angvel.clone()

@@ -16,6 +16,7 @@ def ee_acceleration_and_jerk_norms(
     jerk_initialized: torch.Tensor,
     acceleration_clip: float | None = None,
     jerk_clip: float | None = None,
+    penalty_mode: str = "hard_clip",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return EE acceleration/jerk norms and current accelerations.
 
@@ -40,8 +41,23 @@ def ee_acceleration_and_jerk_norms(
         * torch.linalg.norm(angular_acceleration - previous_angular_acceleration, dim=-1)
     ) / interval
     jerk_norm = torch.where(jerk_initialized, jerk_norm, torch.zeros_like(jerk_norm))
-    if acceleration_clip is not None:
-        acceleration_norm = acceleration_norm.clamp(max=float(acceleration_clip))
-    if jerk_clip is not None:
-        jerk_norm = jerk_norm.clamp(max=float(jerk_clip))
+    if penalty_mode == "hard_clip":
+        if acceleration_clip is not None:
+            acceleration_norm = acceleration_norm.clamp(max=float(acceleration_clip))
+        if jerk_clip is not None:
+            jerk_norm = jerk_norm.clamp(max=float(jerk_clip))
+    elif penalty_mode == "log1p":
+        if acceleration_clip is None or jerk_clip is None:
+            raise ValueError("log1p penalty mode requires positive derivative thresholds")
+        acceleration_threshold = float(acceleration_clip)
+        jerk_threshold = float(jerk_clip)
+        acceleration_norm = acceleration_threshold * torch.log1p(
+            acceleration_norm / acceleration_threshold
+        )
+        jerk_norm = jerk_threshold * torch.log1p(jerk_norm / jerk_threshold)
+    else:
+        raise ValueError(
+            "penalty_mode must be 'hard_clip' or 'log1p', "
+            f"got {penalty_mode!r}"
+        )
     return acceleration_norm, jerk_norm, linear_acceleration, angular_acceleration
