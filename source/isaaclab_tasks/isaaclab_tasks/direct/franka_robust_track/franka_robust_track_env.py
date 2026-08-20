@@ -1489,18 +1489,18 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # Per-policy-step scalars consumed by the deterministic eval collector.
         # Unlike Episode_Reward, these remain physical, linear-only, and
         # untransformed. The squared moments let eval_full report a true RMS.
-        self.extras["ee_linear_accel_mean_m_s2"] = raw_linear_accel_norm.mean()
-        self.extras["ee_linear_accel_sqmean_m2_s4"] = raw_linear_accel_norm.square().mean()
-        self.extras["ee_linear_accel_max_m_s2"] = raw_linear_accel_norm.max()
-        self.extras["ee_linear_jerk_mean_m_s3"] = raw_linear_jerk_norm.mean()
-        self.extras["ee_linear_jerk_sqmean_m2_s6"] = raw_linear_jerk_norm.square().mean()
-        self.extras["ee_linear_jerk_max_m_s3"] = raw_linear_jerk_norm.max()
-        self.extras["ee_angular_accel_mean_rad_s2"] = raw_angular_accel_norm.mean()
-        self.extras["ee_angular_accel_sqmean_rad2_s4"] = raw_angular_accel_norm.square().mean()
-        self.extras["ee_angular_accel_max_rad_s2"] = raw_angular_accel_norm.max()
-        self.extras["ee_angular_jerk_mean_rad_s3"] = raw_angular_jerk_norm.mean()
-        self.extras["ee_angular_jerk_sqmean_rad2_s6"] = raw_angular_jerk_norm.square().mean()
-        self.extras["ee_angular_jerk_max_rad_s3"] = raw_angular_jerk_norm.max()
+        self.extras["ee_linear_accel_mean"] = raw_linear_accel_norm.mean()
+        self.extras["ee_linear_accel_sqmean"] = raw_linear_accel_norm.square().mean()
+        self.extras["ee_linear_accel_max"] = raw_linear_accel_norm.max()
+        self.extras["ee_linear_jerk_mean"] = raw_linear_jerk_norm.mean()
+        self.extras["ee_linear_jerk_sqmean"] = raw_linear_jerk_norm.square().mean()
+        self.extras["ee_linear_jerk_max"] = raw_linear_jerk_norm.max()
+        self.extras["ee_angular_accel_mean"] = raw_angular_accel_norm.mean()
+        self.extras["ee_angular_accel_sqmean"] = raw_angular_accel_norm.square().mean()
+        self.extras["ee_angular_accel_max"] = raw_angular_accel_norm.max()
+        self.extras["ee_angular_jerk_mean"] = raw_angular_jerk_norm.mean()
+        self.extras["ee_angular_jerk_sqmean"] = raw_angular_jerk_norm.square().mean()
+        self.extras["ee_angular_jerk_max"] = raw_angular_jerk_norm.max()
         self.prev_fingertip_midpoint_linvel = self.fingertip_midpoint_linvel.clone()
         self.prev_fingertip_midpoint_angvel = self.fingertip_midpoint_angvel.clone()
         self.prev_fingertip_midpoint_linaccel = current_linear_acceleration
@@ -4882,40 +4882,40 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         if hasattr(self, "_episode_ee_derivative_diagnostics"):
             diagnostics = self._episode_ee_derivative_diagnostics
             duration = float(self.max_episode_length_s)
-            self.extras["log"]["EE_Diagnostics/linear_accel_mean_m_s2"] = (
+            self.extras["log"]["EE_Diagnostics/linear_accel_mean"] = (
                 diagnostics["accel_sum"][env_ids].mean() / duration
             )
-            self.extras["log"]["EE_Diagnostics/linear_accel_rms_m_s2"] = torch.sqrt(
+            self.extras["log"]["EE_Diagnostics/linear_accel_rms"] = torch.sqrt(
                 diagnostics["accel_sqsum"][env_ids].mean() / duration
             )
-            self.extras["log"]["EE_Diagnostics/linear_accel_max_m_s2"] = diagnostics[
+            self.extras["log"]["EE_Diagnostics/linear_accel_max"] = diagnostics[
                 "accel_max"
             ][env_ids].max()
-            self.extras["log"]["EE_Diagnostics/linear_jerk_mean_m_s3"] = (
+            self.extras["log"]["EE_Diagnostics/linear_jerk_mean"] = (
                 diagnostics["jerk_sum"][env_ids].mean() / duration
             )
-            self.extras["log"]["EE_Diagnostics/linear_jerk_rms_m_s3"] = torch.sqrt(
+            self.extras["log"]["EE_Diagnostics/linear_jerk_rms"] = torch.sqrt(
                 diagnostics["jerk_sqsum"][env_ids].mean() / duration
             )
-            self.extras["log"]["EE_Diagnostics/linear_jerk_max_m_s3"] = diagnostics[
+            self.extras["log"]["EE_Diagnostics/linear_jerk_max"] = diagnostics[
                 "jerk_max"
             ][env_ids].max()
-            self.extras["log"]["EE_Diagnostics/angular_accel_mean_rad_s2"] = (
+            self.extras["log"]["EE_Diagnostics/angular_accel_mean"] = (
                 diagnostics["angular_accel_sum"][env_ids].mean() / duration
             )
-            self.extras["log"]["EE_Diagnostics/angular_accel_rms_rad_s2"] = torch.sqrt(
+            self.extras["log"]["EE_Diagnostics/angular_accel_rms"] = torch.sqrt(
                 diagnostics["angular_accel_sqsum"][env_ids].mean() / duration
             )
-            self.extras["log"]["EE_Diagnostics/angular_accel_max_rad_s2"] = diagnostics[
+            self.extras["log"]["EE_Diagnostics/angular_accel_max"] = diagnostics[
                 "angular_accel_max"
             ][env_ids].max()
-            self.extras["log"]["EE_Diagnostics/angular_jerk_mean_rad_s3"] = (
+            self.extras["log"]["EE_Diagnostics/angular_jerk_mean"] = (
                 diagnostics["angular_jerk_sum"][env_ids].mean() / duration
             )
-            self.extras["log"]["EE_Diagnostics/angular_jerk_rms_rad_s3"] = torch.sqrt(
+            self.extras["log"]["EE_Diagnostics/angular_jerk_rms"] = torch.sqrt(
                 diagnostics["angular_jerk_sqsum"][env_ids].mean() / duration
             )
-            self.extras["log"]["EE_Diagnostics/angular_jerk_max_rad_s3"] = diagnostics[
+            self.extras["log"]["EE_Diagnostics/angular_jerk_max"] = diagnostics[
                 "angular_jerk_max"
             ][env_ids].max()
             for value in diagnostics.values():
