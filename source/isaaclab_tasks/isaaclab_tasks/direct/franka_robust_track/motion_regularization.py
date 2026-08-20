@@ -5,6 +5,30 @@ from __future__ import annotations
 import torch
 
 
+def raw_linear_acceleration_and_jerk_norms(
+    linear_acceleration: torch.Tensor,
+    previous_linear_acceleration: torch.Tensor,
+    difference_interval: float,
+    jerk_initialized: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return unclipped physical linear EE acceleration and jerk norms.
+
+    These diagnostics deliberately exclude the reward's angular weighting and
+    nonlinear transform so they match the Cartesian metrics computed from a
+    fixed-evaluation EE position trace.
+    """
+
+    interval = float(difference_interval)
+    if interval <= 0.0:
+        raise ValueError("difference_interval must be positive")
+    acceleration_norm = torch.linalg.norm(linear_acceleration, dim=-1)
+    jerk_norm = torch.linalg.norm(
+        linear_acceleration - previous_linear_acceleration, dim=-1
+    ) / interval
+    jerk_norm = torch.where(jerk_initialized, jerk_norm, torch.zeros_like(jerk_norm))
+    return acceleration_norm, jerk_norm
+
+
 def ee_acceleration_and_jerk_norms(
     linear_velocity: torch.Tensor,
     angular_velocity: torch.Tensor,

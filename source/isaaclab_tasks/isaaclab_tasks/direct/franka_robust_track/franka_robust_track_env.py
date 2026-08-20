@@ -33,7 +33,10 @@ from isaaclab_tasks.direct.factory import factory_control, factory_utils
 from .actuator_shaping import shape_torque_held_command
 from .franka_robust_track_env_cfg import FrankaRobustTrackEnvCfg
 from .inertial_models import map_urdf_inertials
-from .motion_regularization import ee_acceleration_and_jerk_norms
+from .motion_regularization import (
+    ee_acceleration_and_jerk_norms,
+    raw_linear_acceleration_and_jerk_norms,
+)
 from .reference_clock import (
     axis_aligned_containment_mask,
     history_seed_offsets,
@@ -516,6 +519,18 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 "joint_vel",
                 "joint_limit",
             ]
+        }
+        # Unclipped physical Cartesian diagnostics. Keep these separate from
+        # Episode_Reward: the reward terms may be hard-clipped or transformed
+        # and mix linear motion with 0.1x angular motion. These accumulators
+        # match the fixed-evaluation linear EE units instead.
+        self._episode_ee_derivative_diagnostics = {
+            "accel_sum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "accel_sqsum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "accel_max": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "jerk_sum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "jerk_sqsum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "jerk_max": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
         }
 
         # Per-native-reference-step tracking-error profile. Async policies receive
@@ -1448,6 +1463,14 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             jerk_clip=jerk_clip,
             penalty_mode=derivative_penalty_mode,
         )
+        raw_linear_accel_norm, raw_linear_jerk_norm = (
+            raw_linear_acceleration_and_jerk_norms(
+                current_linear_acceleration,
+                self.prev_fingertip_midpoint_linaccel,
+                difference_interval,
+                self.ee_jerk_initialized,
+            )
+        )
         self.prev_fingertip_midpoint_linvel = self.fingertip_midpoint_linvel.clone()
         self.prev_fingertip_midpoint_angvel = self.fingertip_midpoint_angvel.clone()
         self.prev_fingertip_midpoint_linaccel = current_linear_acceleration
@@ -1606,6 +1629,17 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0) * self.step_dt
         for key, value in rewards.items():
             self._episode_sums[key] += value * self.step_dt
+        derivative_diagnostics = self._episode_ee_derivative_diagnostics
+        derivative_diagnostics["accel_sum"] += raw_linear_accel_norm * self.step_dt
+        derivative_diagnostics["accel_sqsum"] += raw_linear_accel_norm.square() * self.step_dt
+        derivative_diagnostics["accel_max"] = torch.maximum(
+            derivative_diagnostics["accel_max"], raw_linear_accel_norm
+        )
+        derivative_diagnostics["jerk_sum"] += raw_linear_jerk_norm * self.step_dt
+        derivative_diagnostics["jerk_sqsum"] += raw_linear_jerk_norm.square() * self.step_dt
+        derivative_diagnostics["jerk_max"] = torch.maximum(
+            derivative_diagnostics["jerk_max"], raw_linear_jerk_norm
+        )
 
         successes = torch.logical_and(
             pos_error_norm < self.cfg.reward.success_pos_threshold,
@@ -4801,6 +4835,29 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         for key, episodic_sum in self._episode_sums.items():
             self.extras["log"][f"Episode_Reward/{key}"] = torch.mean(episodic_sum[env_ids]) / self.max_episode_length_s
             episodic_sum[env_ids] = 0.0
+        if hasattr(self, "_episode_ee_derivative_diagnostics"):
+            diagnostics = self._episode_ee_derivative_diagnostics
+            duration = float(self.max_episode_length_s)
+            self.extras["log"]["EE_Diagnostics/linear_accel_mean_m_s2"] = (
+                diagnostics["accel_sum"][env_ids].mean() / duration
+            )
+            self.extras["log"]["EE_Diagnostics/linear_accel_rms_m_s2"] = torch.sqrt(
+                diagnostics["accel_sqsum"][env_ids].mean() / duration
+            )
+            self.extras["log"]["EE_Diagnostics/linear_accel_max_m_s2"] = diagnostics[
+                "accel_max"
+            ][env_ids].max()
+            self.extras["log"]["EE_Diagnostics/linear_jerk_mean_m_s3"] = (
+                diagnostics["jerk_sum"][env_ids].mean() / duration
+            )
+            self.extras["log"]["EE_Diagnostics/linear_jerk_rms_m_s3"] = torch.sqrt(
+                diagnostics["jerk_sqsum"][env_ids].mean() / duration
+            )
+            self.extras["log"]["EE_Diagnostics/linear_jerk_max_m_s3"] = diagnostics[
+                "jerk_max"
+            ][env_ids].max()
+            for value in diagnostics.values():
+                value[env_ids] = 0.0
         self.extras["log"]["Dynamics/payload_mass"] = self.payload_mass[env_ids].mean()
         self.extras["log"]["Dynamics/joint_friction"] = self.joint_friction[env_ids].mean()
         self.extras["log"]["Dynamics/joint_armature"] = self.joint_armature[env_ids].mean()
