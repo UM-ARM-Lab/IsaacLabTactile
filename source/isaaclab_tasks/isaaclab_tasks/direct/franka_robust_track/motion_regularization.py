@@ -5,28 +5,51 @@ from __future__ import annotations
 import torch
 
 
+def _raw_vector_acceleration_and_jerk_norms(
+    acceleration: torch.Tensor,
+    previous_acceleration: torch.Tensor,
+    difference_interval: float,
+    jerk_initialized: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    interval = float(difference_interval)
+    if interval <= 0.0:
+        raise ValueError("difference_interval must be positive")
+    acceleration_norm = torch.linalg.norm(acceleration, dim=-1)
+    jerk_norm = torch.linalg.norm(acceleration - previous_acceleration, dim=-1) / interval
+    jerk_norm = torch.where(jerk_initialized, jerk_norm, torch.zeros_like(jerk_norm))
+    return acceleration_norm, jerk_norm
+
+
 def raw_linear_acceleration_and_jerk_norms(
     linear_acceleration: torch.Tensor,
     previous_linear_acceleration: torch.Tensor,
     difference_interval: float,
     jerk_initialized: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return unclipped physical linear EE acceleration and jerk norms.
+    """Return unclipped physical linear EE acceleration and jerk norms."""
 
-    These diagnostics deliberately exclude the reward's angular weighting and
-    nonlinear transform so they match the Cartesian metrics computed from a
-    fixed-evaluation EE position trace.
-    """
+    return _raw_vector_acceleration_and_jerk_norms(
+        linear_acceleration,
+        previous_linear_acceleration,
+        difference_interval,
+        jerk_initialized,
+    )
 
-    interval = float(difference_interval)
-    if interval <= 0.0:
-        raise ValueError("difference_interval must be positive")
-    acceleration_norm = torch.linalg.norm(linear_acceleration, dim=-1)
-    jerk_norm = torch.linalg.norm(
-        linear_acceleration - previous_linear_acceleration, dim=-1
-    ) / interval
-    jerk_norm = torch.where(jerk_initialized, jerk_norm, torch.zeros_like(jerk_norm))
-    return acceleration_norm, jerk_norm
+
+def raw_angular_acceleration_and_jerk_norms(
+    angular_acceleration: torch.Tensor,
+    previous_angular_acceleration: torch.Tensor,
+    difference_interval: float,
+    jerk_initialized: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return unclipped physical angular EE acceleration and jerk norms."""
+
+    return _raw_vector_acceleration_and_jerk_norms(
+        angular_acceleration,
+        previous_angular_acceleration,
+        difference_interval,
+        jerk_initialized,
+    )
 
 
 def ee_acceleration_and_jerk_norms(

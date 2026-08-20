@@ -35,6 +35,7 @@ from .franka_robust_track_env_cfg import FrankaRobustTrackEnvCfg
 from .inertial_models import map_urdf_inertials
 from .motion_regularization import (
     ee_acceleration_and_jerk_norms,
+    raw_angular_acceleration_and_jerk_norms,
     raw_linear_acceleration_and_jerk_norms,
 )
 from .reference_clock import (
@@ -531,6 +532,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             "jerk_sum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "jerk_sqsum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "jerk_max": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "angular_accel_sum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "angular_accel_sqsum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "angular_accel_max": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "angular_jerk_sum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "angular_jerk_sqsum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "angular_jerk_max": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
         }
 
         # Per-native-reference-step tracking-error profile. Async policies receive
@@ -1471,6 +1478,14 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 self.ee_jerk_initialized,
             )
         )
+        raw_angular_accel_norm, raw_angular_jerk_norm = (
+            raw_angular_acceleration_and_jerk_norms(
+                current_angular_acceleration,
+                self.prev_fingertip_midpoint_angaccel,
+                difference_interval,
+                self.ee_jerk_initialized,
+            )
+        )
         # Per-policy-step scalars consumed by the deterministic eval collector.
         # Unlike Episode_Reward, these remain physical, linear-only, and
         # untransformed. The squared moments let eval_full report a true RMS.
@@ -1480,6 +1495,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.extras["ee_linear_jerk_mean_m_s3"] = raw_linear_jerk_norm.mean()
         self.extras["ee_linear_jerk_sqmean_m2_s6"] = raw_linear_jerk_norm.square().mean()
         self.extras["ee_linear_jerk_max_m_s3"] = raw_linear_jerk_norm.max()
+        self.extras["ee_angular_accel_mean_rad_s2"] = raw_angular_accel_norm.mean()
+        self.extras["ee_angular_accel_sqmean_rad2_s4"] = raw_angular_accel_norm.square().mean()
+        self.extras["ee_angular_accel_max_rad_s2"] = raw_angular_accel_norm.max()
+        self.extras["ee_angular_jerk_mean_rad_s3"] = raw_angular_jerk_norm.mean()
+        self.extras["ee_angular_jerk_sqmean_rad2_s6"] = raw_angular_jerk_norm.square().mean()
+        self.extras["ee_angular_jerk_max_rad_s3"] = raw_angular_jerk_norm.max()
         self.prev_fingertip_midpoint_linvel = self.fingertip_midpoint_linvel.clone()
         self.prev_fingertip_midpoint_angvel = self.fingertip_midpoint_angvel.clone()
         self.prev_fingertip_midpoint_linaccel = current_linear_acceleration
@@ -1648,6 +1669,20 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         derivative_diagnostics["jerk_sqsum"] += raw_linear_jerk_norm.square() * self.step_dt
         derivative_diagnostics["jerk_max"] = torch.maximum(
             derivative_diagnostics["jerk_max"], raw_linear_jerk_norm
+        )
+        derivative_diagnostics["angular_accel_sum"] += raw_angular_accel_norm * self.step_dt
+        derivative_diagnostics["angular_accel_sqsum"] += (
+            raw_angular_accel_norm.square() * self.step_dt
+        )
+        derivative_diagnostics["angular_accel_max"] = torch.maximum(
+            derivative_diagnostics["angular_accel_max"], raw_angular_accel_norm
+        )
+        derivative_diagnostics["angular_jerk_sum"] += raw_angular_jerk_norm * self.step_dt
+        derivative_diagnostics["angular_jerk_sqsum"] += (
+            raw_angular_jerk_norm.square() * self.step_dt
+        )
+        derivative_diagnostics["angular_jerk_max"] = torch.maximum(
+            derivative_diagnostics["angular_jerk_max"], raw_angular_jerk_norm
         )
 
         successes = torch.logical_and(
@@ -4864,6 +4899,24 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             )
             self.extras["log"]["EE_Diagnostics/linear_jerk_max_m_s3"] = diagnostics[
                 "jerk_max"
+            ][env_ids].max()
+            self.extras["log"]["EE_Diagnostics/angular_accel_mean_rad_s2"] = (
+                diagnostics["angular_accel_sum"][env_ids].mean() / duration
+            )
+            self.extras["log"]["EE_Diagnostics/angular_accel_rms_rad_s2"] = torch.sqrt(
+                diagnostics["angular_accel_sqsum"][env_ids].mean() / duration
+            )
+            self.extras["log"]["EE_Diagnostics/angular_accel_max_rad_s2"] = diagnostics[
+                "angular_accel_max"
+            ][env_ids].max()
+            self.extras["log"]["EE_Diagnostics/angular_jerk_mean_rad_s3"] = (
+                diagnostics["angular_jerk_sum"][env_ids].mean() / duration
+            )
+            self.extras["log"]["EE_Diagnostics/angular_jerk_rms_rad_s3"] = torch.sqrt(
+                diagnostics["angular_jerk_sqsum"][env_ids].mean() / duration
+            )
+            self.extras["log"]["EE_Diagnostics/angular_jerk_max_rad_s3"] = diagnostics[
+                "angular_jerk_max"
             ][env_ids].max()
             for value in diagnostics.values():
                 value[env_ids] = 0.0
