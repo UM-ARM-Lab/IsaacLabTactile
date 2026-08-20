@@ -1471,6 +1471,15 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 self.ee_jerk_initialized,
             )
         )
+        # Per-policy-step scalars consumed by the deterministic eval collector.
+        # Unlike Episode_Reward, these remain physical, linear-only, and
+        # untransformed. The squared moments let eval_full report a true RMS.
+        self.extras["ee_linear_accel_mean_m_s2"] = raw_linear_accel_norm.mean()
+        self.extras["ee_linear_accel_sqmean_m2_s4"] = raw_linear_accel_norm.square().mean()
+        self.extras["ee_linear_accel_max_m_s2"] = raw_linear_accel_norm.max()
+        self.extras["ee_linear_jerk_mean_m_s3"] = raw_linear_jerk_norm.mean()
+        self.extras["ee_linear_jerk_sqmean_m2_s6"] = raw_linear_jerk_norm.square().mean()
+        self.extras["ee_linear_jerk_max_m_s3"] = raw_linear_jerk_norm.max()
         self.prev_fingertip_midpoint_linvel = self.fingertip_midpoint_linvel.clone()
         self.prev_fingertip_midpoint_angvel = self.fingertip_midpoint_angvel.clone()
         self.prev_fingertip_midpoint_linaccel = current_linear_acceleration
