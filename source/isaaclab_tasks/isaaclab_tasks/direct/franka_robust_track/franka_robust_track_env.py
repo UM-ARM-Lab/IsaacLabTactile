@@ -562,6 +562,35 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self._episode_ee_derivative_diagnostics[f"{prefix}_max"] = torch.zeros(
                 self.num_envs, dtype=torch.float, device=self.device
             )
+        # Physical derivative summaries are analytics, not part of the PPO
+        # objective. Keep their reductions and episode accumulators off during
+        # training; common_eval_context enables them for deterministic eval.
+        self._collect_ee_derivative_analytics = bool(
+            self.cfg.collect_training_ee_derivative_analytics
+        )
+        self._skip_training_motion_regularization = bool(
+            self.cfg.skip_training_motion_regularization
+        )
+        if self._skip_training_motion_regularization:
+            nonzero_motion_weights = {
+                "ee_accel_scale": self.cfg.reward.ee_accel_scale,
+                "ee_jerk_scale": self.cfg.reward.ee_jerk_scale,
+                "ee_angular_accel_scale": self.cfg.reward.ee_angular_accel_scale,
+                "ee_angular_jerk_scale": self.cfg.reward.ee_angular_jerk_scale,
+                "action_alternation_scale": self.cfg.reward.action_alternation_scale,
+                "pose_action_curvature_scale": self.cfg.reward.pose_action_curvature_scale,
+                "gain_action_curvature_scale": self.cfg.reward.gain_action_curvature_scale,
+            }
+            nonzero_motion_weights = {
+                name: value
+                for name, value in nonzero_motion_weights.items()
+                if float(value) != 0.0
+            }
+            if nonzero_motion_weights:
+                raise ValueError(
+                    "skip_training_motion_regularization requires zero motion "
+                    f"reward weights, got {nonzero_motion_weights}"
+                )
 
         # Per-native-reference-step tracking-error profile. Async policies receive
         # rewards at their higher action rate, but evaluation metrics remain on the
@@ -1482,41 +1511,61 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         base_derivative_penalty_mode = (
             "hard_clip" if derivative_penalty_mode == "residual_huber" else derivative_penalty_mode
         )
-        (
-            ee_accel_norm,
-            ee_jerk_norm,
-            current_linear_acceleration,
-            current_angular_acceleration,
-        ) = ee_acceleration_and_jerk_norms(
-            self.fingertip_midpoint_linvel,
-            self.fingertip_midpoint_angvel,
-            self.prev_fingertip_midpoint_linvel,
-            self.prev_fingertip_midpoint_angvel,
-            self.prev_fingertip_midpoint_linaccel,
-            self.prev_fingertip_midpoint_angaccel,
-            difference_interval,
-            self.ee_jerk_initialized,
-            acceleration_clip=acceleration_clip,
-            jerk_clip=jerk_clip,
-            penalty_mode=base_derivative_penalty_mode,
-        )
-        raw_linear_accel_norm, raw_linear_jerk_norm = (
-            raw_linear_acceleration_and_jerk_norms(
+        zero_motion_cost = torch.zeros(self.num_envs, device=self.device)
+        if (
+            self._skip_training_motion_regularization
+            and not self._collect_ee_derivative_analytics
+        ):
+            ee_accel_norm = zero_motion_cost
+            ee_jerk_norm = zero_motion_cost
+            current_linear_acceleration = (
+                self.fingertip_midpoint_linvel
+                - self.prev_fingertip_midpoint_linvel
+            ) / difference_interval
+            current_angular_acceleration = (
+                self.fingertip_midpoint_angvel
+                - self.prev_fingertip_midpoint_angvel
+            ) / difference_interval
+        else:
+            (
+                ee_accel_norm,
+                ee_jerk_norm,
                 current_linear_acceleration,
-                self.prev_fingertip_midpoint_linaccel,
-                difference_interval,
-                self.ee_jerk_initialized,
-            )
-        )
-        raw_angular_accel_norm, raw_angular_jerk_norm = (
-            raw_angular_acceleration_and_jerk_norms(
                 current_angular_acceleration,
+            ) = ee_acceleration_and_jerk_norms(
+                self.fingertip_midpoint_linvel,
+                self.fingertip_midpoint_angvel,
+                self.prev_fingertip_midpoint_linvel,
+                self.prev_fingertip_midpoint_angvel,
+                self.prev_fingertip_midpoint_linaccel,
                 self.prev_fingertip_midpoint_angaccel,
                 difference_interval,
                 self.ee_jerk_initialized,
+                acceleration_clip=acceleration_clip,
+                jerk_clip=jerk_clip,
+                penalty_mode=base_derivative_penalty_mode,
             )
-        )
-        zero_motion_cost = torch.zeros(self.num_envs, device=self.device)
+        raw_linear_accel_norm = zero_motion_cost
+        raw_linear_jerk_norm = zero_motion_cost
+        raw_angular_accel_norm = zero_motion_cost
+        raw_angular_jerk_norm = zero_motion_cost
+        if self._collect_ee_derivative_analytics:
+            raw_linear_accel_norm, raw_linear_jerk_norm = (
+                raw_linear_acceleration_and_jerk_norms(
+                    current_linear_acceleration,
+                    self.prev_fingertip_midpoint_linaccel,
+                    difference_interval,
+                    self.ee_jerk_initialized,
+                )
+            )
+            raw_angular_accel_norm, raw_angular_jerk_norm = (
+                raw_angular_acceleration_and_jerk_norms(
+                    current_angular_acceleration,
+                    self.prev_fingertip_midpoint_angaccel,
+                    difference_interval,
+                    self.ee_jerk_initialized,
+                )
+            )
         ee_angular_accel_cost = zero_motion_cost
         ee_angular_jerk_cost = zero_motion_cost
         residual_linear_accel_norm = zero_motion_cost
@@ -1562,26 +1611,29 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                     self.cfg.reward.ee_angular_jerk_huber_normalizer
                 ),
             )
-        # Per-policy-step scalars consumed by the deterministic eval collector.
-        # Unlike Episode_Reward, these remain physical, linear-only, and
-        # untransformed. The squared moments let eval_full report a true RMS.
-        self.extras["ee_linear_accel_mean"] = raw_linear_accel_norm.mean()
-        self.extras["ee_linear_accel_sqmean"] = raw_linear_accel_norm.square().mean()
-        self.extras["ee_linear_accel_max"] = raw_linear_accel_norm.max()
-        self.extras["ee_linear_jerk_mean"] = raw_linear_jerk_norm.mean()
-        self.extras["ee_linear_jerk_sqmean"] = raw_linear_jerk_norm.square().mean()
-        self.extras["ee_linear_jerk_max"] = raw_linear_jerk_norm.max()
-        self.extras["ee_angular_accel_mean"] = raw_angular_accel_norm.mean()
-        self.extras["ee_angular_accel_sqmean"] = raw_angular_accel_norm.square().mean()
-        self.extras["ee_angular_accel_max"] = raw_angular_accel_norm.max()
-        self.extras["ee_angular_jerk_mean"] = raw_angular_jerk_norm.mean()
-        self.extras["ee_angular_jerk_sqmean"] = raw_angular_jerk_norm.square().mean()
-        self.extras["ee_angular_jerk_max"] = raw_angular_jerk_norm.max()
-        self.extras["ee_residual_linear_accel_mean"] = residual_linear_accel_norm.mean()
-        self.extras["ee_residual_linear_jerk_mean"] = residual_linear_jerk_norm.mean()
-        self.extras["ee_residual_angular_accel_mean"] = residual_angular_accel_norm.mean()
-        self.extras["ee_residual_angular_jerk_mean"] = residual_angular_jerk_norm.mean()
-        if derivative_penalty_mode == "residual_huber":
+        # Per-policy-step scalars consumed only by deterministic eval. Unlike
+        # Episode_Reward, these remain physical and untransformed.
+        if self._collect_ee_derivative_analytics:
+            self.extras["ee_linear_accel_mean"] = raw_linear_accel_norm.mean()
+            self.extras["ee_linear_accel_sqmean"] = raw_linear_accel_norm.square().mean()
+            self.extras["ee_linear_accel_max"] = raw_linear_accel_norm.max()
+            self.extras["ee_linear_jerk_mean"] = raw_linear_jerk_norm.mean()
+            self.extras["ee_linear_jerk_sqmean"] = raw_linear_jerk_norm.square().mean()
+            self.extras["ee_linear_jerk_max"] = raw_linear_jerk_norm.max()
+            self.extras["ee_angular_accel_mean"] = raw_angular_accel_norm.mean()
+            self.extras["ee_angular_accel_sqmean"] = raw_angular_accel_norm.square().mean()
+            self.extras["ee_angular_accel_max"] = raw_angular_accel_norm.max()
+            self.extras["ee_angular_jerk_mean"] = raw_angular_jerk_norm.mean()
+            self.extras["ee_angular_jerk_sqmean"] = raw_angular_jerk_norm.square().mean()
+            self.extras["ee_angular_jerk_max"] = raw_angular_jerk_norm.max()
+            self.extras["ee_residual_linear_accel_mean"] = residual_linear_accel_norm.mean()
+            self.extras["ee_residual_linear_jerk_mean"] = residual_linear_jerk_norm.mean()
+            self.extras["ee_residual_angular_accel_mean"] = residual_angular_accel_norm.mean()
+            self.extras["ee_residual_angular_jerk_mean"] = residual_angular_jerk_norm.mean()
+        if (
+            self._collect_ee_derivative_analytics
+            and derivative_penalty_mode == "residual_huber"
+        ):
             quantiles = torch.tensor((0.5, 0.75, 0.9, 0.99), device=self.device)
             residual_names = (
                 "linear_accel",
@@ -1613,51 +1665,74 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         action_rate = rate_normalization * torch.linalg.norm(
             self.actions[:, 0:6] - self.prev_actions[:, 0:6], dim=-1
         )
-        action_alternation = action_alternation_penalty(
-            self.actions, self.prev_actions, self.prev_prev_actions
-        )
+        if (
+            float(self.cfg.reward.action_alternation_scale) != 0.0
+            or self._collect_ee_derivative_analytics
+        ):
+            action_alternation = action_alternation_penalty(
+                self.actions, self.prev_actions, self.prev_prev_actions
+            )
+        else:
+            action_alternation = zero_motion_cost
         curvature_ready = self.episode_length_buf >= 2
-        pose_action_curvature = action_curvature_huber_penalty(
-            self.actions,
-            self.prev_actions,
-            self.prev_prev_actions,
-            start=0,
-            stop=6,
-            normalizer=(
-                self.cfg.reward.pose_action_curvature_normalizer
-                / rate_normalization**2
-            ),
+        collect_pose_curvature = (
+            float(self.cfg.reward.pose_action_curvature_scale) != 0.0
+            or self._collect_ee_derivative_analytics
         )
-        pose_action_curvature = torch.where(
-            curvature_ready, pose_action_curvature, torch.zeros_like(pose_action_curvature)
-        )
+        if collect_pose_curvature:
+            pose_action_curvature = action_curvature_huber_penalty(
+                self.actions,
+                self.prev_actions,
+                self.prev_prev_actions,
+                start=0,
+                stop=6,
+                normalizer=(
+                    self.cfg.reward.pose_action_curvature_normalizer
+                    / rate_normalization**2
+                ),
+            )
+            pose_action_curvature = torch.where(
+                curvature_ready,
+                pose_action_curvature,
+                torch.zeros_like(pose_action_curvature),
+            )
+        else:
+            pose_action_curvature = zero_motion_cost
         if self.cfg.ctrl.control_gains:
             gain_rate = rate_normalization * torch.linalg.norm(
                 self.actions[:, 6:12] - self.prev_actions[:, 6:12], dim=-1
             )
-            gain_action_curvature = action_curvature_huber_penalty(
-                self.actions,
-                self.prev_actions,
-                self.prev_prev_actions,
-                start=6,
-                stop=None,
-                normalizer=(
-                    self.cfg.reward.gain_action_curvature_normalizer
-                    / rate_normalization**2
-                ),
+            collect_gain_curvature = (
+                float(self.cfg.reward.gain_action_curvature_scale) != 0.0
+                or self._collect_ee_derivative_analytics
             )
-            gain_action_curvature = torch.where(
-                curvature_ready,
-                gain_action_curvature,
-                torch.zeros_like(gain_action_curvature),
-            )
+            if collect_gain_curvature:
+                gain_action_curvature = action_curvature_huber_penalty(
+                    self.actions,
+                    self.prev_actions,
+                    self.prev_prev_actions,
+                    start=6,
+                    stop=None,
+                    normalizer=(
+                        self.cfg.reward.gain_action_curvature_normalizer
+                        / rate_normalization**2
+                    ),
+                )
+                gain_action_curvature = torch.where(
+                    curvature_ready,
+                    gain_action_curvature,
+                    torch.zeros_like(gain_action_curvature),
+                )
+            else:
+                gain_action_curvature = zero_motion_cost
         else:
             gain_rate = torch.zeros(self.num_envs, device=self.device)
             gain_action_curvature = torch.zeros(self.num_envs, device=self.device)
-        self.extras["pose_action_curvature_cost_mean"] = pose_action_curvature.mean()
-        self.extras["pose_action_curvature_cost_max"] = pose_action_curvature.max()
-        self.extras["gain_action_curvature_cost_mean"] = gain_action_curvature.mean()
-        self.extras["gain_action_curvature_cost_max"] = gain_action_curvature.max()
+        if self._collect_ee_derivative_analytics:
+            self.extras["pose_action_curvature_cost_mean"] = pose_action_curvature.mean()
+            self.extras["pose_action_curvature_cost_max"] = pose_action_curvature.max()
+            self.extras["gain_action_curvature_cost_mean"] = gain_action_curvature.mean()
+            self.extras["gain_action_curvature_cost_max"] = gain_action_curvature.max()
         joint_vel_norm = torch.linalg.norm(self.joint_vel[:, 0:7], dim=-1)
         joint_limit_penalty = self._joint_limit_penalty()
 
@@ -1809,42 +1884,53 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0) * self.step_dt
         for key, value in rewards.items():
             self._episode_sums[key] += value * self.step_dt
-        derivative_diagnostics = self._episode_ee_derivative_diagnostics
-        derivative_diagnostics["accel_sum"] += raw_linear_accel_norm * self.step_dt
-        derivative_diagnostics["accel_sqsum"] += raw_linear_accel_norm.square() * self.step_dt
-        derivative_diagnostics["accel_max"] = torch.maximum(
-            derivative_diagnostics["accel_max"], raw_linear_accel_norm
-        )
-        derivative_diagnostics["jerk_sum"] += raw_linear_jerk_norm * self.step_dt
-        derivative_diagnostics["jerk_sqsum"] += raw_linear_jerk_norm.square() * self.step_dt
-        derivative_diagnostics["jerk_max"] = torch.maximum(
-            derivative_diagnostics["jerk_max"], raw_linear_jerk_norm
-        )
-        derivative_diagnostics["angular_accel_sum"] += raw_angular_accel_norm * self.step_dt
-        derivative_diagnostics["angular_accel_sqsum"] += (
-            raw_angular_accel_norm.square() * self.step_dt
-        )
-        derivative_diagnostics["angular_accel_max"] = torch.maximum(
-            derivative_diagnostics["angular_accel_max"], raw_angular_accel_norm
-        )
-        derivative_diagnostics["angular_jerk_sum"] += raw_angular_jerk_norm * self.step_dt
-        derivative_diagnostics["angular_jerk_sqsum"] += (
-            raw_angular_jerk_norm.square() * self.step_dt
-        )
-        derivative_diagnostics["angular_jerk_max"] = torch.maximum(
-            derivative_diagnostics["angular_jerk_max"], raw_angular_jerk_norm
-        )
-        for prefix, value in (
-            ("residual_linear_accel", residual_linear_accel_norm),
-            ("residual_linear_jerk", residual_linear_jerk_norm),
-            ("residual_angular_accel", residual_angular_accel_norm),
-            ("residual_angular_jerk", residual_angular_jerk_norm),
-        ):
-            derivative_diagnostics[f"{prefix}_sum"] += value * self.step_dt
-            derivative_diagnostics[f"{prefix}_sqsum"] += value.square() * self.step_dt
-            derivative_diagnostics[f"{prefix}_max"] = torch.maximum(
-                derivative_diagnostics[f"{prefix}_max"], value
+        if self._collect_ee_derivative_analytics:
+            derivative_diagnostics = self._episode_ee_derivative_diagnostics
+            derivative_diagnostics["accel_sum"] += raw_linear_accel_norm * self.step_dt
+            derivative_diagnostics["accel_sqsum"] += (
+                raw_linear_accel_norm.square() * self.step_dt
             )
+            derivative_diagnostics["accel_max"] = torch.maximum(
+                derivative_diagnostics["accel_max"], raw_linear_accel_norm
+            )
+            derivative_diagnostics["jerk_sum"] += raw_linear_jerk_norm * self.step_dt
+            derivative_diagnostics["jerk_sqsum"] += (
+                raw_linear_jerk_norm.square() * self.step_dt
+            )
+            derivative_diagnostics["jerk_max"] = torch.maximum(
+                derivative_diagnostics["jerk_max"], raw_linear_jerk_norm
+            )
+            derivative_diagnostics["angular_accel_sum"] += (
+                raw_angular_accel_norm * self.step_dt
+            )
+            derivative_diagnostics["angular_accel_sqsum"] += (
+                raw_angular_accel_norm.square() * self.step_dt
+            )
+            derivative_diagnostics["angular_accel_max"] = torch.maximum(
+                derivative_diagnostics["angular_accel_max"], raw_angular_accel_norm
+            )
+            derivative_diagnostics["angular_jerk_sum"] += (
+                raw_angular_jerk_norm * self.step_dt
+            )
+            derivative_diagnostics["angular_jerk_sqsum"] += (
+                raw_angular_jerk_norm.square() * self.step_dt
+            )
+            derivative_diagnostics["angular_jerk_max"] = torch.maximum(
+                derivative_diagnostics["angular_jerk_max"], raw_angular_jerk_norm
+            )
+            for prefix, value in (
+                ("residual_linear_accel", residual_linear_accel_norm),
+                ("residual_linear_jerk", residual_linear_jerk_norm),
+                ("residual_angular_accel", residual_angular_accel_norm),
+                ("residual_angular_jerk", residual_angular_jerk_norm),
+            ):
+                derivative_diagnostics[f"{prefix}_sum"] += value * self.step_dt
+                derivative_diagnostics[f"{prefix}_sqsum"] += (
+                    value.square() * self.step_dt
+                )
+                derivative_diagnostics[f"{prefix}_max"] = torch.maximum(
+                    derivative_diagnostics[f"{prefix}_max"], value
+                )
 
         successes = torch.logical_and(
             pos_error_norm < self.cfg.reward.success_pos_threshold,
@@ -1916,7 +2002,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
     @contextmanager
     def common_eval_context(self):
-        """Use the common clean reset and nominal aligned controller for eval."""
+        """Use the clean controller and enable expensive analytics for eval."""
         original_reset_pos_noise = self.cfg.init.reset_joint_pos_noise
         original_reset_vel_noise = self.cfg.init.reset_joint_vel_noise
         original_reset_noise_prob = self.cfg.init.reset_noise_prob
@@ -1927,6 +2013,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         original_damping_ratio_range = (
             self.cfg.ctrl.task_deriv_gains_damping_ratio_range
         )
+        original_collect_analytics = self._collect_ee_derivative_analytics
 
         self.cfg.init.reset_joint_pos_noise = 0.0
         self.cfg.init.reset_joint_vel_noise = 0.0
@@ -1938,6 +2025,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # The aligned real controller uses Kp=400 and Kd=30. Since
         # get_deriv_gains(400) is 40, zeta=0.75 restores the nominal Kd.
         self.cfg.ctrl.task_deriv_gains_damping_ratio_range = [0.75, 0.75]
+        self._collect_ee_derivative_analytics = True
+        for value in self._episode_ee_derivative_diagnostics.values():
+            value.zero_()
         try:
             yield
         finally:
@@ -1951,6 +2041,17 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.cfg.ctrl.task_deriv_gains_damping_ratio_range = (
                 original_damping_ratio_range
             )
+            self._collect_ee_derivative_analytics = original_collect_analytics
+            analytics_keys = (
+                "ee_linear_",
+                "ee_angular_",
+                "ee_residual_",
+                "pose_action_curvature_cost_",
+                "gain_action_curvature_cost_",
+            )
+            for key in list(self.extras):
+                if key.startswith(analytics_keys):
+                    self.extras.pop(key, None)
 
     @contextmanager
     def deterministic_eval_context(
@@ -5088,7 +5189,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         for key, episodic_sum in self._episode_sums.items():
             self.extras["log"][f"Episode_Reward/{key}"] = torch.mean(episodic_sum[env_ids]) / self.max_episode_length_s
             episodic_sum[env_ids] = 0.0
-        if hasattr(self, "_episode_ee_derivative_diagnostics"):
+        if self._collect_ee_derivative_analytics:
             diagnostics = self._episode_ee_derivative_diagnostics
             duration = float(self.max_episode_length_s)
             self.extras["log"]["EE_Diagnostics/linear_accel_mean"] = (

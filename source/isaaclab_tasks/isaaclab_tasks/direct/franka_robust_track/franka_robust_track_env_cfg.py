@@ -653,6 +653,11 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
     # Debug guard that synchronizes policy/critic tensors back to the CPU each
     # step. Offline replay disables it after startup validation for throughput.
     validate_observations: bool = True
+    # Throughput controls. Physical derivative analytics are normally collected
+    # only inside deterministic eval. The skip flag is diagnostic-only and must
+    # be paired with zero derivative/action-shaping reward weights.
+    collect_training_ee_derivative_analytics: bool = False
+    skip_training_motion_regularization: bool = False
 
     # Debug visualization of the reference trajectory: current command frame,
     # lookahead targets, and the full episode path (sampled in time).
@@ -862,6 +867,14 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             )
         if env.get("log_perstep_error_episodes", None) is not None:
             self.log_perstep_error_episodes = int(env.log_perstep_error_episodes)
+        if env.get("collect_training_ee_derivative_analytics", None) is not None:
+            self.collect_training_ee_derivative_analytics = bool(
+                env.collect_training_ee_derivative_analytics
+            )
+        if env.get("skip_training_motion_regularization", None) is not None:
+            self.skip_training_motion_regularization = bool(
+                env.skip_training_motion_regularization
+            )
         # Physics-step control: `decimation` sim substeps per control step and the
         # physics `sim.dt`. step_dt = decimation * sim.dt sets the control rate, so to
         # match the factory/forge peg-collection env exactly use dt=1/120 + decimation=8
