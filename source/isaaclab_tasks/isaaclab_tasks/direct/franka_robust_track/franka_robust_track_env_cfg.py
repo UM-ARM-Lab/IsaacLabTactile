@@ -567,16 +567,27 @@ class RewardCfg:
     ee_derivative_mode: str = "physical"  # physical, normalized_difference
     # hard_clip preserves historical behavior. log1p uses the clip values as
     # characteristic scales and retains a diminishing, non-flat penalty above
-    # them: scale * log(1 + norm / scale).
-    ee_derivative_penalty_mode: str = "hard_clip"  # hard_clip, log1p
+    # them. residual_huber subtracts the reference trajectory's Cartesian
+    # acceleration/jerk and uses the clip fields as linear Huber normalizers.
+    ee_derivative_penalty_mode: str = "hard_clip"  # hard_clip, log1p, residual_huber
     ee_accel_scale: float = -10.0
-    ee_accel_clip: float = 0.025  # <= 0 disables clipping
+    ee_accel_clip: float = 0.025  # cap or linear residual-Huber normalizer
     ee_jerk_scale: float = -10.0
-    ee_jerk_clip: float = 0.1  # <= 0 disables clipping
+    ee_jerk_clip: float = 0.1  # cap or linear residual-Huber normalizer
+    ee_angular_accel_scale: float = 0.0
+    ee_angular_jerk_scale: float = 0.0
+    ee_angular_accel_huber_normalizer: float = 1.0  # rad/s^2
+    ee_angular_jerk_huber_normalizer: float = 10.0  # rad/s^3
     action_rate_scale: float = -0.02
     # Penalize consecutive action increments that reverse sign. Unlike action
     # rate, this directly targets Nyquist-like bang-bang alternation.
     action_alternation_scale: float = 0.0
+    # Component-wise Huber cost on u_t - 2*u_{t-1} + u_{t-2}. Pose and gain
+    # actions are normalized and weighted separately so their units do not mix.
+    pose_action_curvature_scale: float = 0.0
+    pose_action_curvature_normalizer: float = 1.0
+    gain_action_curvature_scale: float = 0.0
+    gain_action_curvature_normalizer: float = 1.0
     # Penalize step-to-step change in the commanded controller gains (only active
     # when ctrl.control_gains is True) to encourage smooth gain scheduling instead
     # of chattering stiffness. Computed on the normalized [-1, 1] gain actions.
@@ -1069,8 +1080,16 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "ee_accel_clip",
             "ee_jerk_scale",
             "ee_jerk_clip",
+            "ee_angular_accel_scale",
+            "ee_angular_jerk_scale",
+            "ee_angular_accel_huber_normalizer",
+            "ee_angular_jerk_huber_normalizer",
             "action_rate_scale",
             "action_alternation_scale",
+            "pose_action_curvature_scale",
+            "pose_action_curvature_normalizer",
+            "gain_action_curvature_scale",
+            "gain_action_curvature_normalizer",
             "joint_vel_scale",
             "joint_limit_scale",
             "gain_rate_scale",
@@ -1109,20 +1128,43 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
                 "reward.ee_derivative_mode must be 'physical' or "
                 f"'normalized_difference', got {self.reward.ee_derivative_mode!r}"
             )
-        if self.reward.ee_derivative_penalty_mode not in ("hard_clip", "log1p"):
+        if self.reward.ee_derivative_penalty_mode not in (
+            "hard_clip",
+            "log1p",
+            "residual_huber",
+        ):
             raise ValueError(
-                "reward.ee_derivative_penalty_mode must be 'hard_clip' or "
-                f"'log1p', got {self.reward.ee_derivative_penalty_mode!r}"
+                "reward.ee_derivative_penalty_mode must be 'hard_clip', 'log1p', or "
+                "'residual_huber', got "
+                f"{self.reward.ee_derivative_penalty_mode!r}"
             )
         for name in ("ee_accel_clip", "ee_jerk_clip"):
             if not math.isfinite(float(getattr(self.reward, name))):
                 raise ValueError(f"reward.{name} must be finite")
-        if self.reward.ee_derivative_penalty_mode == "log1p":
+        if self.reward.ee_derivative_penalty_mode in ("log1p", "residual_huber"):
             for name in ("ee_accel_clip", "ee_jerk_clip"):
                 if float(getattr(self.reward, name)) <= 0.0:
                     raise ValueError(
-                        f"reward.{name} must be positive for log1p derivative penalties"
+                        f"reward.{name} must be positive for "
+                        f"{self.reward.ee_derivative_penalty_mode} derivative penalties"
                     )
+        if (
+            self.reward.ee_derivative_penalty_mode == "residual_huber"
+            and self.reward.ee_derivative_mode != "physical"
+        ):
+            raise ValueError(
+                "reward.ee_derivative_penalty_mode='residual_huber' requires "
+                "reward.ee_derivative_mode='physical'"
+            )
+        for name in (
+            "ee_angular_accel_huber_normalizer",
+            "ee_angular_jerk_huber_normalizer",
+            "pose_action_curvature_normalizer",
+            "gain_action_curvature_normalizer",
+        ):
+            value = float(getattr(self.reward, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"reward.{name} must be positive and finite")
         if self.debug_vis_force_style not in ("components", "vector", "both"):
             raise ValueError(
                 "debug_vis_force_style must be 'components', 'vector', or 'both'"

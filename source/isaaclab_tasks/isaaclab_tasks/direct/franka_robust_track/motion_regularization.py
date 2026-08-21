@@ -5,6 +5,89 @@ from __future__ import annotations
 import torch
 
 
+def normalized_huber_vector_cost(
+    residual: torch.Tensor,
+    normalizer: float,
+) -> torch.Tensor:
+    """Return a component-wise Huber cost averaged across vector dimensions."""
+
+    scale = float(normalizer)
+    if scale <= 0.0:
+        raise ValueError("Huber normalizer must be positive")
+    normalized = residual / scale
+    magnitude = normalized.abs()
+    cost = torch.where(magnitude <= 1.0, 0.5 * normalized.square(), magnitude - 0.5)
+    return cost.mean(dim=-1)
+
+
+def residual_huber_motion_costs(
+    current_linear_acceleration: torch.Tensor,
+    current_angular_acceleration: torch.Tensor,
+    previous_linear_acceleration: torch.Tensor,
+    previous_angular_acceleration: torch.Tensor,
+    reference_linear_acceleration: torch.Tensor,
+    reference_angular_acceleration: torch.Tensor,
+    previous_reference_linear_acceleration: torch.Tensor,
+    previous_reference_angular_acceleration: torch.Tensor,
+    difference_interval: float,
+    jerk_initialized: torch.Tensor,
+    linear_acceleration_normalizer: float,
+    linear_jerk_normalizer: float,
+    angular_acceleration_normalizer: float,
+    angular_jerk_normalizer: float,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Return four residual-Huber costs and their untransformed residual norms."""
+
+    interval = float(difference_interval)
+    if interval <= 0.0:
+        raise ValueError("difference_interval must be positive")
+
+    linear_acceleration_residual = current_linear_acceleration - reference_linear_acceleration
+    angular_acceleration_residual = current_angular_acceleration - reference_angular_acceleration
+    linear_jerk_residual = (
+        (current_linear_acceleration - previous_linear_acceleration)
+        - (reference_linear_acceleration - previous_reference_linear_acceleration)
+    ) / interval
+    angular_jerk_residual = (
+        (current_angular_acceleration - previous_angular_acceleration)
+        - (reference_angular_acceleration - previous_reference_angular_acceleration)
+    ) / interval
+    linear_jerk_residual = torch.where(
+        jerk_initialized.unsqueeze(-1), linear_jerk_residual, torch.zeros_like(linear_jerk_residual)
+    )
+    angular_jerk_residual = torch.where(
+        jerk_initialized.unsqueeze(-1), angular_jerk_residual, torch.zeros_like(angular_jerk_residual)
+    )
+
+    residuals = (
+        linear_acceleration_residual,
+        linear_jerk_residual,
+        angular_acceleration_residual,
+        angular_jerk_residual,
+    )
+    normalizers = (
+        linear_acceleration_normalizer,
+        linear_jerk_normalizer,
+        angular_acceleration_normalizer,
+        angular_jerk_normalizer,
+    )
+    costs = tuple(
+        normalized_huber_vector_cost(residual, normalizer)
+        for residual, normalizer in zip(residuals, normalizers)
+    )
+    norms = tuple(torch.linalg.vector_norm(residual, dim=-1) for residual in residuals)
+    return (*costs, *norms)
+
+
 def _raw_vector_acceleration_and_jerk_norms(
     acceleration: torch.Tensor,
     previous_acceleration: torch.Tensor,

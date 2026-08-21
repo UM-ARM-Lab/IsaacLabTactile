@@ -12,7 +12,10 @@ import gymnasium as gym
 import numpy as np
 import torch
 
-from force_tool.utils.action_penalties import action_alternation_penalty
+from force_tool.utils.action_penalties import (
+    action_alternation_penalty,
+    action_curvature_huber_penalty,
+)
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
@@ -37,6 +40,7 @@ from .motion_regularization import (
     ee_acceleration_and_jerk_norms,
     raw_angular_acceleration_and_jerk_norms,
     raw_linear_acceleration_and_jerk_norms,
+    residual_huber_motion_costs,
 )
 from .reference_clock import (
     axis_aligned_containment_mask,
@@ -509,8 +513,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 "ee_vel",
                 "ee_accel",
                 "ee_jerk",
+                "ee_angular_accel",
+                "ee_angular_jerk",
                 "action_rate",
                 "action_alternation",
+                "pose_action_curvature",
+                "gain_action_curvature",
                 "gain_rate",
                 "force_track",
                 "torque_track",
@@ -539,6 +547,21 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             "angular_jerk_sqsum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "angular_jerk_max": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
         }
+        for prefix in (
+            "residual_linear_accel",
+            "residual_linear_jerk",
+            "residual_angular_accel",
+            "residual_angular_jerk",
+        ):
+            self._episode_ee_derivative_diagnostics[f"{prefix}_sum"] = torch.zeros(
+                self.num_envs, dtype=torch.float, device=self.device
+            )
+            self._episode_ee_derivative_diagnostics[f"{prefix}_sqsum"] = torch.zeros(
+                self.num_envs, dtype=torch.float, device=self.device
+            )
+            self._episode_ee_derivative_diagnostics[f"{prefix}_max"] = torch.zeros(
+                self.num_envs, dtype=torch.float, device=self.device
+            )
 
         # Per-native-reference-step tracking-error profile. Async policies receive
         # rewards at their higher action rate, but evaluation metrics remain on the
@@ -1444,13 +1467,20 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         jerk_clip_value = float(self.cfg.reward.ee_jerk_clip)
         acceleration_clip = (
             acceleration_clip_value
-            if derivative_mode == "physical" and acceleration_clip_value > 0.0
+            if derivative_mode == "physical"
+            and derivative_penalty_mode != "residual_huber"
+            and acceleration_clip_value > 0.0
             else None
         )
         jerk_clip = (
             jerk_clip_value
-            if derivative_mode == "physical" and jerk_clip_value > 0.0
+            if derivative_mode == "physical"
+            and derivative_penalty_mode != "residual_huber"
+            and jerk_clip_value > 0.0
             else None
+        )
+        base_derivative_penalty_mode = (
+            "hard_clip" if derivative_penalty_mode == "residual_huber" else derivative_penalty_mode
         )
         (
             ee_accel_norm,
@@ -1468,7 +1498,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.ee_jerk_initialized,
             acceleration_clip=acceleration_clip,
             jerk_clip=jerk_clip,
-            penalty_mode=derivative_penalty_mode,
+            penalty_mode=base_derivative_penalty_mode,
         )
         raw_linear_accel_norm, raw_linear_jerk_norm = (
             raw_linear_acceleration_and_jerk_norms(
@@ -1486,6 +1516,52 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 self.ee_jerk_initialized,
             )
         )
+        zero_motion_cost = torch.zeros(self.num_envs, device=self.device)
+        ee_angular_accel_cost = zero_motion_cost
+        ee_angular_jerk_cost = zero_motion_cost
+        residual_linear_accel_norm = zero_motion_cost
+        residual_linear_jerk_norm = zero_motion_cost
+        residual_angular_accel_norm = zero_motion_cost
+        residual_angular_jerk_norm = zero_motion_cost
+        if derivative_penalty_mode == "residual_huber":
+            (
+                reference_linear_acceleration,
+                reference_angular_acceleration,
+                previous_reference_linear_acceleration,
+                previous_reference_angular_acceleration,
+            ) = self._reference_accelerations_at_policy_step(
+                self.episode_length_buf,
+                difference_interval,
+            )
+            (
+                ee_accel_norm,
+                ee_jerk_norm,
+                ee_angular_accel_cost,
+                ee_angular_jerk_cost,
+                residual_linear_accel_norm,
+                residual_linear_jerk_norm,
+                residual_angular_accel_norm,
+                residual_angular_jerk_norm,
+            ) = residual_huber_motion_costs(
+                current_linear_acceleration,
+                current_angular_acceleration,
+                self.prev_fingertip_midpoint_linaccel,
+                self.prev_fingertip_midpoint_angaccel,
+                reference_linear_acceleration,
+                reference_angular_acceleration,
+                previous_reference_linear_acceleration,
+                previous_reference_angular_acceleration,
+                difference_interval,
+                self.ee_jerk_initialized,
+                linear_acceleration_normalizer=acceleration_clip_value,
+                linear_jerk_normalizer=jerk_clip_value,
+                angular_acceleration_normalizer=(
+                    self.cfg.reward.ee_angular_accel_huber_normalizer
+                ),
+                angular_jerk_normalizer=(
+                    self.cfg.reward.ee_angular_jerk_huber_normalizer
+                ),
+            )
         # Per-policy-step scalars consumed by the deterministic eval collector.
         # Unlike Episode_Reward, these remain physical, linear-only, and
         # untransformed. The squared moments let eval_full report a true RMS.
@@ -1501,6 +1577,32 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.extras["ee_angular_jerk_mean"] = raw_angular_jerk_norm.mean()
         self.extras["ee_angular_jerk_sqmean"] = raw_angular_jerk_norm.square().mean()
         self.extras["ee_angular_jerk_max"] = raw_angular_jerk_norm.max()
+        self.extras["ee_residual_linear_accel_mean"] = residual_linear_accel_norm.mean()
+        self.extras["ee_residual_linear_jerk_mean"] = residual_linear_jerk_norm.mean()
+        self.extras["ee_residual_angular_accel_mean"] = residual_angular_accel_norm.mean()
+        self.extras["ee_residual_angular_jerk_mean"] = residual_angular_jerk_norm.mean()
+        if derivative_penalty_mode == "residual_huber":
+            quantiles = torch.tensor((0.5, 0.75, 0.9, 0.99), device=self.device)
+            residual_names = (
+                "linear_accel",
+                "linear_jerk",
+                "angular_accel",
+                "angular_jerk",
+            )
+            residual_samples = torch.stack(
+                (
+                    residual_linear_accel_norm,
+                    residual_linear_jerk_norm,
+                    residual_angular_accel_norm,
+                    residual_angular_jerk_norm,
+                )
+            )
+            percentile_values = torch.quantile(residual_samples, quantiles, dim=1)
+            for percentile_index, percentile in enumerate((50, 75, 90, 99)):
+                for residual_index, name in enumerate(residual_names):
+                    self.extras[f"ee_residual_{name}_p{percentile}"] = (
+                        percentile_values[percentile_index, residual_index]
+                    )
         self.prev_fingertip_midpoint_linvel = self.fingertip_midpoint_linvel.clone()
         self.prev_fingertip_midpoint_angvel = self.fingertip_midpoint_angvel.clone()
         self.prev_fingertip_midpoint_linaccel = current_linear_acceleration
@@ -1514,12 +1616,48 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         action_alternation = action_alternation_penalty(
             self.actions, self.prev_actions, self.prev_prev_actions
         )
+        curvature_ready = self.episode_length_buf >= 2
+        pose_action_curvature = action_curvature_huber_penalty(
+            self.actions,
+            self.prev_actions,
+            self.prev_prev_actions,
+            start=0,
+            stop=6,
+            normalizer=(
+                self.cfg.reward.pose_action_curvature_normalizer
+                / rate_normalization**2
+            ),
+        )
+        pose_action_curvature = torch.where(
+            curvature_ready, pose_action_curvature, torch.zeros_like(pose_action_curvature)
+        )
         if self.cfg.ctrl.control_gains:
             gain_rate = rate_normalization * torch.linalg.norm(
                 self.actions[:, 6:12] - self.prev_actions[:, 6:12], dim=-1
             )
+            gain_action_curvature = action_curvature_huber_penalty(
+                self.actions,
+                self.prev_actions,
+                self.prev_prev_actions,
+                start=6,
+                stop=None,
+                normalizer=(
+                    self.cfg.reward.gain_action_curvature_normalizer
+                    / rate_normalization**2
+                ),
+            )
+            gain_action_curvature = torch.where(
+                curvature_ready,
+                gain_action_curvature,
+                torch.zeros_like(gain_action_curvature),
+            )
         else:
             gain_rate = torch.zeros(self.num_envs, device=self.device)
+            gain_action_curvature = torch.zeros(self.num_envs, device=self.device)
+        self.extras["pose_action_curvature_cost_mean"] = pose_action_curvature.mean()
+        self.extras["pose_action_curvature_cost_max"] = pose_action_curvature.max()
+        self.extras["gain_action_curvature_cost_mean"] = gain_action_curvature.mean()
+        self.extras["gain_action_curvature_cost_max"] = gain_action_curvature.max()
         joint_vel_norm = torch.linalg.norm(self.joint_vel[:, 0:7], dim=-1)
         joint_limit_penalty = self._joint_limit_penalty()
 
@@ -1643,9 +1781,21 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             "ee_vel": ee_vel_norm * self.cfg.reward.ee_vel_scale,
             "ee_accel": ee_accel_norm * self.cfg.reward.ee_accel_scale,
             "ee_jerk": ee_jerk_norm * self.cfg.reward.ee_jerk_scale,
+            "ee_angular_accel": (
+                ee_angular_accel_cost * self.cfg.reward.ee_angular_accel_scale
+            ),
+            "ee_angular_jerk": (
+                ee_angular_jerk_cost * self.cfg.reward.ee_angular_jerk_scale
+            ),
             "action_rate": action_rate * self.cfg.reward.action_rate_scale,
             "action_alternation": (
                 action_alternation * self.cfg.reward.action_alternation_scale
+            ),
+            "pose_action_curvature": (
+                pose_action_curvature * self.cfg.reward.pose_action_curvature_scale
+            ),
+            "gain_action_curvature": (
+                gain_action_curvature * self.cfg.reward.gain_action_curvature_scale
             ),
             "gain_rate": gain_rate * self.cfg.reward.gain_rate_scale,
             "force_track": force_track,
@@ -1684,6 +1834,17 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         derivative_diagnostics["angular_jerk_max"] = torch.maximum(
             derivative_diagnostics["angular_jerk_max"], raw_angular_jerk_norm
         )
+        for prefix, value in (
+            ("residual_linear_accel", residual_linear_accel_norm),
+            ("residual_linear_jerk", residual_linear_jerk_norm),
+            ("residual_angular_accel", residual_angular_accel_norm),
+            ("residual_angular_jerk", residual_angular_jerk_norm),
+        ):
+            derivative_diagnostics[f"{prefix}_sum"] += value * self.step_dt
+            derivative_diagnostics[f"{prefix}_sqsum"] += value.square() * self.step_dt
+            derivative_diagnostics[f"{prefix}_max"] = torch.maximum(
+                derivative_diagnostics[f"{prefix}_max"], value
+            )
 
         successes = torch.logical_and(
             pos_error_norm < self.cfg.reward.success_pos_threshold,
@@ -3923,6 +4084,54 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             dim=-1,
         )
 
+    def _reference_accelerations_at_policy_step(
+        self,
+        policy_step: torch.Tensor,
+        difference_interval: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return current/previous Cartesian reference accelerations.
+
+        Reference poses are sampled on the same interpolated policy clock as the
+        active command. Clamping the first three historical indices to zero
+        reproduces the environment's zero derivative initialization at reset.
+        """
+
+        interval = float(difference_interval)
+        if interval <= 0.0:
+            raise ValueError("difference_interval must be positive")
+        poses = [
+            self._traj_pose_at_policy_step((policy_step - offset).clamp(min=0))
+            for offset in range(4)
+        ]
+        positions = [pose[0] for pose in poses]
+        quaternions = [pose[1] for pose in poses]
+
+        linear_velocity = (positions[0] - positions[1]) / interval
+        previous_linear_velocity = (positions[1] - positions[2]) / interval
+        previous_previous_linear_velocity = (positions[2] - positions[3]) / interval
+        linear_acceleration = (linear_velocity - previous_linear_velocity) / interval
+        previous_linear_acceleration = (
+            previous_linear_velocity - previous_previous_linear_velocity
+        ) / interval
+
+        angular_velocity = math_utils.quat_box_minus(quaternions[0], quaternions[1]) / interval
+        previous_angular_velocity = (
+            math_utils.quat_box_minus(quaternions[1], quaternions[2]) / interval
+        )
+        previous_previous_angular_velocity = (
+            math_utils.quat_box_minus(quaternions[2], quaternions[3]) / interval
+        )
+        angular_acceleration = (angular_velocity - previous_angular_velocity) / interval
+        previous_angular_acceleration = (
+            previous_angular_velocity - previous_previous_angular_velocity
+        ) / interval
+        return (
+            linear_acceleration,
+            angular_acceleration,
+            previous_linear_acceleration,
+            previous_angular_acceleration,
+        )
+
     def _update_command(self):
         """Set the active interpolated pose and mode-specific wrench target."""
         self.command_pos[:], self.command_quat[:] = (
@@ -4918,6 +5127,21 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.extras["log"]["EE_Diagnostics/angular_jerk_max"] = diagnostics[
                 "angular_jerk_max"
             ][env_ids].max()
+            for log_name, prefix in (
+                ("residual_linear_accel", "residual_linear_accel"),
+                ("residual_linear_jerk", "residual_linear_jerk"),
+                ("residual_angular_accel", "residual_angular_accel"),
+                ("residual_angular_jerk", "residual_angular_jerk"),
+            ):
+                self.extras["log"][f"EE_Diagnostics/{log_name}_mean"] = (
+                    diagnostics[f"{prefix}_sum"][env_ids].mean() / duration
+                )
+                self.extras["log"][f"EE_Diagnostics/{log_name}_rms"] = torch.sqrt(
+                    diagnostics[f"{prefix}_sqsum"][env_ids].mean() / duration
+                )
+                self.extras["log"][f"EE_Diagnostics/{log_name}_max"] = diagnostics[
+                    f"{prefix}_max"
+                ][env_ids].max()
             for value in diagnostics.values():
                 value[env_ids] = 0.0
         self.extras["log"]["Dynamics/payload_mass"] = self.payload_mass[env_ids].mean()
