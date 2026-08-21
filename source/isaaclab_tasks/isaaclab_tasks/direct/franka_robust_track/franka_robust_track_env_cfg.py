@@ -196,16 +196,30 @@ class TrackingCfg:
     # outside the reachable/well-conditioned workspace are resampled/backfilled).
     dataset_path: str = ""  # HDF5 path; required when mode == "dataset"
     dataset_pose_key: str = "tool_pose"  # (N, 7) pos(3) + quat(4, wxyz) field
+    # Datasets that store translation and axis-angle orientation separately can
+    # leave dataset_pose_key empty and provide both keys below. The loader
+    # converts the rotation vector to the environment's wxyz quaternion format.
+    dataset_position_key: str = ""
+    dataset_axis_angle_key: str = ""
     # Forge critic state aligned with dataset_pose_key. Its first seven values
     # duplicate tool_pose and values [13:20] are the recorded Franka arm joints.
     # Short within-episode chunks use these joints for reset and history seeding.
     dataset_state_key: str = "low_dim_state"
     dataset_joint_pos_offset: int = 13
+    # Optional standalone joint-position field. This is useful for UMI datasets,
+    # whose seven Franka joints are stored separately from the EE pose. When set,
+    # it takes precedence over dataset_state_key for random-chunk resets.
+    dataset_joint_pos_key: str = ""
     dataset_only_success: bool = True  # keep only episodes with trial_success set
     dataset_max_trajs: int = 0  # cap loaded episodes (0 = all available)
     # "episode_start" reproduces full-trajectory training from raw sample zero;
     # "random" samples the reset timestep over the entire raw episode.
     dataset_chunk_start_mode: str = "episode_start"
+    # Sampling distribution for random chunk starts. ``uniform`` gives every
+    # valid raw timestep equal probability. ``valid_steps`` weights a start by
+    # min(dataset_chunk_length, remaining episode samples), retaining late-task
+    # starts while reducing over-representation of terminal tail padding.
+    dataset_chunk_start_sampling: str = "uniform"  # uniform, valid_steps
     # Training chunk length in native reference poses. When positive, raw dataset
     # samples retain their original indices. The start mode selects sample zero or
     # a random timestep over the entire episode. Missing lead-in history repeats
@@ -942,11 +956,15 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "reference_decimation",
             "dataset_path",
             "dataset_pose_key",
+            "dataset_position_key",
+            "dataset_axis_angle_key",
             "dataset_state_key",
             "dataset_joint_pos_offset",
+            "dataset_joint_pos_key",
             "dataset_only_success",
             "dataset_max_trajs",
             "dataset_chunk_start_mode",
+            "dataset_chunk_start_sampling",
             "dataset_chunk_length",
             "dataset_reference_length",
             "dataset_warp_strategy",
@@ -1208,6 +1226,14 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             raise ValueError(
                 "tracking.circle_start_time_sampling must be 'uniform' or "
                 f"'valid_steps', got {self.tracking.circle_start_time_sampling!r}"
+            )
+        self.tracking.dataset_chunk_start_sampling = str(
+            self.tracking.dataset_chunk_start_sampling
+        )
+        if self.tracking.dataset_chunk_start_sampling not in ("uniform", "valid_steps"):
+            raise ValueError(
+                "tracking.dataset_chunk_start_sampling must be 'uniform' or "
+                f"'valid_steps', got {self.tracking.dataset_chunk_start_sampling!r}"
             )
         self.tracking.reference_decimation = int(
             self.tracking.reference_decimation

@@ -2812,7 +2812,38 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             )
         want_force = self.enable_force and bool(tcfg.dataset_force_key)
         with h5py.File(path, "r") as f:
-            pose = torch.as_tensor(f[tcfg.dataset_pose_key][:], dtype=torch.float32)
+            pose_key = str(getattr(tcfg, "dataset_pose_key", "tool_pose"))
+            position_key = str(getattr(tcfg, "dataset_position_key", ""))
+            axis_angle_key = str(getattr(tcfg, "dataset_axis_angle_key", ""))
+            if pose_key:
+                pose = torch.as_tensor(f[pose_key][:], dtype=torch.float32)
+            elif position_key and axis_angle_key:
+                position = torch.as_tensor(f[position_key][:], dtype=torch.float32)
+                rotation_vector = torch.as_tensor(
+                    f[axis_angle_key][:], dtype=torch.float32
+                )
+                if position.ndim != 2 or position.shape[1] != 3:
+                    raise ValueError(
+                        f"Invalid {position_key!r} shape {tuple(position.shape)}; "
+                        "expected (N, 3)"
+                    )
+                if rotation_vector.shape != position.shape:
+                    raise ValueError(
+                        f"Invalid {axis_angle_key!r} shape {tuple(rotation_vector.shape)}; "
+                        f"expected {tuple(position.shape)}"
+                    )
+                angle = torch.linalg.vector_norm(rotation_vector, dim=-1)
+                axis = rotation_vector / angle.clamp_min(1.0e-12).unsqueeze(-1)
+                quat = torch_utils.quat_from_angle_axis(angle, axis)
+                zero_rotation = angle < 1.0e-12
+                if torch.any(zero_rotation):
+                    quat[zero_rotation] = quat.new_tensor([1.0, 0.0, 0.0, 0.0])
+                pose = torch.cat((position, quat), dim=-1)
+            else:
+                raise ValueError(
+                    "Dataset tracking requires either dataset_pose_key or both "
+                    "dataset_position_key and dataset_axis_angle_key"
+                )
             starts = f["episode_starts"][:]
             ends = f["episode_ends"][:]
             success = f["trial_success"][:] if "trial_success" in f else None
@@ -2823,22 +2854,35 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             ) == "random"
             if use_recorded_reset:
                 state_key = str(getattr(tcfg, "dataset_state_key", "low_dim_state"))
+                joint_key = str(getattr(tcfg, "dataset_joint_pos_key", ""))
                 joint_offset = int(getattr(tcfg, "dataset_joint_pos_offset", 13))
-                if state_key not in f:
+                if joint_key:
+                    if joint_key not in f:
+                        raise KeyError(
+                            f"Dataset chunk reset requires {joint_key!r} with recorded arm joints: {path}"
+                        )
+                    state = torch.as_tensor(f[joint_key][:], dtype=torch.float32)
+                elif state_key not in f:
                     raise KeyError(
                         f"Dataset chunk reset requires {state_key!r} with recorded arm joints: {path}"
                     )
-                state = torch.as_tensor(f[state_key][:], dtype=torch.float32)
+                else:
+                    state = torch.as_tensor(f[state_key][:], dtype=torch.float32)
                 if state.ndim != 2 or joint_offset < 0 or state.shape[1] < joint_offset + 7:
                     raise ValueError(
-                        f"Invalid {state_key!r} shape {tuple(state.shape)} or joint offset "
+                        f"Invalid {(joint_key or state_key)!r} shape {tuple(state.shape)} or joint offset "
                         f"{joint_offset}; expected at least {joint_offset + 7} columns"
                     )
-                if state.shape[0] != pose.shape[0] or not torch.allclose(
+                if state.shape[0] != pose.shape[0]:
+                    raise ValueError(
+                        f"{joint_key or state_key} has {state.shape[0]} rows but the "
+                        f"dataset pose has {pose.shape[0]} rows"
+                    )
+                if not joint_key and not torch.allclose(
                     state[:, :7], pose, atol=1.0e-5, rtol=1.0e-5
                 ):
                     raise ValueError(
-                        f"{state_key}[:, :7] does not align with {tcfg.dataset_pose_key}; "
+                        f"{state_key}[:, :7] does not align with {pose_key}; "
                         "refusing to use its recorded joints"
                     )
 
@@ -3013,12 +3057,53 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 getattr(tcfg, "dataset_chunk_start_mode", "episode_start")
             )
             if start_mode == "random":
-                # Every raw timestep is a valid reset point. History lookup repeats
-                # sample zero when t < H, while reference lookup repeats the final
-                # sample when fewer than `chunk_length` poses remain after t.
-                ds_start = torch.floor(
-                    torch.rand(m, device=self.device) * self._ds_lengths[ds_idx].float()
-                ).long()
+                lengths = self._ds_lengths[ds_idx]
+                start_sampling = str(
+                    getattr(tcfg, "dataset_chunk_start_sampling", "uniform")
+                )
+                if start_sampling == "uniform":
+                    # Every raw timestep is a valid reset point. History lookup
+                    # repeats sample zero when t < H, while reference lookup
+                    # repeats the final sample when the chunk reaches the tail.
+                    ds_start = torch.floor(
+                        torch.rand(m, device=self.device) * lengths.float()
+                    ).long()
+                elif start_sampling == "valid_steps":
+                    # Exact rejection sampler for
+                    #
+                    #   p(start | episode) proportional to
+                    #       min(chunk_length, episode_length - start).
+                    #
+                    # Uniform proposals followed by valid_steps/chunk_length
+                    # acceptance preserve late-task starts but suppress heavily
+                    # padded windows. Since most proposals have full weight, the
+                    # loop normally completes in one or two passes.
+                    ds_start = torch.zeros(m, dtype=torch.long, device=self.device)
+                    pending = torch.ones(m, dtype=torch.bool, device=self.device)
+                    while torch.any(pending):
+                        pending_idx = pending.nonzero(as_tuple=False).squeeze(-1)
+                        pending_lengths = lengths[pending_idx]
+                        proposal = torch.floor(
+                            torch.rand(pending_idx.numel(), device=self.device)
+                            * pending_lengths.float()
+                        ).long()
+                        valid_steps = torch.minimum(
+                            torch.full_like(proposal, chunk_length),
+                            pending_lengths - proposal,
+                        )
+                        accepted = (
+                            torch.rand(pending_idx.numel(), device=self.device)
+                            * float(chunk_length)
+                            < valid_steps.float()
+                        )
+                        accepted_idx = pending_idx[accepted]
+                        ds_start[accepted_idx] = proposal[accepted]
+                        pending[accepted_idx] = False
+                else:
+                    raise ValueError(
+                        "tracking.dataset_chunk_start_sampling must be 'uniform' "
+                        f"or 'valid_steps', got {start_sampling!r}"
+                    )
             elif start_mode == "episode_start":
                 ds_start = torch.zeros(m, dtype=torch.long, device=self.device)
             else:
