@@ -43,12 +43,20 @@ from .motion_regularization import (
     residual_huber_motion_costs,
 )
 from .reference_clock import (
+    adaptive_bin_sampling_probabilities,
+    adaptive_phase_sampling_probabilities,
     axis_aligned_containment_mask,
+    dataset_reference_end_timeouts,
     history_seed_offsets,
     is_reference_boundary,
+    phase_bin_indices,
     policy_step_to_reference_index,
     reference_coordinates,
+    sample_adaptive_phase_start_times,
+    sample_variable_reference_starts,
     valid_step_weighted_start_times,
+    variable_reference_bin_indices,
+    variable_reference_bin_layout,
     virtual_contact_reference_coordinates,
 )
 from .virtual_contact import (
@@ -228,6 +236,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.policy_steps_per_reference = (
             self.reference_decimation // int(self.cfg.decimation)
         )
+        self._dataset_async_reset_enabled = bool(
+            self.cfg.tracking.dataset_async_reset
+        )
         self.reference_dt = self.reference_decimation * float(self.cfg.sim.dt)
         self._reference_episode_steps = math.ceil(
             self.max_episode_length / self.policy_steps_per_reference
@@ -242,6 +253,50 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self._reference_episode_steps, reference_buffer_steps
         )
         self._physics_substep_in_policy = 0
+
+        # SONIC-style online curriculum. Analytic circles use bins on their one
+        # continuous clock. Dataset references initialize flattened
+        # (trajectory, local-frame-bin) metadata after their variable lengths
+        # are loaded below.
+        self._adaptive_phase_enabled = (
+            (
+                self.cfg.tracking.mode == "circle"
+                and self.cfg.tracking.circle_start_time_sampling == "adaptive"
+            )
+            or (
+                self.cfg.tracking.mode == "dataset"
+                and self.cfg.tracking.dataset_chunk_start_sampling == "adaptive"
+            )
+        )
+        adaptive_init_count = float(self.cfg.tracking.adaptive_phase_init_count)
+        self._adaptive_phase_num_bins = 0
+        self._adaptive_phase_visit_counts = torch.empty(0, device=self.device)
+        self._adaptive_phase_failure_counts = torch.empty(0, device=self.device)
+        self._adaptive_dataset_bin_offsets = None
+        self._adaptive_dataset_bins_per_sequence = None
+        self._adaptive_dataset_bin_sequence_ids = None
+        self._adaptive_dataset_bin_starts = None
+        self._adaptive_dataset_bin_ends = None
+        self._adaptive_dataset_bin_weights = None
+        self._adaptive_dataset_bin_size_steps = 0
+        if self._adaptive_phase_enabled and self.cfg.tracking.mode == "circle":
+            adaptive_bin_size = float(
+                self.cfg.tracking.adaptive_phase_bin_size_s
+            )
+            adaptive_reference_duration = float(
+                self.cfg.tracking.circle_reference_duration_s
+            )
+            self._adaptive_phase_num_bins = math.ceil(
+                adaptive_reference_duration / adaptive_bin_size
+            )
+            self._adaptive_phase_visit_counts = torch.full(
+                (self._adaptive_phase_num_bins,),
+                adaptive_init_count,
+                device=self.device,
+            )
+            self._adaptive_phase_failure_counts = torch.full_like(
+                self._adaptive_phase_visit_counts, adaptive_init_count
+            )
 
         # Nominal reset EE pose (from `ctrl.reset_joints`), captured at reset and
         # used as the center of the randomized start-pose sampling box.
@@ -429,6 +484,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self._disturbance_torque_clip_norm = math.inf
         if self.cfg.tracking.mode == "dataset":
             self._load_dataset_trajectories()
+            if self._adaptive_phase_enabled:
+                self._initialize_dataset_adaptive_sampling()
+        self._presampled_circle = None
+        if self._uses_presampled_circles():
+            self._load_presampled_circles()
 
         self.fingertip_midpoint_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.fingertip_midpoint_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
@@ -1949,15 +2009,21 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         native_metric_mask = is_reference_boundary(
             self.episode_length_buf, self.policy_steps_per_reference
         )
-        # RobustTrack episodes have no early termination, so all environments are
-        # synchronized and this scalar is exactly zero or one. Evaluation code can
-        # use it to ignore high-rate intermediate reward steps.
+        # Dataset-only asynchronous resets can put environments on different
+        # reference-clock phases. The scalar is therefore the fraction of envs at
+        # a native boundary; evaluation uses nonzero values to collect this step.
         native_metric_sample = native_metric_mask.float().mean()
         self.extras["native_reference_sample"] = native_metric_sample
-        if bool(native_metric_mask[0]):
-            self.extras["curr_successes"] = successes.float().mean()
-            self.extras["curr_tracking_pos_error"] = pos_error_norm.mean()
-            self.extras["curr_tracking_rot_error"] = rot_error_norm.mean()
+        if bool(native_metric_mask.any()):
+            native_pos_error = pos_error_norm[native_metric_mask]
+            native_rot_error = rot_error_norm[native_metric_mask]
+            native_successes = successes[native_metric_mask]
+            self._update_adaptive_phase_statistics(
+                successes.detach(), native_metric_mask
+            )
+            self.extras["curr_successes"] = native_successes.float().mean()
+            self.extras["curr_tracking_pos_error"] = native_pos_error.mean()
+            self.extras["curr_tracking_rot_error"] = native_rot_error.mean()
             # Start a fresh window once the previous one filled a full native
             # reference episode. Only native-boundary samples enter the window.
             if self._track_err_count >= self._track_err_window:
@@ -1975,8 +2041,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                     self._track_contact_count,
                 ):
                     buf.zero_()
-            self._track_err_pos_sum += pos_error_norm.mean()
-            self._track_err_rot_sum += rot_error_norm.mean()
+            self._track_err_pos_sum += native_pos_error.mean()
+            self._track_err_rot_sum += native_rot_error.mean()
             self._track_err_count += 1
             self.extras["tracking_pos_error"] = (
                 self._track_err_pos_sum / self._track_err_count
@@ -1986,19 +2052,125 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             )
             if self.enable_force:
                 self._accumulate_contact_split_metrics(
-                    pos_error_norm, rot_error_norm, successes
+                    pos_error_norm,
+                    rot_error_norm,
+                    successes,
+                    env_mask=native_metric_mask,
                 )
             self._accumulate_perstep_error(
-                pos_error_norm.detach(), rot_error_norm.detach()
+                pos_error_norm.detach(),
+                rot_error_norm.detach(),
+                env_mask=native_metric_mask,
             )
-            self._accumulate_gain_stats()
+            self._accumulate_gain_stats(env_mask=native_metric_mask)
         self._vis_pos_error_norm = pos_error_norm.detach()
         self._vis_rot_error_norm = rot_error_norm.detach()
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        if self._dataset_async_reset_enabled:
+            reference_time_out = dataset_reference_end_timeouts(
+                self.episode_length_buf,
+                self._ds_lengths[self.traj_ds_idx],
+                self.traj_ds_start,
+                chunk_length=self.cfg.tracking.dataset_chunk_length,
+                policy_steps_per_reference=self.policy_steps_per_reference,
+            )
+            time_out = torch.logical_or(time_out, reference_time_out)
         return torch.zeros_like(time_out), time_out
+
+    def _update_adaptive_phase_statistics(
+        self,
+        successes: torch.Tensor,
+        native_metric_mask: torch.Tensor | None = None,
+    ):
+        """Accumulate strict tracking failures in the active reference bins."""
+        if not self._adaptive_phase_enabled:
+            return
+        if native_metric_mask is None:
+            native_metric_mask = torch.ones_like(successes, dtype=torch.bool)
+        if not bool(native_metric_mask.any()):
+            return
+        active_successes = successes[native_metric_mask]
+        if self.cfg.tracking.mode == "dataset":
+            sequence_ids = self.traj_ds_idx[native_metric_mask]
+            reference_steps = self.traj_ds_start[native_metric_mask] + (
+                self._policy_step_to_reference_index(
+                    self.episode_length_buf[native_metric_mask]
+                )
+            )
+            reference_steps = torch.minimum(
+                reference_steps, self._ds_lengths[sequence_ids] - 1
+            )
+            bin_ids = variable_reference_bin_indices(
+                sequence_ids,
+                reference_steps,
+                bin_offsets=self._adaptive_dataset_bin_offsets,
+                bins_per_sequence=self._adaptive_dataset_bins_per_sequence,
+                bin_size_steps=self._adaptive_dataset_bin_size_steps,
+            )
+            # SONIC normalizes occupancy by the number of frames in each bin.
+            # A strict tracking miss is still counted at its actual local frame.
+            bin_lengths = (
+                self._adaptive_dataset_bin_ends[bin_ids]
+                - self._adaptive_dataset_bin_starts[bin_ids]
+            )
+            visits = bin_lengths.to(self._adaptive_phase_visit_counts.dtype).reciprocal()
+        else:
+            phase_time = self.traj_start_time[native_metric_mask].squeeze(-1) + (
+                self.episode_length_buf[native_metric_mask].float()
+                * self.step_dt
+            )
+            bin_ids = phase_bin_indices(
+                phase_time,
+                bin_size_s=self.cfg.tracking.adaptive_phase_bin_size_s,
+                num_bins=self._adaptive_phase_num_bins,
+            )
+            visits = torch.ones_like(phase_time)
+        self._adaptive_phase_visit_counts.index_add_(0, bin_ids, visits)
+        self._adaptive_phase_failure_counts.index_add_(
+            0,
+            bin_ids,
+            (~active_successes).to(self._adaptive_phase_failure_counts.dtype),
+        )
+
+    def _adaptive_phase_probabilities(
+        self, *, start_time_lo: float, start_time_hi: float
+    ) -> torch.Tensor:
+        return adaptive_phase_sampling_probabilities(
+            self._adaptive_phase_failure_counts,
+            self._adaptive_phase_visit_counts,
+            bin_size_s=self.cfg.tracking.adaptive_phase_bin_size_s,
+            start_time_lo=start_time_lo,
+            start_time_hi=start_time_hi,
+            reference_duration=self.cfg.tracking.circle_reference_duration_s,
+            episode_duration=self.max_episode_length_s,
+            uniform_rate=self.cfg.tracking.adaptive_phase_uniform_rate,
+            failure_rate_max_over_mean=(
+                self.cfg.tracking.adaptive_phase_failure_rate_max_over_mean
+            ),
+            max_probability_multiplier=(
+                self.cfg.tracking.adaptive_phase_max_probability_multiplier
+            ),
+            valid_step_weighting=(
+                self.cfg.tracking.adaptive_phase_valid_step_weighting
+            ),
+        )
+
+    def _adaptive_dataset_probabilities(self) -> torch.Tensor:
+        return adaptive_bin_sampling_probabilities(
+            self._adaptive_phase_failure_counts,
+            self._adaptive_phase_visit_counts,
+            self._adaptive_dataset_bin_weights,
+            uniform_rate=self.cfg.tracking.adaptive_phase_uniform_rate,
+            failure_rate_max_over_mean=(
+                self.cfg.tracking.adaptive_phase_failure_rate_max_over_mean
+            ),
+            max_probability_multiplier=(
+                self.cfg.tracking.adaptive_phase_max_probability_multiplier
+            ),
+        )
 
     @contextmanager
     def common_eval_context(self):
@@ -2097,13 +2269,22 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
 
-        # Move to the nominal reset joints and record the resulting EE pose as the
-        # center of the start-pose sampling box.
-        self._set_franka_to_reset_pose(env_ids)
-        self.step_sim_no_action()
-        self.nominal_start_pos[env_ids] = self.fingertip_midpoint_pos[env_ids].clone()
-        self.nominal_start_quat[env_ids] = self.fingertip_midpoint_quat[env_ids].clone()
-        self._cache_kinematic_frames()
+        partial_dataset_reset = (
+            self._dataset_async_reset_enabled and len(env_ids) < self.num_envs
+        )
+        if not partial_dataset_reset:
+            # Analytic resets need the nominal EE pose as their sampling center.
+            # The initial all-env dataset reset also takes this path to initialize
+            # the shared kinematic-frame cache.
+            self._set_franka_to_reset_pose(env_ids)
+            self.step_sim_no_action()
+            self.nominal_start_pos[env_ids] = self.fingertip_midpoint_pos[
+                env_ids
+            ].clone()
+            self.nominal_start_quat[env_ids] = self.fingertip_midpoint_quat[
+                env_ids
+            ].clone()
+            self._cache_kinematic_frames()
 
         self.actions[env_ids] = 0.0
         self.prev_actions[env_ids] = 0.0
@@ -2163,7 +2344,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             sample_time, device=self.device
         )
         avg_jump_str = "[" + ", ".join(f"{v:.3f}" for v in sample_stats["avg_joint_jump"]) + "]"
-        if sample_stats["filled"] < self.num_envs:
+        if sample_stats["filled"] < sample_stats["total"]:
             print(
                 f"[FrankaRobustTrack] reset {len(env_ids)} envs in {reset_time:.3f}s "
                 f"(reachability sample {sample_time:.3f}s) | "
@@ -2380,6 +2561,170 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self._ik_proc = None
         super().close()
 
+    def _uses_presampled_circles(self) -> bool:
+        """Whether circle resets draw from an offline presampled trajectory set."""
+        return (
+            self.cfg.tracking.mode == "circle"
+            and bool(str(getattr(self.cfg.tracking, "circle_presampled_path", "")).strip())
+        )
+
+    _PRESAMPLED_CIRCLE_FORMAT = "robust_track_circle_presampled_v2"
+
+    def _load_presampled_circles(self):
+        """Load the offline circle set produced by the presampling script.
+
+        The stored trajectories were accepted under a specific episode length,
+        reference clip and waypoint count: their IK chains prove reachability only
+        over exactly that horizon, so a mismatch here would silently train on
+        trajectories nobody verified for this run's episode. The stored parameters
+        are validated against the live config and then held on device in the same
+        layout `_assign_params_to_envs` expects, so a reset is a gather, not a
+        sampling loop plus a cuRobo round trip.
+        """
+        import os
+
+        path = os.path.expanduser(str(self.cfg.tracking.circle_presampled_path).strip())
+        if os.path.isdir(path):
+            split = str(getattr(self.cfg.tracking, "circle_presampled_split", "train")).strip()
+            path = os.path.join(path, f"{split or 'train'}.npz")
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Presampled circle dataset not found: {path}")
+
+        data = np.load(path, allow_pickle=False)
+        fmt = str(data["dataset_format"])
+        if fmt != self._PRESAMPLED_CIRCLE_FORMAT:
+            raise ValueError(
+                f"{path} has dataset_format={fmt!r}, expected "
+                f"{self._PRESAMPLED_CIRCLE_FORMAT!r}"
+            )
+
+        stored_episode_s = float(data["episode_length_s"])
+        if not math.isclose(stored_episode_s, self.max_episode_length_s, rel_tol=1e-6, abs_tol=1e-6):
+            raise ValueError(
+                f"{path} was validated over episode_length_s={stored_episode_s}, but this "
+                f"run uses {self.max_episode_length_s}. Regenerate the set with the matching "
+                "--episode-length-s, or the trajectories' reachability check does not cover "
+                "the episode the policy actually runs."
+            )
+        stored_reference_s = float(data["circle_reference_duration_s"])
+        cfg_reference_s = float(
+            getattr(self.cfg.tracking, "circle_reference_duration_s", self.max_episode_length_s)
+        )
+        if not math.isclose(stored_reference_s, cfg_reference_s, rel_tol=1e-6, abs_tol=1e-6):
+            raise ValueError(
+                f"{path} was generated with circle_reference_duration_s="
+                f"{stored_reference_s}, but this run uses {cfg_reference_s}; the padded "
+                "tail of every reference would differ from the one that was IK-checked."
+            )
+        stored_reference_hz = float(data["reference_hz"])
+        if not math.isclose(1.0 / stored_reference_hz, self.reference_dt, rel_tol=1e-6):
+            raise ValueError(
+                f"{path} solved IK on a {stored_reference_hz} Hz reference grid, but this "
+                f"run's reference_dt is {self.reference_dt} s ({1.0 / self.reference_dt:g} Hz). "
+                "The stored joint trajectory would not be the one the policy tracks."
+            )
+        stored_reset_joints = torch.as_tensor(data["reset_joints"], dtype=torch.float32)
+        cfg_reset_joints = torch.tensor(self.cfg.ctrl.reset_joints, dtype=torch.float32)
+        if not torch.allclose(stored_reset_joints, cfg_reset_joints, atol=1e-6):
+            raise ValueError(
+                f"{path} was generated around reset_joints={stored_reset_joints.tolist()}, "
+                f"but this run uses {cfg_reset_joints.tolist()}; the start-pose anchor "
+                "orientation and the null-space posture would both be wrong."
+            )
+        if self._adaptive_phase_enabled:
+            raise ValueError(
+                "tracking.circle_start_time_sampling='adaptive' needs to re-solve IK for "
+                "each newly drawn phase, so it cannot run against a presampled set whose "
+                "phases were fixed at generation time."
+            )
+
+        params = {
+            key: torch.as_tensor(data[key], dtype=torch.float32, device=self.device)
+            for key in (
+                "start_pos", "start_quat", "u", "v", "radius", "omega",
+                "start_time", "rot_axis", "rot_speed", "rot_angle",
+            )
+        }
+        # Line-mode params are inactive for circles but `_assign_params_to_envs`
+        # copies every buffer uniformly, so give them the same harmless zeros the
+        # online circle sampler writes.
+        num_trajs = params["start_pos"].shape[0]
+        for key, dim in (("dir", 3), ("speed", 1), ("length", 1)):
+            params[key] = torch.zeros((num_trajs, dim), device=self.device)
+
+        # Only the start configuration is needed at reset: the reference itself is
+        # regenerated analytically from the circle params, exactly as before. The
+        # file's full `joint_pos` chain (N, K, S, 7) is the offline validation
+        # record and is deliberately left unread -- `np.load` on an npz is lazy, so
+        # not touching the key keeps a few hundred MB off the GPU.
+        start_joint_pos = torch.as_tensor(
+            data["start_joint_pos"], dtype=torch.float32, device=self.device
+        )  # (N, K, 7)
+        branch_valid = torch.as_tensor(
+            data["branch_valid"], dtype=torch.bool, device=self.device
+        )  # (N, K)
+        if not bool(branch_valid.any(dim=1).all()):
+            raise ValueError(f"{path} contains trajectories with no valid start branch")
+
+        self._presampled_circle = {
+            "path": path,
+            "params": params,
+            # Checked once against Isaac's own FK at the first reset; see
+            # `_assign_presampled_circles`.
+            "nominal_tool_quat": torch.as_tensor(
+                data["nominal_tool_quat_wxyz"], dtype=torch.float32, device=self.device
+            ),
+            "anchor_checked": False,
+            "start_joint_pos": start_joint_pos,
+            # Branch weights for `torch.multinomial`; every trajectory has at least
+            # one valid branch, checked above.
+            "branch_weights": branch_valid.float(),
+            "num_trajs": num_trajs,
+        }
+        print(
+            f"[presampled circles] {num_trajs} trajectories from {path} | "
+            f"{start_joint_pos.shape[1]} start branches/traj, "
+            f"{branch_valid.float().sum(dim=1).mean().item():.2f} valid on average"
+        )
+
+    def _assign_presampled_circles(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Draw a presampled trajectory and one of its start branches per env.
+
+        A trajectory is drawn uniformly and *then* one of its valid start branches,
+        so the Cartesian reference distribution is exactly the presampled one while
+        the arm posture still varies across resets. Sampling uniformly over
+        (trajectory, branch) pairs instead would over-represent the trajectories
+        that happen to admit more IK branches.
+
+        Returns the (len(env_ids), 7) start arm configuration to reset into.
+        """
+        store = self._presampled_circle
+        if not store["anchor_checked"]:
+            # The generator anchors every start orientation on cuRobo's FK of
+            # `panda_hand` plus the fixed hand->fingertip offset; the env derives
+            # the same pose from Isaac's FK of the real tool body. They describe
+            # one physical TCP, but only if the run's `tool_frame` is the one the
+            # set was generated for -- so compare them once, where the env's own
+            # nominal pose is finally available.
+            stored = store["nominal_tool_quat"]
+            live = self.nominal_start_quat[env_ids[0]]
+            # Quaternion double cover: q and -q are the same rotation.
+            if float((stored * live).sum().abs()) < 1.0 - 1.0e-3:
+                raise ValueError(
+                    f"{store['path']} was generated around tool orientation "
+                    f"{stored.tolist()}, but this run's FK at reset_joints gives "
+                    f"{live.tolist()}. The presampled circles are anchored on a "
+                    "different tool frame than tool_frame="
+                    f"{getattr(self, 'tool_frame_name', '?')!r} resolves to."
+                )
+            store["anchor_checked"] = True
+        traj_idx = torch.randint(
+            store["num_trajs"], (len(env_ids),), device=self.device
+        )
+        branch_idx = torch.multinomial(store["branch_weights"][traj_idx], 1).squeeze(-1)
+        self._assign_params_to_envs(env_ids, store["params"], traj_idx)
+        return store["start_joint_pos"][traj_idx, branch_idx]
+
     def _sample_reachable_start_and_trajectory(self, env_ids: torch.Tensor):
         """Sample a start pose + trajectory per env, keeping only continuously reachable ones.
 
@@ -2400,209 +2745,219 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         cuRobo start solution, or at the exact recorded q[t] for a dataset chunk.
         """
         cfg = self.cfg.init
-        num_wp = cfg.reach_check_waypoints
-        recorded_dataset_reset = self._uses_recorded_dataset_reset()
-        # A recorded dataset sample is already a reachable joint-space trajectory;
-        # there is no reason to oversample it or reconstruct it with IK.
-        k = 1 if recorded_dataset_reset else max(1, int(cfg.reach_oversample))
-        # Singularity filter (getattr keeps old restored env.pkl configs working:
-        # absent -> disabled). A waypoint config is rejected when its geometric-
-        # Jacobian manipulability is too low or its condition number too high.
-        sing_check = bool(getattr(cfg, "singularity_check", False))
-        min_manip = float(getattr(cfg, "min_manipulability", 0.0))
-        max_cond = float(getattr(cfg, "max_jac_cond", float("inf")))
-        containment_enabled = bool(getattr(cfg, "enable_ee_containment", False))
-        if containment_enabled:
-            containment_box = torch.as_tensor(
-                cfg.ee_containment_box, device=self.device, dtype=torch.float32
-            )
-            if containment_box.shape != (3, 2):
-                raise ValueError("init.ee_containment_box must have shape (3, 2)")
-        # cuRobo arm-joint solution for each env's start pose; filled during the check.
-        start_arm_q = self.joint_pos[:, 0:7].clone()
-        reach_duration = self.max_episode_length_s
-        if self.cfg.tracking.mode == "dataset" and str(
-            getattr(self.cfg.tracking, "dataset_chunk_start_mode", "episode_start")
-        ) == "random":
-            chunk_length = int(getattr(self.cfg.tracking, "dataset_chunk_length", 0))
-            if chunk_length > 0:
-                reach_duration = max(chunk_length - 1, 0) * self.reference_dt
-        waypoint_times = torch.linspace(0.0, reach_duration, num_wp, device=self.device)
-
-        bad_envs = env_ids.clone()
-        attempt = 0
-        total_sampled = 0
-        total_good = 0
-        total_reach_fail = 0
-        total_cont_fail = 0
-        total_sing_fail = 0
+        # Reset-path diagnostics, shared by the online sampler and the presampled
+        # set so the logged counters mean the same thing either way.
+        total_sampled = total_good = 0
+        total_reach_fail = total_cont_fail = total_sing_fail = 0
         total_containment_fail = 0
+        attempt = 0
         # Per-joint |Δq| accumulated over waypoint transitions where both endpoints
         # were reachable, to report the average continuity of the sampled chains.
         joint_jump_sum = torch.zeros(7, device=self.device)
         joint_jump_count = 0
-        # Accepted (reachable + continuous) candidates accumulated across attempts.
-        # Any envs still pending after the last attempt are backfilled by resampling
-        # (with replacement) from these known-good trajectories rather than arbitrary
-        # ones; per-env domain randomization still differentiates repeated trajectories.
-        accepted_store = {key: [] for key in self._traj_param_buffers()}
-        accepted_start_q = []
-        # Optionally seed the first waypoint's IK with reset_joints so the start
-        # config lands on that arm branch (later waypoints seed from the previous
-        # solution and follow it); mirrors factory/forge's teleport-to-reset_joints.
-        reset_seed = None
-        if getattr(cfg, "seed_ik_with_reset_joints", False):
-            reset_seed = torch.tensor(self.cfg.ctrl.reset_joints, device=self.device)
-        while True:
-            n_bad = len(bad_envs)
-            total_sampled += n_bad * k
-            # Draw a pool of n_bad*k candidate trajectories. `cand_env_ids` only
-            # feeds the IK frame conversion, which is identical across envs, so the
-            # candidates are not actually bound to specific envs.
-            params = self._sample_candidate_params(bad_envs, k)
-            cand_env_ids = bad_envs.repeat_interleave(k)
-            containment_ok = torch.ones(
-                n_bad * k, dtype=torch.bool, device=self.device
-            )
+        # cuRobo arm-joint solution for each env's start pose; filled during the check.
+        start_arm_q = self.joint_pos[:, 0:7].clone()
+        bad_envs = env_ids[:0]
+
+        if self._presampled_circle is not None:
+            # Offline-validated circles: every gate below (reachability, waypoint
+            # continuity, Jacobian conditioning, workspace containment) was already
+            # applied at generation time under this run's `init.*` profile, and each
+            # trajectory carries its own solved start branches. A reset is therefore
+            # a draw plus a gather -- no candidate loop and no cuRobo round trip.
+            start_arm_q[env_ids] = self._assign_presampled_circles(env_ids)
+            total_sampled = total_good = int(len(env_ids))
+        else:
+            bad_envs = env_ids.clone()
+            num_wp = cfg.reach_check_waypoints
+            recorded_dataset_reset = self._uses_recorded_dataset_reset()
+            # A recorded dataset sample is already a reachable joint-space trajectory;
+            # there is no reason to oversample it or reconstruct it with IK.
+            k = 1 if recorded_dataset_reset else max(1, int(cfg.reach_oversample))
+            # Singularity filter (getattr keeps old restored env.pkl configs working:
+            # absent -> disabled). A waypoint config is rejected when its geometric-
+            # Jacobian manipulability is too low or its condition number too high.
+            sing_check = bool(getattr(cfg, "singularity_check", False))
+            min_manip = float(getattr(cfg, "min_manipulability", 0.0))
+            max_cond = float(getattr(cfg, "max_jac_cond", float("inf")))
+            containment_enabled = bool(getattr(cfg, "enable_ee_containment", False))
             if containment_enabled:
-                num_containment_checks = max(
-                    2, int(math.ceil(reach_duration / self.reference_dt)) + 1
+                containment_box = torch.as_tensor(
+                    cfg.ee_containment_box, device=self.device, dtype=torch.float32
                 )
-                containment_times = torch.linspace(
-                    0.0,
-                    reach_duration,
-                    num_containment_checks,
-                    device=self.device,
+                if containment_box.shape != (3, 2):
+                    raise ValueError("init.ee_containment_box must have shape (3, 2)")
+            reach_duration = self.max_episode_length_s
+            if self.cfg.tracking.mode == "dataset" and str(
+                getattr(self.cfg.tracking, "dataset_chunk_start_mode", "episode_start")
+            ) == "random":
+                chunk_length = int(getattr(self.cfg.tracking, "dataset_chunk_length", 0))
+                if chunk_length > 0:
+                    reach_duration = max(chunk_length - 1, 0) * self.reference_dt
+            waypoint_times = torch.linspace(0.0, reach_duration, num_wp, device=self.device)
+
+            # Accepted (reachable + continuous) candidates accumulated across attempts.
+            # Any envs still pending after the last attempt are backfilled by resampling
+            # (with replacement) from these known-good trajectories rather than arbitrary
+            # ones; per-env domain randomization still differentiates repeated trajectories.
+            accepted_store = {key: [] for key in self._traj_param_buffers()}
+            accepted_start_q = []
+            # Optionally seed the first waypoint's IK with reset_joints so the start
+            # config lands on that arm branch (later waypoints seed from the previous
+            # solution and follow it); mirrors factory/forge's teleport-to-reset_joints.
+            reset_seed = None
+            if getattr(cfg, "seed_ik_with_reset_joints", False):
+                reset_seed = torch.tensor(self.cfg.ctrl.reset_joints, device=self.device)
+            while True:
+                n_bad = len(bad_envs)
+                total_sampled += n_bad * k
+                # Draw a pool of n_bad*k candidate trajectories. `cand_env_ids` only
+                # feeds the IK frame conversion, which is identical across envs, so the
+                # candidates are not actually bound to specific envs.
+                params = self._sample_candidate_params(bad_envs, k)
+                cand_env_ids = bad_envs.repeat_interleave(k)
+                containment_ok = torch.ones(
+                    n_bad * k, dtype=torch.bool, device=self.device
                 )
-                for check_time in containment_times:
-                    elapsed_time = check_time.expand(n_bad * k, 1)
-                    pos_i, _ = self._eval_pose_from_params(params, elapsed_time)
-                    containment_ok &= axis_aligned_containment_mask(
-                        pos_i, containment_box
+                if containment_enabled:
+                    num_containment_checks = max(
+                        2, int(math.ceil(reach_duration / self.reference_dt)) + 1
                     )
-            recorded_start_q = None
-            if recorded_dataset_reset:
-                recorded_start_q = self._ds_joint_pos[
-                    params["ds_idx"], params["ds_start"]
-                ]
-
-            # Walk the waypoints in order, seeding each solve with the previous
-            # solution. Track reachability and continuity separately so we can report
-            # which one is rejecting candidates.
-            reach_ok = torch.ones(n_bad * k, dtype=torch.bool, device=self.device)
-            cont_ok = torch.ones(n_bad * k, dtype=torch.bool, device=self.device)
-            sing_ok = torch.ones(n_bad * k, dtype=torch.bool, device=self.device)
-            cand_start_q = torch.zeros((n_bad * k, 7), device=self.device)
-            prev_q = None
-            prev_success = None
-            for i in range(num_wp):
-                if i == 0 and recorded_start_q is not None:
-                    # This exact q/pose pair was recorded by Forge and was
-                    # validated while loading the dataset. Avoid re-solving a
-                    # redundant 7-DoF IK target just to rediscover a potentially
-                    # different branch; seed the next checked waypoint from q[t].
-                    cand_start_q = recorded_start_q.clone()
-                    prev_q = recorded_start_q
-                    prev_success = torch.ones_like(reach_ok)
-                    continue
-                if recorded_start_q is not None:
-                    # Use the demonstration's known joint solution at every checked
-                    # waypoint. Clamp padded chunks to their final valid sample.
-                    relative_idx = int(
-                        round(float(waypoint_times[i].item()) / self.reference_dt)
+                    containment_times = torch.linspace(
+                        0.0,
+                        reach_duration,
+                        num_containment_checks,
+                        device=self.device,
                     )
-                    source_idx = torch.minimum(
-                        params["ds_start"] + relative_idx,
-                        self._ds_lengths[params["ds_idx"]] - 1,
-                    )
-                    arm_q = self._ds_joint_pos[params["ds_idx"], source_idx]
-                    success = torch.ones_like(reach_ok)
-                    manip = torch.full_like(reach_ok, float("inf"), dtype=torch.float32)
-                    cond = torch.zeros_like(reach_ok, dtype=torch.float32)
-                else:
-                    elapsed_time = torch.full((n_bad * k, 1), waypoint_times[i].item(), device=self.device)
-                    pos_i, quat_i = self._eval_pose_from_params(params, elapsed_time)
-                    if prev_q is not None:
-                        seed = prev_q.unsqueeze(1)
-                    elif reset_seed is not None:
-                        # First waypoint: seed from reset_joints (does not set prev_q, so
-                        # the i==0 continuity check stays skipped as before).
-                        seed = reset_seed.unsqueeze(0).expand(n_bad * k, 7).unsqueeze(1)
-                    else:
-                        seed = None
-                    success, arm_q, manip, cond = self._solve_curobo_ik(
-                        pos_i.unsqueeze(1), quat_i.unsqueeze(1), cand_env_ids, seed_arm_q=seed
-                    )
-                    success = success[:, 0]
-                    arm_q = arm_q[:, 0]
-                reach_ok &= success
-                if sing_check and recorded_start_q is None:
-                    # Only gate reachable waypoints (unreachable ones already reject
-                    # the candidate and carry meaningless IK solutions).
-                    wp_sing_ok = (manip[:, 0] >= min_manip) & (cond[:, 0] <= max_cond)
-                    sing_ok &= wp_sing_ok | ~success
-                if prev_q is not None:
-                    joint_diff = (arm_q - prev_q).abs()  # (n*k, 7)
-                    if recorded_start_q is None:
-                        cont_ok &= joint_diff.amax(dim=-1) <= cfg.reach_joint_diff_threshold
-                    # Only count transitions where both endpoints were reachable.
-                    both_ok = prev_success & success
-                    joint_jump_sum += joint_diff[both_ok].sum(dim=0)
-                    joint_jump_count += int(both_ok.sum().item())
-                if i == 0:
-                    cand_start_q = arm_q.clone()
-                prev_q = arm_q
-                prev_success = success
-
-            accept = reach_ok & cont_ok & sing_ok & containment_ok
-            total_good += int(accept.sum().item())
-            total_reach_fail += int((~reach_ok).sum().item())
-            total_cont_fail += int((reach_ok & ~cont_ok).sum().item())
-            total_sing_fail += int((reach_ok & cont_ok & ~sing_ok).sum().item())
-            total_containment_fail += int(
-                (reach_ok & cont_ok & sing_ok & ~containment_ok).sum().item()
-            )
-
-            # The whole pool of n_bad*k candidates is fungible: the start pose and
-            # trajectory are env-independent and the IK is solved in the (shared)
-            # base frame, so any accepted candidate is valid for any env. Randomly
-            # draw accepted candidates from the pool and assign them to the pending
-            # envs rather than tying each env to its own k candidates.
-            accepted_idx = accept.nonzero(as_tuple=False).squeeze(-1)
-            if accepted_idx.numel() > 0:
-                for key in self._traj_param_buffers():
-                    accepted_store[key].append(params[key][accepted_idx])
-                accepted_start_q.append(cand_start_q[accepted_idx])
-                perm = accepted_idx[torch.randperm(accepted_idx.numel(), device=self.device)]
-                take = perm[: len(bad_envs)]
-                fill_envs = bad_envs[: take.numel()]
-                self._assign_params_to_envs(fill_envs, params, take)
-                start_arm_q[fill_envs] = cand_start_q[take]
-                bad_envs = bad_envs[take.numel() :]
-
-            attempt += 1
-            if bad_envs.shape[0] == 0 or attempt >= cfg.max_reach_attempts:
-                # Backfill: envs that never got their own accepted candidate reuse a
-                # randomly drawn accepted (reachable + continuous) trajectory. Repeats
-                # are fine since domain randomization still differs per env. If nothing
-                # was ever accepted, fall back to an arbitrary candidate from the pool.
-                if bad_envs.shape[0] > 0:
-                    if len(accepted_start_q) > 0:
-                        store = {key: torch.cat(vals, dim=0) for key, vals in accepted_store.items()}
-                        store_q = torch.cat(accepted_start_q, dim=0)
-                        pick = torch.randint(store_q.shape[0], (bad_envs.shape[0],), device=self.device)
-                        self._assign_params_to_envs(bad_envs, store, pick)
-                        start_arm_q[bad_envs] = store_q[pick]
-                    elif containment_enabled:
-                        raise RuntimeError(
-                            "No trajectory satisfied init.ee_containment_box after "
-                            f"{cfg.max_reach_attempts} reachability attempts"
+                    for check_time in containment_times:
+                        elapsed_time = check_time.expand(n_bad * k, 1)
+                        pos_i, _ = self._eval_pose_from_params(params, elapsed_time)
+                        containment_ok &= axis_aligned_containment_mask(
+                            pos_i, containment_box
                         )
+                recorded_start_q = None
+                if recorded_dataset_reset:
+                    recorded_start_q = self._ds_joint_pos[
+                        params["ds_idx"], params["ds_start"]
+                    ]
+
+                # Walk the waypoints in order, seeding each solve with the previous
+                # solution. Track reachability and continuity separately so we can report
+                # which one is rejecting candidates.
+                reach_ok = torch.ones(n_bad * k, dtype=torch.bool, device=self.device)
+                cont_ok = torch.ones(n_bad * k, dtype=torch.bool, device=self.device)
+                sing_ok = torch.ones(n_bad * k, dtype=torch.bool, device=self.device)
+                cand_start_q = torch.zeros((n_bad * k, 7), device=self.device)
+                prev_q = None
+                prev_success = None
+                for i in range(num_wp):
+                    if i == 0 and recorded_start_q is not None:
+                        # This exact q/pose pair was recorded by Forge and was
+                        # validated while loading the dataset. Avoid re-solving a
+                        # redundant 7-DoF IK target just to rediscover a potentially
+                        # different branch; seed the next checked waypoint from q[t].
+                        cand_start_q = recorded_start_q.clone()
+                        prev_q = recorded_start_q
+                        prev_success = torch.ones_like(reach_ok)
+                        continue
+                    if recorded_start_q is not None:
+                        # Use the demonstration's known joint solution at every checked
+                        # waypoint. Clamp padded chunks to their final valid sample.
+                        relative_idx = int(
+                            round(float(waypoint_times[i].item()) / self.reference_dt)
+                        )
+                        source_idx = torch.minimum(
+                            params["ds_start"] + relative_idx,
+                            self._ds_lengths[params["ds_idx"]] - 1,
+                        )
+                        arm_q = self._ds_joint_pos[params["ds_idx"], source_idx]
+                        success = torch.ones_like(reach_ok)
+                        manip = torch.full_like(reach_ok, float("inf"), dtype=torch.float32)
+                        cond = torch.zeros_like(reach_ok, dtype=torch.float32)
                     else:
-                        fb = torch.arange(bad_envs.shape[0], device=self.device)
-                        self._assign_params_to_envs(bad_envs, params, fb)
-                        start_arm_q[bad_envs] = cand_start_q[fb]
-                break
+                        elapsed_time = torch.full((n_bad * k, 1), waypoint_times[i].item(), device=self.device)
+                        pos_i, quat_i = self._eval_pose_from_params(params, elapsed_time)
+                        if prev_q is not None:
+                            seed = prev_q.unsqueeze(1)
+                        elif reset_seed is not None:
+                            # First waypoint: seed from reset_joints (does not set prev_q, so
+                            # the i==0 continuity check stays skipped as before).
+                            seed = reset_seed.unsqueeze(0).expand(n_bad * k, 7).unsqueeze(1)
+                        else:
+                            seed = None
+                        success, arm_q, manip, cond = self._solve_curobo_ik(
+                            pos_i.unsqueeze(1), quat_i.unsqueeze(1), cand_env_ids, seed_arm_q=seed
+                        )
+                        success = success[:, 0]
+                        arm_q = arm_q[:, 0]
+                    reach_ok &= success
+                    if sing_check and recorded_start_q is None:
+                        # Only gate reachable waypoints (unreachable ones already reject
+                        # the candidate and carry meaningless IK solutions).
+                        wp_sing_ok = (manip[:, 0] >= min_manip) & (cond[:, 0] <= max_cond)
+                        sing_ok &= wp_sing_ok | ~success
+                    if prev_q is not None:
+                        joint_diff = (arm_q - prev_q).abs()  # (n*k, 7)
+                        if recorded_start_q is None:
+                            cont_ok &= joint_diff.amax(dim=-1) <= cfg.reach_joint_diff_threshold
+                        # Only count transitions where both endpoints were reachable.
+                        both_ok = prev_success & success
+                        joint_jump_sum += joint_diff[both_ok].sum(dim=0)
+                        joint_jump_count += int(both_ok.sum().item())
+                    if i == 0:
+                        cand_start_q = arm_q.clone()
+                    prev_q = arm_q
+                    prev_success = success
+
+                accept = reach_ok & cont_ok & sing_ok & containment_ok
+                total_good += int(accept.sum().item())
+                total_reach_fail += int((~reach_ok).sum().item())
+                total_cont_fail += int((reach_ok & ~cont_ok).sum().item())
+                total_sing_fail += int((reach_ok & cont_ok & ~sing_ok).sum().item())
+                total_containment_fail += int(
+                    (reach_ok & cont_ok & sing_ok & ~containment_ok).sum().item()
+                )
+
+                # The whole pool of n_bad*k candidates is fungible: the start pose and
+                # trajectory are env-independent and the IK is solved in the (shared)
+                # base frame, so any accepted candidate is valid for any env. Randomly
+                # draw accepted candidates from the pool and assign them to the pending
+                # envs rather than tying each env to its own k candidates.
+                accepted_idx = accept.nonzero(as_tuple=False).squeeze(-1)
+                if accepted_idx.numel() > 0:
+                    for key in self._traj_param_buffers():
+                        accepted_store[key].append(params[key][accepted_idx])
+                    accepted_start_q.append(cand_start_q[accepted_idx])
+                    perm = accepted_idx[torch.randperm(accepted_idx.numel(), device=self.device)]
+                    take = perm[: len(bad_envs)]
+                    fill_envs = bad_envs[: take.numel()]
+                    self._assign_params_to_envs(fill_envs, params, take)
+                    start_arm_q[fill_envs] = cand_start_q[take]
+                    bad_envs = bad_envs[take.numel() :]
+
+                attempt += 1
+                if bad_envs.shape[0] == 0 or attempt >= cfg.max_reach_attempts:
+                    # Backfill: envs that never got their own accepted candidate reuse a
+                    # randomly drawn accepted (reachable + continuous) trajectory. Repeats
+                    # are fine since domain randomization still differs per env. If nothing
+                    # was ever accepted, fall back to an arbitrary candidate from the pool.
+                    if bad_envs.shape[0] > 0:
+                        if len(accepted_start_q) > 0:
+                            store = {key: torch.cat(vals, dim=0) for key, vals in accepted_store.items()}
+                            store_q = torch.cat(accepted_start_q, dim=0)
+                            pick = torch.randint(store_q.shape[0], (bad_envs.shape[0],), device=self.device)
+                            self._assign_params_to_envs(bad_envs, store, pick)
+                            start_arm_q[bad_envs] = store_q[pick]
+                        elif containment_enabled:
+                            raise RuntimeError(
+                                "No trajectory satisfied init.ee_containment_box after "
+                                f"{cfg.max_reach_attempts} reachability attempts"
+                            )
+                        else:
+                            fb = torch.arange(bad_envs.shape[0], device=self.device)
+                            self._assign_params_to_envs(bad_envs, params, fb)
+                            start_arm_q[bad_envs] = cand_start_q[fb]
+                    break
 
         # Discretize the accepted trajectory onto the native reference grid.
         self._build_trajectory_buffer(env_ids)
@@ -2676,16 +3031,33 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.joint_vel[env_ids] = 0.0
         self.joint_vel[env_ids, 0:7] = start_arm_vel
         self.ctrl_target_joint_pos[env_ids] = self.joint_pos[env_ids]
-        self._robot.write_joint_state_to_sim(self.joint_pos, self.joint_vel)
-        self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
-        self._robot.set_joint_effort_target(torch.zeros_like(self.joint_pos))
+        self._robot.write_joint_state_to_sim(
+            self.joint_pos[env_ids], self.joint_vel[env_ids], env_ids=env_ids
+        )
+        self._robot.set_joint_position_target(
+            self.ctrl_target_joint_pos[env_ids], env_ids=env_ids
+        )
+        self._robot.set_joint_effort_target(
+            torch.zeros_like(self.joint_pos[env_ids]), env_ids=env_ids
+        )
         reset_joint_pos = self.joint_pos[env_ids].clone()
         reset_joint_vel = self.joint_vel[env_ids].clone()
-        self.step_sim_no_action()
         reset_perturbed = bool(q_noise or qd_noise) and (
             reset_noise_prob > 0.0
         )
-        if self._uses_recorded_dataset_reset() or reset_perturbed:
+        partial_dataset_reset = (
+            self._dataset_async_reset_enabled and len(env_ids) < self.num_envs
+        )
+        if partial_dataset_reset:
+            # The selected dataset joints are already written directly to PhysX.
+            # Refresh tensor views without advancing the other environments.
+            self.scene.update(dt=0.0)
+            self._compute_intermediate_values()
+        else:
+            self.step_sim_no_action()
+        if not partial_dataset_reset and (
+            self._uses_recorded_dataset_reset() or reset_perturbed
+        ):
             # The refresh step above makes PhysX/Jacobians reflect the sampled
             # configuration, but a nonzero qdot also advances q by one physics
             # step. Restore the exact requested reset state before the first
@@ -2766,6 +3138,48 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         i1 = (i0 + 1).clamp(max=n - 1)
         frac = (tgt - i0.float()).unsqueeze(-1)
         return vec[i0] * (1.0 - frac) + vec[i1] * frac
+
+    def _initialize_dataset_adaptive_sampling(self):
+        """Create SONIC-style flattened bins for variable-length dataset clips."""
+        bin_size_steps = max(
+            1,
+            int(
+                round(
+                    float(self.cfg.tracking.adaptive_phase_bin_size_s)
+                    / self.reference_dt
+                )
+            ),
+        )
+        valid_step_weighting = bool(
+            self.cfg.tracking.adaptive_phase_valid_step_weighting
+        ) and not self._dataset_async_reset_enabled
+        (
+            self._adaptive_dataset_bin_offsets,
+            self._adaptive_dataset_bins_per_sequence,
+            self._adaptive_dataset_bin_sequence_ids,
+            self._adaptive_dataset_bin_starts,
+            self._adaptive_dataset_bin_ends,
+            self._adaptive_dataset_bin_weights,
+        ) = variable_reference_bin_layout(
+            self._ds_lengths,
+            bin_size_steps=bin_size_steps,
+            sequence_length_agnostic=True,
+            chunk_length=int(self.cfg.tracking.dataset_chunk_length),
+            valid_step_weighting=valid_step_weighting,
+        )
+        self._adaptive_dataset_bin_size_steps = bin_size_steps
+        self._adaptive_phase_num_bins = int(
+            self._adaptive_dataset_bin_sequence_ids.numel()
+        )
+        init_count = float(self.cfg.tracking.adaptive_phase_init_count)
+        self._adaptive_phase_visit_counts = torch.full(
+            (self._adaptive_phase_num_bins,),
+            init_count,
+            device=self.device,
+        )
+        self._adaptive_phase_failure_counts = torch.full_like(
+            self._adaptive_phase_visit_counts, init_count
+        )
 
     def _load_dataset_trajectories(self):
         """Load offline demonstration EE trajectories for ``mode='dataset'``.
@@ -3078,14 +3492,30 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 getattr(tcfg, "dataset_chunk_start_mode", "episode_start")
             )
             if start_mode == "random":
-                lengths = self._ds_lengths[ds_idx]
                 start_sampling = str(
                     getattr(tcfg, "dataset_chunk_start_sampling", "uniform")
                 )
-                if start_sampling == "uniform":
+                if start_sampling == "adaptive":
+                    probabilities = self._adaptive_dataset_probabilities()
+                    pre_failure_window_steps = int(
+                        round(
+                            float(tcfg.adaptive_phase_pre_failure_window_s)
+                            / self.reference_dt
+                        )
+                    )
+                    ds_idx, ds_start = sample_variable_reference_starts(
+                        probabilities,
+                        self._adaptive_dataset_bin_sequence_ids,
+                        self._adaptive_dataset_bin_starts,
+                        self._adaptive_dataset_bin_ends,
+                        num_samples=m,
+                        pre_failure_window_steps=pre_failure_window_steps,
+                    )
+                elif start_sampling == "uniform":
                     # Every raw timestep is a valid reset point. History lookup
                     # repeats sample zero when t < H, while reference lookup
                     # repeats the final sample when the chunk reaches the tail.
+                    lengths = self._ds_lengths[ds_idx]
                     ds_start = torch.floor(
                         torch.rand(m, device=self.device) * lengths.float()
                     ).long()
@@ -3099,6 +3529,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                     # acceptance preserve late-task starts but suppress heavily
                     # padded windows. Since most proposals have full weight, the
                     # loop normally completes in one or two passes.
+                    lengths = self._ds_lengths[ds_idx]
                     ds_start = torch.zeros(m, dtype=torch.long, device=self.device)
                     pending = torch.ones(m, dtype=torch.bool, device=self.device)
                     while torch.any(pending):
@@ -3122,8 +3553,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                         pending[accepted_idx] = False
                 else:
                     raise ValueError(
-                        "tracking.dataset_chunk_start_sampling must be 'uniform' "
-                        f"or 'valid_steps', got {start_sampling!r}"
+                        "tracking.dataset_chunk_start_sampling must be 'uniform', "
+                        f"'valid_steps', or 'adaptive', got {start_sampling!r}"
                     )
             elif start_mode == "episode_start":
                 ds_start = torch.zeros(m, dtype=torch.long, device=self.device)
@@ -3460,7 +3891,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             )
             params["omega"] = omega * direction_sign
             start_time_lo, start_time_hi = tcfg.circle_start_time_range
-            if tcfg.circle_start_time_sampling == "valid_steps":
+            if start_time_lo == start_time_hi:
+                params["start_time"] = torch.full(
+                    (m, 1), float(start_time_lo), device=device
+                )
+            elif tcfg.circle_start_time_sampling == "valid_steps":
                 # Sample with density proportional to the amount of the episode
                 # that precedes terminal reference padding:
                 #
@@ -3476,6 +3911,22 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                     start_time_hi=start_time_hi,
                     reference_duration=tcfg.circle_reference_duration_s,
                     episode_duration=self.max_episode_length_s,
+                )
+            elif tcfg.circle_start_time_sampling == "adaptive":
+                probabilities = self._adaptive_phase_probabilities(
+                    start_time_lo=start_time_lo,
+                    start_time_hi=start_time_hi,
+                )
+                params["start_time"] = sample_adaptive_phase_start_times(
+                    probabilities,
+                    num_samples=m,
+                    bin_size_s=tcfg.adaptive_phase_bin_size_s,
+                    start_time_lo=start_time_lo,
+                    start_time_hi=start_time_hi,
+                    reference_duration=tcfg.circle_reference_duration_s,
+                    pre_failure_window_s=(
+                        tcfg.adaptive_phase_pre_failure_window_s
+                    ),
                 )
             else:
                 params["start_time"] = start_time_lo + (
@@ -5068,7 +5519,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         return pos_error, rot_error
 
     def _accumulate_contact_split_metrics(
-        self, pos_error_norm: torch.Tensor, rot_error_norm: torch.Tensor, successes: torch.Tensor
+        self,
+        pos_error_norm: torch.Tensor,
+        rot_error_norm: torch.Tensor,
+        successes: torch.Tensor,
+        env_mask: torch.Tensor | None = None,
     ):
         """Accumulate tracking error/success split by free-space vs contact steps.
 
@@ -5077,7 +5532,13 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         accumulators with their own counts, so the logged scalar is the mean over
         all (env, step) samples of that category in the running window.
         """
-        contact = self.current_contact
+        if env_mask is not None:
+            pos_error_norm = pos_error_norm[env_mask]
+            rot_error_norm = rot_error_norm[env_mask]
+            successes = successes[env_mask]
+            contact = self.current_contact[env_mask]
+        else:
+            contact = self.current_contact
         free = ~contact
         succ_f = successes.float()
 
@@ -5100,13 +5561,22 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.extras["success_contact"] = self._track_contact_succ_sum / contact_n
         self.extras["contact_fraction"] = contact.float().mean()
 
-    def _accumulate_perstep_error(self, pos_error_norm: torch.Tensor, rot_error_norm: torch.Tensor):
+    def _accumulate_perstep_error(
+        self,
+        pos_error_norm: torch.Tensor,
+        rot_error_norm: torch.Tensor,
+        env_mask: torch.Tensor | None = None,
+    ):
         """Bin tracking error by native reference index and log it periodically."""
         if self._perstep_log_every <= 0:
             return
         step_idx = self._policy_step_to_reference_index(
             self.episode_length_buf
         ).clamp(0, self._perstep_num_bins - 1)
+        if env_mask is not None:
+            step_idx = step_idx[env_mask]
+            pos_error_norm = pos_error_norm[env_mask]
+            rot_error_norm = rot_error_norm[env_mask]
         self._perstep_pos_sum.index_add_(0, step_idx, pos_error_norm)
         self._perstep_pos_sqsum.index_add_(0, step_idx, pos_error_norm.square())
         self._perstep_rot_sum.index_add_(0, step_idx, rot_error_norm)
@@ -5178,17 +5648,20 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         wandb.log({"tracking/perstep_error_profile": wandb.Image(fig)})
         plt.close(fig)
 
-    def _accumulate_gain_stats(self):
+    def _accumulate_gain_stats(self, env_mask: torch.Tensor | None = None):
         """Accumulate per-step policy-scheduled PD gains and log stats periodically."""
         if not self.cfg.ctrl.control_gains or self._perstep_log_every <= 0:
             return
         gains = self.task_prop_gains.detach()
+        contact = self.current_contact
+        if env_mask is not None:
+            gains = gains[env_mask]
+            contact = contact[env_mask]
         self._gain_sum += gains.sum(dim=0)
         self._gain_sqsum += gains.square().sum(dim=0)
         self._gain_count += gains.shape[0]
 
         if self.enable_force:
-            contact = self.current_contact
             free = ~contact
             self._gain_free_sum += gains[free].sum(dim=0)
             self._gain_free_sqsum += gains[free].square().sum(dim=0)
@@ -5295,6 +5768,45 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         for key, episodic_sum in self._episode_sums.items():
             self.extras["log"][f"Episode_Reward/{key}"] = torch.mean(episodic_sum[env_ids]) / self.max_episode_length_s
             episodic_sum[env_ids] = 0.0
+        if self._adaptive_phase_enabled:
+            failure_rate = (
+                self._adaptive_phase_failure_counts
+                / self._adaptive_phase_visit_counts
+            )
+            self.extras["log"]["AdaptivePhase/failure_rate_mean"] = (
+                failure_rate.mean()
+            )
+            self.extras["log"]["AdaptivePhase/failure_rate_max"] = (
+                failure_rate.max()
+            )
+            if self.cfg.tracking.mode == "dataset":
+                self.extras["log"]["AdaptivePhase/start_time_mean_s"] = (
+                    self.traj_ds_start[env_ids].float().mean()
+                    * self.reference_dt
+                )
+                probabilities = self._adaptive_dataset_probabilities()
+            else:
+                self.extras["log"]["AdaptivePhase/start_time_mean_s"] = (
+                    self.traj_start_time[env_ids].mean()
+                )
+                start_time_lo, start_time_hi = (
+                    self.cfg.tracking.circle_start_time_range
+                )
+                probabilities = None
+                if start_time_lo < start_time_hi:
+                    probabilities = self._adaptive_phase_probabilities(
+                        start_time_lo=start_time_lo,
+                        start_time_hi=start_time_hi,
+                    )
+            if probabilities is not None:
+                entropy = -(
+                    probabilities
+                    * probabilities.clamp_min(torch.finfo(probabilities.dtype).tiny).log()
+                ).sum()
+                self.extras["log"]["AdaptivePhase/sampling_entropy"] = entropy
+                self.extras["log"]["AdaptivePhase/max_probability"] = (
+                    probabilities.max()
+                )
         if self._collect_ee_derivative_analytics:
             diagnostics = self._episode_ee_derivative_diagnostics
             duration = float(self.max_episode_length_s)

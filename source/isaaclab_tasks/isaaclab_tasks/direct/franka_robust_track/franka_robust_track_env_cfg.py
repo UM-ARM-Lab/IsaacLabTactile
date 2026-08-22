@@ -156,12 +156,31 @@ class TrackingCfg:
     circle_start_time_range = [0.0, 0.0]  # s
     # Sampling distribution within circle_start_time_range. ``uniform`` keeps
     # the historical behavior. ``valid_steps`` weights each start by the
-    # non-padded portion of one training episode, so starts near the finite
-    # reference tail remain possible without over-representing terminal holds.
-    circle_start_time_sampling: str = "uniform"  # uniform, valid_steps
+    # non-padded portion of one training episode. ``adaptive`` uses online
+    # strict-tracking failure rates in temporal bins, with the same valid-step
+    # weighting available to avoid over-representing terminal holds.
+    circle_start_time_sampling: str = "uniform"  # uniform, valid_steps, adaptive
+    adaptive_phase_bin_size_s: float = 1.0
+    adaptive_phase_uniform_rate: float = 0.1
+    adaptive_phase_failure_rate_max_over_mean: float = 50.0
+    adaptive_phase_max_probability_multiplier: float = 50.0
+    adaptive_phase_pre_failure_window_s: float = 1.0
+    adaptive_phase_init_count: float = 1.0
+    adaptive_phase_valid_step_weighting: bool = True
     # Finite source-clip duration. References beyond this time hold the final
     # pose, matching the padded-tail behavior of fixed-length dataset clips.
     circle_reference_duration_s: float = 10.0
+
+    # Presampled analytic circles. When set, circle mode stops drawing and
+    # IK-checking a fresh trajectory at every reset and instead draws one of the
+    # trajectories in this dataset, which was generated offline by
+    # `scripts/presample_robust_track_circle_dataset.py` under exactly the gates
+    # `init.*` describes. The dataset stores up to K distinct start IK branches per
+    # trajectory (the redundancy the online sampler got for free from unseeded IK),
+    # so a reset draws a trajectory *and* one of its valid branches. Empty keeps
+    # the historical on-the-fly sampling.
+    circle_presampled_path: str = ""
+    circle_presampled_split: str = "train"
     # Optional trajectory-buffer capacity independent of the training episode.
     # Short-episode policies set this to the full reference duration so periodic
     # evaluation can run one continuous full trajectory without reallocating the
@@ -219,13 +238,17 @@ class TrackingCfg:
     # valid raw timestep equal probability. ``valid_steps`` weights a start by
     # min(dataset_chunk_length, remaining episode samples), retaining late-task
     # starts while reducing over-representation of terminal tail padding.
-    dataset_chunk_start_sampling: str = "uniform"  # uniform, valid_steps
+    dataset_chunk_start_sampling: str = "uniform"  # uniform, valid_steps, adaptive
     # Training chunk length in native reference poses. When positive, raw dataset
     # samples retain their original indices. The start mode selects sample zero or
     # a random timestep over the entire episode. Missing lead-in history repeats
     # the first sample; a chunk extending past the episode repeats its final sample.
     # Zero keeps the legacy resampling path for old configs/checkpoint replay.
     dataset_chunk_length: int = 0
+    # Opt-in asynchronous reset mode for random dataset chunks. Each environment
+    # resets at its last valid reference sample, so repeated terminal padding is
+    # never executed. Other reference modes retain synchronized fixed-length runs.
+    dataset_async_reset: bool = False
     # Optional replay-only resampling length. A runtime timeout may be extended
     # to expose the final post-step state without changing the saved reference
     # grid. If this is shorter than the runtime trajectory buffer, the last
@@ -948,7 +971,16 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "circle_speed_range",
             "circle_start_time_range",
             "circle_start_time_sampling",
+            "adaptive_phase_bin_size_s",
+            "adaptive_phase_uniform_rate",
+            "adaptive_phase_failure_rate_max_over_mean",
+            "adaptive_phase_max_probability_multiplier",
+            "adaptive_phase_pre_failure_window_s",
+            "adaptive_phase_init_count",
+            "adaptive_phase_valid_step_weighting",
             "circle_reference_duration_s",
+            "circle_presampled_path",
+            "circle_presampled_split",
             "reference_buffer_duration_s",
             "rot_speed_range",
             "rot_angle_range",
@@ -966,6 +998,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "dataset_chunk_start_mode",
             "dataset_chunk_start_sampling",
             "dataset_chunk_length",
+            "dataset_async_reset",
             "dataset_reference_length",
             "dataset_warp_strategy",
             "dataset_warp_prob",
@@ -1222,19 +1255,77 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
         self.tracking.circle_start_time_sampling = str(
             self.tracking.circle_start_time_sampling
         )
-        if self.tracking.circle_start_time_sampling not in ("uniform", "valid_steps"):
+        if self.tracking.circle_start_time_sampling not in (
+            "uniform",
+            "valid_steps",
+            "adaptive",
+        ):
             raise ValueError(
-                "tracking.circle_start_time_sampling must be 'uniform' or "
-                f"'valid_steps', got {self.tracking.circle_start_time_sampling!r}"
+                "tracking.circle_start_time_sampling must be 'uniform', "
+                "'valid_steps', or 'adaptive', got "
+                f"{self.tracking.circle_start_time_sampling!r}"
             )
+        if float(self.tracking.adaptive_phase_bin_size_s) <= 0.0:
+            raise ValueError("tracking.adaptive_phase_bin_size_s must be positive")
+        if not 0.0 <= float(self.tracking.adaptive_phase_uniform_rate) <= 1.0:
+            raise ValueError(
+                "tracking.adaptive_phase_uniform_rate must be in [0, 1]"
+            )
+        if float(self.tracking.adaptive_phase_failure_rate_max_over_mean) <= 0.0:
+            raise ValueError(
+                "tracking.adaptive_phase_failure_rate_max_over_mean must be positive"
+            )
+        if float(self.tracking.adaptive_phase_max_probability_multiplier) <= 0.0:
+            raise ValueError(
+                "tracking.adaptive_phase_max_probability_multiplier must be positive"
+            )
+        if float(self.tracking.adaptive_phase_pre_failure_window_s) < 0.0:
+            raise ValueError(
+                "tracking.adaptive_phase_pre_failure_window_s must be nonnegative"
+            )
+        if float(self.tracking.adaptive_phase_init_count) <= 0.0:
+            raise ValueError("tracking.adaptive_phase_init_count must be positive")
         self.tracking.dataset_chunk_start_sampling = str(
             self.tracking.dataset_chunk_start_sampling
         )
-        if self.tracking.dataset_chunk_start_sampling not in ("uniform", "valid_steps"):
+        if self.tracking.dataset_chunk_start_sampling not in (
+            "uniform",
+            "valid_steps",
+            "adaptive",
+        ):
             raise ValueError(
-                "tracking.dataset_chunk_start_sampling must be 'uniform' or "
-                f"'valid_steps', got {self.tracking.dataset_chunk_start_sampling!r}"
+                "tracking.dataset_chunk_start_sampling must be 'uniform', "
+                "'valid_steps', or 'adaptive', got "
+                f"{self.tracking.dataset_chunk_start_sampling!r}"
             )
+        if self.tracking.dataset_chunk_start_sampling == "adaptive":
+            if self.tracking.mode != "dataset":
+                raise ValueError(
+                    "tracking.dataset_chunk_start_sampling='adaptive' requires "
+                    "tracking.mode='dataset'"
+                )
+            if int(self.tracking.dataset_chunk_length) <= 0:
+                raise ValueError(
+                    "adaptive dataset sampling requires a positive dataset_chunk_length"
+                )
+            if self.tracking.dataset_chunk_start_mode != "random":
+                raise ValueError(
+                    "adaptive dataset sampling requires dataset_chunk_start_mode='random'"
+                )
+        self.tracking.dataset_async_reset = bool(self.tracking.dataset_async_reset)
+        if self.tracking.dataset_async_reset:
+            if self.tracking.mode != "dataset":
+                raise ValueError(
+                    "tracking.dataset_async_reset is only supported for dataset references"
+                )
+            if int(self.tracking.dataset_chunk_length) <= 0:
+                raise ValueError(
+                    "tracking.dataset_async_reset requires a positive dataset_chunk_length"
+                )
+            if self.tracking.dataset_chunk_start_mode != "random":
+                raise ValueError(
+                    "tracking.dataset_async_reset requires dataset_chunk_start_mode='random'"
+                )
         self.tracking.reference_decimation = int(
             self.tracking.reference_decimation
         )
