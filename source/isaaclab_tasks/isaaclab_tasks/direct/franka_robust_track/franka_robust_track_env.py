@@ -2155,7 +2155,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 proprio, _, _, _ = self._compute_obs_parts()
                 self.proprio_history[env_ids] = proprio[env_ids].unsqueeze(1)
 
-        # Wall-clock cost of the reset, dominated by the cuRobo reachability search.
+        # Wall-clock reset cost; analytic trajectories are dominated by cuRobo,
+        # while recorded dataset chunks bypass the IK worker.
         reset_time = time.perf_counter() - reset_start
         self.extras["log"]["Timing/reset_time_s"] = torch.tensor(reset_time, device=self.device)
         self.extras["log"]["Timing/reachability_sample_time_s"] = torch.tensor(
@@ -2382,13 +2383,14 @@ class FrankaRobustTrackEnv(DirectRLEnv):
     def _sample_reachable_start_and_trajectory(self, env_ids: torch.Tensor):
         """Sample a start pose + trajectory per env, keeping only continuously reachable ones.
 
-        Because the reachability + continuity check rejects many samples, each env
+        Because the reachability + continuity check rejects many analytic samples, each env
         is *oversampled*: `init.reach_oversample` independent candidate trajectories
         are drawn per pending env and evaluated together. For every candidate we
-        walk the `reach_check_waypoints` waypoints (spanning the moving trajectory
-        or dataset chunk) from first to last, solving cuRobo IK one waypoint at a
-        time and seeding from the previous solution. Dataset chunks use recorded
-        q[t] directly for the first waypoint. A candidate is accepted only if every
+        walk the `reach_check_waypoints` waypoints spanning the moving trajectory
+        from first to last, solving cuRobo IK one waypoint at a time and seeding
+        from the previous solution. Dataset chunks bypass cuRobo entirely: their
+        recorded joints are already the known joint solution for every waypoint.
+        An analytic candidate is accepted only if every
         waypoint is
         reachable (IK success within `reach_pos_tol`/`reach_rot_tol`) *and*
         consecutive joint solutions never jump by more than
@@ -2399,7 +2401,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         """
         cfg = self.cfg.init
         num_wp = cfg.reach_check_waypoints
-        k = max(1, int(cfg.reach_oversample))
+        recorded_dataset_reset = self._uses_recorded_dataset_reset()
+        # A recorded dataset sample is already a reachable joint-space trajectory;
+        # there is no reason to oversample it or reconstruct it with IK.
+        k = 1 if recorded_dataset_reset else max(1, int(cfg.reach_oversample))
         # Singularity filter (getattr keeps old restored env.pkl configs working:
         # absent -> disabled). A waypoint config is rejected when its geometric-
         # Jacobian manipulability is too low or its condition number too high.
@@ -2476,7 +2481,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                         pos_i, containment_box
                     )
             recorded_start_q = None
-            if self._uses_recorded_dataset_reset():
+            if recorded_dataset_reset:
                 recorded_start_q = self._ds_joint_pos[
                     params["ds_idx"], params["ds_start"]
                 ]
@@ -2500,30 +2505,46 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                     prev_q = recorded_start_q
                     prev_success = torch.ones_like(reach_ok)
                     continue
-                elapsed_time = torch.full((n_bad * k, 1), waypoint_times[i].item(), device=self.device)
-                pos_i, quat_i = self._eval_pose_from_params(params, elapsed_time)
-                if prev_q is not None:
-                    seed = prev_q.unsqueeze(1)
-                elif reset_seed is not None:
-                    # First waypoint: seed from reset_joints (does not set prev_q, so
-                    # the i==0 continuity check stays skipped as before).
-                    seed = reset_seed.unsqueeze(0).expand(n_bad * k, 7).unsqueeze(1)
+                if recorded_start_q is not None:
+                    # Use the demonstration's known joint solution at every checked
+                    # waypoint. Clamp padded chunks to their final valid sample.
+                    relative_idx = int(
+                        round(float(waypoint_times[i].item()) / self.reference_dt)
+                    )
+                    source_idx = torch.minimum(
+                        params["ds_start"] + relative_idx,
+                        self._ds_lengths[params["ds_idx"]] - 1,
+                    )
+                    arm_q = self._ds_joint_pos[params["ds_idx"], source_idx]
+                    success = torch.ones_like(reach_ok)
+                    manip = torch.full_like(reach_ok, float("inf"), dtype=torch.float32)
+                    cond = torch.zeros_like(reach_ok, dtype=torch.float32)
                 else:
-                    seed = None
-                success, arm_q, manip, cond = self._solve_curobo_ik(
-                    pos_i.unsqueeze(1), quat_i.unsqueeze(1), cand_env_ids, seed_arm_q=seed
-                )
-                success = success[:, 0]
-                arm_q = arm_q[:, 0]
+                    elapsed_time = torch.full((n_bad * k, 1), waypoint_times[i].item(), device=self.device)
+                    pos_i, quat_i = self._eval_pose_from_params(params, elapsed_time)
+                    if prev_q is not None:
+                        seed = prev_q.unsqueeze(1)
+                    elif reset_seed is not None:
+                        # First waypoint: seed from reset_joints (does not set prev_q, so
+                        # the i==0 continuity check stays skipped as before).
+                        seed = reset_seed.unsqueeze(0).expand(n_bad * k, 7).unsqueeze(1)
+                    else:
+                        seed = None
+                    success, arm_q, manip, cond = self._solve_curobo_ik(
+                        pos_i.unsqueeze(1), quat_i.unsqueeze(1), cand_env_ids, seed_arm_q=seed
+                    )
+                    success = success[:, 0]
+                    arm_q = arm_q[:, 0]
                 reach_ok &= success
-                if sing_check:
+                if sing_check and recorded_start_q is None:
                     # Only gate reachable waypoints (unreachable ones already reject
                     # the candidate and carry meaningless IK solutions).
                     wp_sing_ok = (manip[:, 0] >= min_manip) & (cond[:, 0] <= max_cond)
                     sing_ok &= wp_sing_ok | ~success
                 if prev_q is not None:
                     joint_diff = (arm_q - prev_q).abs()  # (n*k, 7)
-                    cont_ok &= joint_diff.amax(dim=-1) <= cfg.reach_joint_diff_threshold
+                    if recorded_start_q is None:
+                        cont_ok &= joint_diff.amax(dim=-1) <= cfg.reach_joint_diff_threshold
                     # Only count transitions where both endpoints were reachable.
                     both_ok = prev_success & success
                     joint_jump_sum += joint_diff[both_ok].sum(dim=0)
