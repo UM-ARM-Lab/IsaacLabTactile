@@ -517,7 +517,15 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.num_envs, 1
         )
         self.task_prop_gains = self.default_gains.clone()
-        self.task_deriv_gains = factory_utils.get_deriv_gains(self.task_prop_gains)
+        self.control_gain_damping_ratio = torch.full(
+            (self.num_envs, 1),
+            float(self.cfg.ctrl.control_gain_damping_ratio),
+            device=self.device,
+        )
+        self.task_deriv_gains = (
+            self.control_gain_damping_ratio
+            * factory_utils.get_deriv_gains(self.task_prop_gains)
+        )
         # Bounds the policy-scheduled proportional gains are mapped into when
         # ctrl.control_gains is enabled (normalized action [-1, 1] -> [min, max]).
         self.gain_min = torch.tensor(self.cfg.ctrl.task_prop_gains_min, device=self.device).repeat(self.num_envs, 1)
@@ -1214,8 +1222,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         """Map the gain action suffix to task PD gains when gain control is on.
 
         Gain actions are clamped to [-1, 1] and affinely mapped onto
-        [gain_min, gain_max]; the derivative gains are recomputed for critical
-        damping. No-op when `ctrl.control_gains` is False.
+        [gain_min, gain_max]; derivative gains use the per-environment damping
+        ratio sampled at reset. No-op when `ctrl.control_gains` is False.
         """
         if not self.cfg.ctrl.control_gains:
             return
@@ -1225,7 +1233,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         normalized = 0.5 * (gain_actions + 1.0)
         self.task_prop_gains = self.gain_min + (self.gain_max - self.gain_min) * normalized
         self.task_deriv_gains = (
-            float(self.cfg.ctrl.control_gain_damping_ratio)
+            self.control_gain_damping_ratio
             * factory_utils.get_deriv_gains(self.task_prop_gains)
         )
 
@@ -4890,7 +4898,14 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             zeta = low + (high - low) * torch.rand(
                 (env_ids.numel(), 1), device=self.device
             )
-            deriv_gains = deriv_gains * zeta
+        else:
+            zeta = torch.full(
+                (env_ids.numel(), 1),
+                float(self.cfg.ctrl.control_gain_damping_ratio),
+                device=self.device,
+            )
+        self.control_gain_damping_ratio[env_ids] = zeta
+        deriv_gains = deriv_gains * zeta
         self.task_deriv_gains[env_ids] = deriv_gains
 
     def _sample_scaled_per_joint(
