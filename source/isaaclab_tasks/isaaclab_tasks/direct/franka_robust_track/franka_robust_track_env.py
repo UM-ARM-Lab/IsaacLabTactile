@@ -1910,6 +1910,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                     1000.0 * self.virtual_contact_surface_offset.mean()
                 )
 
+        startup_smoothness_multiplier = 1.0 + (
+            self.cfg.reward.startup_smoothness_multiplier - 1.0
+        ) * (
+            self.episode_length_buf < self.cfg.reward.startup_smoothness_steps
+        ).float(
+        )
         rewards = {
             "pos_track": torch.exp(-pos_error_norm / self.cfg.reward.pos_error_temp) * self.cfg.reward.pos_error_scale,
             "rot_track": torch.exp(-rot_error_norm / self.cfg.reward.rot_error_temp) * self.cfg.reward.rot_error_scale,
@@ -1922,15 +1928,27 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 * self.cfg.reward.fine_rot_error_scale
             ),
             "ee_vel": ee_vel_norm * self.cfg.reward.ee_vel_scale,
-            "ee_accel": ee_accel_norm * self.cfg.reward.ee_accel_scale,
-            "ee_jerk": ee_jerk_norm * self.cfg.reward.ee_jerk_scale,
+            "ee_accel": (
+                ee_accel_norm
+                * self.cfg.reward.ee_accel_scale
+                * startup_smoothness_multiplier
+            ),
+            "ee_jerk": (
+                ee_jerk_norm
+                * self.cfg.reward.ee_jerk_scale
+                * startup_smoothness_multiplier
+            ),
             "ee_angular_accel": (
                 ee_angular_accel_cost * self.cfg.reward.ee_angular_accel_scale
             ),
             "ee_angular_jerk": (
                 ee_angular_jerk_cost * self.cfg.reward.ee_angular_jerk_scale
             ),
-            "action_rate": action_rate * self.cfg.reward.action_rate_scale,
+            "action_rate": (
+                action_rate
+                * self.cfg.reward.action_rate_scale
+                * startup_smoothness_multiplier
+            ),
             "action_alternation": (
                 action_alternation * self.cfg.reward.action_alternation_scale
             ),

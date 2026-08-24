@@ -611,6 +611,10 @@ class RewardCfg:
     ee_accel_clip: float = 0.025  # cap or linear residual-Huber normalizer
     ee_jerk_scale: float = -10.0
     ee_jerk_clip: float = 0.1  # cap or linear residual-Huber normalizer
+    # Optionally emphasize the existing motion penalties while the observation
+    # history is filling at the start of an episode.
+    startup_smoothness_steps: int = 0
+    startup_smoothness_multiplier: float = 1.0
     ee_angular_accel_scale: float = 0.0
     ee_angular_jerk_scale: float = 0.0
     ee_angular_accel_huber_normalizer: float = 1.0  # rad/s^2
