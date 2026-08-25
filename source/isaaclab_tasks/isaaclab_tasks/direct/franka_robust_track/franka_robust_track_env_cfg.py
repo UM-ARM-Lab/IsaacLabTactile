@@ -16,6 +16,8 @@ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMater
 from isaaclab.utils import configclass
 from omegaconf import OmegaConf
 
+from force_tool.policy.control_gain_actions import control_gain_action_dim
+
 from isaaclab_tasks.direct.factory.factory_tasks_cfg import ASSET_DIR
 
 
@@ -96,10 +98,10 @@ class CtrlCfg:
     # normalized [-1, 1] range onto [task_prop_gains_min, task_prop_gains_max].
     # The derivative gains are recomputed from the commanded proportional gains
     # each step. If False, gains stay at `default_task_prop_gains` (plus optional
-    # reset-time noise). This grows the action space by 6.
+    # reset-time noise).
     control_gains: bool = False
     # "per_axis" preserves the historical six gain actions; "scalar" uses one
-    # action and applies the same scheduled Kp to all six task-space axes.
+    # shared action; "trans_rot" uses separate translation and rotation actions.
     control_gain_action_mode: str = "per_axis"
     control_gain_damping_ratio: float = 0.75
     task_prop_gains_min = [100.0, 100.0, 100.0, 10.0, 10.0, 10.0]
@@ -1526,13 +1528,9 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
         self.robot.spawn.usd_path = f"{ASSET_DIR}/{self.robot_usd_path}"
         self.sim.render_interval = self.decimation
 
-        gain_action_mode = str(self.ctrl.control_gain_action_mode)
-        if gain_action_mode not in ("scalar", "per_axis"):
-            raise ValueError(
-                "ctrl.control_gain_action_mode must be 'scalar' or 'per_axis', "
-                f"got {gain_action_mode!r}"
-            )
-        gain_action_dim = 1 if gain_action_mode == "scalar" else 6
+        gain_action_dim = control_gain_action_dim(
+            str(self.ctrl.control_gain_action_mode)
+        )
         # Action space: 6 Cartesian delta-pose dims plus optional gain scheduling.
         action_dim = 6 + (gain_action_dim if self.ctrl.control_gains else 0)
         self.action_space = action_dim

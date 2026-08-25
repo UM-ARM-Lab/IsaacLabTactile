@@ -12,6 +12,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+from force_tool.policy.control_gain_actions import expand_control_gain_actions
 from force_tool.utils.action_penalties import (
     action_alternation_penalty,
     action_curvature_huber_penalty,
@@ -1235,8 +1236,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         if not self.cfg.ctrl.control_gains:
             return
         gain_actions = self.actions[:, 6:].clamp(-1.0, 1.0)
-        if str(self.cfg.ctrl.control_gain_action_mode) == "scalar":
-            gain_actions = gain_actions.expand(-1, 6)
+        gain_actions = expand_control_gain_actions(
+            gain_actions, str(self.cfg.ctrl.control_gain_action_mode)
+        )
         normalized = 0.5 * (gain_actions + 1.0)
         self.task_prop_gains = self.gain_min + (self.gain_max - self.gain_min) * normalized
         self.task_deriv_gains = (
