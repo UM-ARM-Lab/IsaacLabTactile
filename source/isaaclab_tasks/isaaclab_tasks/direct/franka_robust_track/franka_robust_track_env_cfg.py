@@ -116,6 +116,9 @@ class CtrlCfg:
     #   "start"          -> each env's own cuRobo start-pose IK solution (per-env; default)
     #   "reset_joints"   -> the fixed `reset_joints` config (collection-branch posture)
     #   "default_dof_pos"-> the fixed `default_dof_pos_tensor` (matches factory/forge)
+    #   "current"        -> latest joints at every physics substep (legacy)
+    #   "current_policy_hold" -> joints sampled before physics substep 1 of each
+    #                            policy prediction and held across decimation
     # Fixed anchors give a consistent arm posture instead of whatever IK branch each
     # sampled trajectory happens to land on.
     nullspace_posture: str = "start"

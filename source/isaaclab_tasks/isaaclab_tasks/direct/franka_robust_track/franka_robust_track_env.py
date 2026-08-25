@@ -310,6 +310,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.nominal_start_joint_pos = torch.tensor(
             self.cfg.ctrl.reset_joints, device=self.device
         ).repeat(self.num_envs, 1)
+        # Sample-and-hold target used by ctrl.nullspace_posture="current_policy_hold".
+        # It is captured at each policy boundary and held through every physics substep.
+        self._current_nullspace_joint_target = self.nominal_start_joint_pos.clone()
 
         # cuRobo IK runs in a persistent subprocess (avoids a warp/PhysX GPU clash);
         # the worker + cached kinematic frames are set up lazily on first reset.
@@ -1026,6 +1029,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._physics_substep_in_policy = 0
+        if self.cfg.ctrl.nullspace_posture == "current_policy_hold":
+            # Capture the joints before substep 1 and hold this target for the
+            # full policy decimation interval (eight substeps at 200/25 Hz).
+            self._current_nullspace_joint_target.copy_(self.joint_pos[:, :7])
         if (
             self._target_update_delay_randomized
             and self._target_update_delay_sampling_mode == "per_step"
@@ -1252,6 +1259,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         return target_pos, target_quat
 
     def _apply_factory_control(self, target_pos: torch.Tensor, target_quat: torch.Tensor):
+        nullspace_joint_target = self.nominal_start_joint_pos
+        if self.cfg.ctrl.nullspace_posture == "current":
+            nullspace_joint_target = self.joint_pos[:, :7]
+        elif self.cfg.ctrl.nullspace_posture == "current_policy_hold":
+            nullspace_joint_target = self._current_nullspace_joint_target
         self.joint_torque, self.applied_wrench = factory_control.compute_dof_torque(
             cfg=self.cfg,
             dof_pos=self.joint_pos,
@@ -1267,7 +1279,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             task_prop_gains=self.task_prop_gains,
             task_deriv_gains=self.task_deriv_gains,
             device=self.device,
-            nullspace_joint_target=self.nominal_start_joint_pos,
+            nullspace_joint_target=nullspace_joint_target,
             apply_task_inertia=self.cfg.ctrl.use_task_space_inertia,
             use_singularity_robust_inverse=(
                 self.cfg.ctrl.singularity_robust_inverse
@@ -3042,7 +3054,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # Anchor the OSC nullspace posture. "start" uses each env's own cuRobo start
         # config (per-env); "reset_joints"/"default_dof_pos" use a fixed posture so the
         # redundancy resolution biases toward a consistent config (factory/forge use a
-        # fixed anchor -> "default_dof_pos" matches them exactly).
+        # fixed anchor -> "default_dof_pos" matches them exactly). "current" uses a
+        # policy-boundary sample-and-hold target captured in _pre_physics_step when
+        # "current_policy_hold" is selected. Legacy "current" follows every substep.
         posture = getattr(self.cfg.ctrl, "nullspace_posture", "start")
         if posture == "reset_joints":
             self.nominal_start_joint_pos[env_ids] = torch.tensor(self.cfg.ctrl.reset_joints, device=self.device)
@@ -3052,6 +3066,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             )
         else:
             self.nominal_start_joint_pos[env_ids] = start_arm_q[env_ids]
+        self._current_nullspace_joint_target[env_ids] = self.joint_pos[env_ids, :7]
         if self.joint_pos.shape[1] > 7:
             self.joint_pos[env_ids, 7:] = 0.04
         self.joint_vel[env_ids] = 0.0
