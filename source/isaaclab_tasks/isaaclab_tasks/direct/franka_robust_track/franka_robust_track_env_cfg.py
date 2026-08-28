@@ -537,6 +537,11 @@ class RandomizationCfg:
     payload_mass_range = [0.0, 0.5]
     payload_com_range = [[-0.04, 0.04], [-0.04, 0.04], [-0.02, 0.12]]
     payload_body_name: str = "panda_hand"
+    # SysID-only residual wrench terms. Unlike payload domain randomization,
+    # these do not alter rigid-body mass or inertia.
+    residual_payload_mass: float = 0.0
+    residual_payload_first_moment = [0.0, 0.0, 0.0]
+    joint_torque_bias = [0.0] * 7
 
     enable_joint_friction: bool = True
     # Per-joint static Coulomb friction bands, multiplied by one shared arm-wide
@@ -1115,6 +1120,9 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "payload_mass_range",
             "payload_com_range",
             "payload_body_name",
+            "residual_payload_mass",
+            "residual_payload_first_moment",
+            "joint_torque_bias",
             "enable_joint_friction",
             "joint_friction_range",
             "joint_friction_nominal",

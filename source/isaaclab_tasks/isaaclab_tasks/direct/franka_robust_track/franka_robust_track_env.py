@@ -5046,9 +5046,28 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.payload_mass[env_ids] = 0.0
             self.payload_com[env_ids] = 0.0
             self.nominal_com_offsets[env_ids, self.payload_body_idx - 1] = 0.0
-        # First moment is a sys-id residual, not part of payload domain
-        # randomization. Never let a prior replay candidate leak across resets.
-        self.payload_first_moment[env_ids] = 0.0
+        # SysID residual wrench terms stay separate from payload domain
+        # randomization so a signed residual mass never reaches PhysX mass or
+        # inertia properties.
+        residual_mass = float(getattr(rand_cfg, "residual_payload_mass", 0.0))
+        if residual_mass:
+            if rand_cfg.enable_payload:
+                raise ValueError(
+                    "residual_payload_mass cannot be combined with payload "
+                    "domain randomization"
+                )
+            self.payload_mass[env_ids] = residual_mass
+            self.payload_com[env_ids] = 0.0
+        self.payload_first_moment[env_ids] = torch.as_tensor(
+            getattr(rand_cfg, "residual_payload_first_moment", [0.0, 0.0, 0.0]),
+            device=self.device,
+            dtype=torch.float,
+        )
+        self.joint_torque_bias[env_ids] = torch.as_tensor(
+            getattr(rand_cfg, "joint_torque_bias", [0.0] * 7),
+            device=self.device,
+            dtype=torch.float,
+        )
 
         self._robot.root_physx_view.set_masses(masses, env_ids_cpu)
         self._robot.root_physx_view.set_inertias(inertias, env_ids_cpu)
