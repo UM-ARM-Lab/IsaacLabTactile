@@ -532,11 +532,27 @@ class RandomizationCfg:
     link_mass_scale_range = [0.75, 1.25]
 
     enable_payload: bool = True
+    # Legacy mode keeps the fitted payload as a gravity-only residual wrench.
+    # ``rigid_payload`` replaces a declared nominal rigid payload in PhysX and
+    # derives the gravity residual from the fixed Desk model.
+    payload_dynamics_mode: str = "residual_wrench"
     # Uncompensated end-effector payload. The robot hand itself is already
     # represented in the model and compensated by the hardware controller.
     payload_mass_range = [0.0, 0.5]
     payload_com_range = [[-0.04, 0.04], [-0.04, 0.04], [-0.02, 0.12]]
+    # Nonnegative principal second moments [a,b,c], kg*m^2. The physical
+    # diagonal is [b+c,a+c,a+b], which guarantees triangle inequalities.
+    payload_inertia_shape_range = [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
     payload_body_name: str = "panda_hand"
+    # Payload component already embedded in the selected plant model. Rigid
+    # mode subtracts this component before adding a candidate, so payload
+    # properties are replaced rather than double-counted.
+    rigid_payload_nominal_mass: float = 0.0
+    rigid_payload_nominal_com = [0.0, 0.0, 0.0]
+    rigid_payload_nominal_inertia_diag = [0.0, 0.0, 0.0]
+    # Fixed Franka Desk compensation model used during real data collection.
+    rigid_payload_desk_mass: float = 0.0
+    rigid_payload_desk_com = [0.0, 0.0, 0.0]
     # SysID-only residual wrench terms. Unlike payload domain randomization,
     # these do not alter rigid-body mass or inertia.
     residual_payload_mass: float = 0.0
@@ -1117,9 +1133,16 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "enable_link_mass",
             "link_mass_scale_range",
             "enable_payload",
+            "payload_dynamics_mode",
             "payload_mass_range",
             "payload_com_range",
+            "payload_inertia_shape_range",
             "payload_body_name",
+            "rigid_payload_nominal_mass",
+            "rigid_payload_nominal_com",
+            "rigid_payload_nominal_inertia_diag",
+            "rigid_payload_desk_mass",
+            "rigid_payload_desk_com",
             "residual_payload_mass",
             "residual_payload_first_moment",
             "joint_torque_bias",

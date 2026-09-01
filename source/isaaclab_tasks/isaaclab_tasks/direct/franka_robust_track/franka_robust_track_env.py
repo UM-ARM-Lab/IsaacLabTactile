@@ -43,6 +43,13 @@ from .motion_regularization import (
     raw_linear_acceleration_and_jerk_norms,
     residual_huber_motion_costs,
 )
+from .payload_dynamics import (
+    inertia_diag_from_shape,
+    inertia_shape_from_diag,
+    replace_payload_component,
+    residual_gravity_parameters,
+    validate_payload_dynamics_mode,
+)
 from .reference_clock import (
     adaptive_bin_sampling_probabilities,
     adaptive_phase_sampling_probabilities,
@@ -105,6 +112,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
     def __init__(self, cfg: FrankaRobustTrackEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+
+        self.payload_dynamics_mode = validate_payload_dynamics_mode(
+            getattr(self.cfg.randomization, "payload_dynamics_mode", "residual_wrench")
+        )
 
         self.actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self.prev_actions = torch.zeros_like(self.actions)
@@ -541,6 +552,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # Unlike a fitted CoM, h produces the linear gravity moment h x g and
         # remains well-conditioned when the fitted residual mass is zero.
         self.payload_first_moment = torch.zeros((self.num_envs, 3), device=self.device)
+        # Actual rigid payload installed in the PhysX plant. These remain zero
+        # in the historical residual-wrench mode.
+        self.rigid_payload_mass = torch.zeros((self.num_envs, 1), device=self.device)
+        self.rigid_payload_com = torch.zeros((self.num_envs, 3), device=self.device)
+        self.rigid_payload_inertia_diag = torch.zeros((self.num_envs, 3), device=self.device)
         self.gravity_vec = torch.tensor(self.cfg.sim.gravity, device=self.device).repeat(self.num_envs, 1)
         self.link_mass_scales = torch.ones((self.num_envs, self._robot.num_bodies), device=self.device)
         self.joint_friction = torch.zeros((self.num_envs, 7), device=self.device)
@@ -822,6 +838,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             current_coms = self.default_coms[:, 1:, :3].to(self.device)
             urdf_coms = torch.as_tensor(coms, device=self.device, dtype=dtype)
             self.nominal_com_offsets[:] = urdf_coms - current_coms
+        self.controller_nominal_coms = (
+            self.default_coms[:, 1:, :3].to(self.device)
+            + self.nominal_com_offsets
+        )
         # Nominal (config-default) armature the controller's reconstructed mass matrix uses. Cached
         # once so the controller stays blind to the per-env armature randomization written to PhysX
         # in `_randomize_dynamics` (that mismatch is a disturbance the policy must reject).
@@ -4969,6 +4989,113 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         )
         return (per_joint * level).clamp(min=0.0)
 
+    def _install_rigid_payload_in_arrays(
+        self,
+        masses,
+        coms,
+        inertias,
+        env_ids,
+        actual_mass,
+        actual_first_moment,
+        actual_inertia_shape,
+        nominal_scale=1.0,
+    ):
+        """Replace the configured nominal payload and derive Desk residuals."""
+        cfg = self.cfg.randomization
+        env_ids_device = env_ids.to(self.device)
+        count = len(env_ids)
+        actual_mass = torch.as_tensor(
+            actual_mass, device=self.device, dtype=torch.float
+        ).reshape(count)
+        actual_first_moment = torch.as_tensor(
+            actual_first_moment, device=self.device, dtype=torch.float
+        ).reshape(count, 3)
+        actual_inertia_shape = torch.as_tensor(
+            actual_inertia_shape, device=self.device, dtype=torch.float
+        ).reshape(count, 3)
+        nominal_scale = torch.as_tensor(
+            nominal_scale, device=masses.device, dtype=masses.dtype
+        ).reshape(-1, 1)
+        if nominal_scale.numel() == 1:
+            nominal_scale = nominal_scale.expand(count, 1)
+
+        nominal_mass = (
+            float(cfg.rigid_payload_nominal_mass) * nominal_scale
+        )
+        nominal_inertia_diag = (
+            torch.as_tensor(
+                cfg.rigid_payload_nominal_inertia_diag,
+                device=masses.device,
+                dtype=masses.dtype,
+            ).reshape(1, 3)
+            * nominal_scale
+        )
+        actual_com, actual_inertia_diag = replace_payload_component(
+            masses,
+            coms,
+            inertias,
+            body_idx=self.payload_body_idx,
+            env_ids=env_ids.to(masses.device),
+            nominal_mass=nominal_mass,
+            nominal_com=cfg.rigid_payload_nominal_com,
+            nominal_inertia_diag=nominal_inertia_diag,
+            actual_mass=actual_mass,
+            actual_first_moment=actual_first_moment,
+            actual_inertia_shape=actual_inertia_shape,
+        )
+        residual_mass, residual_first_moment = residual_gravity_parameters(
+            actual_mass,
+            actual_first_moment,
+            cfg.rigid_payload_desk_mass,
+            cfg.rigid_payload_desk_com,
+        )
+        self.payload_mass[env_ids_device] = residual_mass.unsqueeze(-1)
+        self.payload_com[env_ids_device] = 0.0
+        self.payload_first_moment[env_ids_device] = residual_first_moment
+        self.rigid_payload_mass[env_ids_device] = actual_mass.unsqueeze(-1)
+        self.rigid_payload_com[env_ids_device] = actual_com.to(self.device)
+        self.rigid_payload_inertia_diag[env_ids_device] = actual_inertia_diag.to(
+            self.device
+        )
+
+        body_link_idx = self.payload_body_idx - 1
+        if body_link_idx >= 0:
+            current_com = coms[
+                env_ids.to(coms.device), self.payload_body_idx, :3
+            ].to(self.device)
+            self.nominal_com_offsets[env_ids_device, body_link_idx] = (
+                self.controller_nominal_coms[env_ids_device, body_link_idx]
+                - current_com
+            )
+
+    def install_rigid_payload_candidate(
+        self, actual_mass, actual_first_moment, actual_inertia_shape
+    ):
+        """Install one SysID candidate per environment into the PhysX plant."""
+        if self.payload_dynamics_mode != "rigid_payload":
+            raise RuntimeError(
+                "install_rigid_payload_candidate requires "
+                "payload_dynamics_mode='rigid_payload'"
+            )
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        env_ids_cpu = env_ids.cpu()
+        masses = self.default_masses.clone()
+        inertias = self.default_inertias.clone()
+        coms = self.default_coms.clone()
+        self._install_rigid_payload_in_arrays(
+            masses,
+            coms,
+            inertias,
+            env_ids_cpu,
+            actual_mass,
+            actual_first_moment,
+            actual_inertia_shape,
+        )
+        self._robot.root_physx_view.set_masses(masses, env_ids_cpu)
+        self._robot.root_physx_view.set_inertias(inertias, env_ids_cpu)
+        self._robot.root_physx_view.set_coms(coms, env_ids_cpu)
+        self._dynamics_write_sim_step = self._sim_step_counter
+
     def _randomize_dynamics(self, env_ids: torch.Tensor):
         env_ids_cpu = env_ids.cpu()
         masses = self.default_masses.clone()
@@ -4991,78 +5118,125 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         masses[env_ids_cpu] = default_masses[env_ids_cpu] * scales
         inertias[env_ids_cpu] = default_inertias[env_ids_cpu] * scales.unsqueeze(-1)
 
-        # The payload is merged into the payload body as a rigid point mass: combined mass, mass-weighted
-        # CoM, and parallel-axis inertia update. The simulated dynamics are then exactly "nominal robot +
-        # point mass", while its weight is applied separately as an external wrench (robot gravity is
-        # disabled, see `_apply_external_wrenches`). The controller stays blind to all of this because it
-        # receives the reconstructed nominal mass matrix (see `_compute_arm_mass_matrix`).
-        if rand_cfg.enable_payload:
-            payload_mass_lower, payload_mass_upper = rand_cfg.payload_mass_range
-            payload_mass = payload_mass_lower + (payload_mass_upper - payload_mass_lower) * torch.rand(
-                (len(env_ids), 1), device=self.device
-            )
-            payload_com_ranges = torch.tensor(rand_cfg.payload_com_range, device=self.device)
-            payload_com = payload_com_ranges[:, 0] + (
-                payload_com_ranges[:, 1] - payload_com_ranges[:, 0]
-            ) * torch.rand((len(env_ids), 3), device=self.device)
-            self.payload_mass[env_ids] = payload_mass
-            self.payload_com[env_ids] = payload_com
-
-            body_idx = self.payload_body_idx
-            m_p = payload_mass.to(mass_device)
-            p = payload_com.to(mass_device)
-            m_b = masses[env_ids_cpu, body_idx].unsqueeze(-1)
-            c_b = coms[env_ids_cpu, body_idx, 0:3]
-            m_new = m_b + m_p
-            # Negative payload represents over-compensation, but the merged body
-            # must retain enough positive mass for a finite CoM and valid inertia.
-            if bool((m_new <= 0.25 * m_b).any()):
-                worst = int(torch.argmin(m_new.squeeze(-1)))
+        if self.payload_dynamics_mode == "rigid_payload":
+            if (
+                float(getattr(rand_cfg, "residual_payload_mass", 0.0))
+                or any(getattr(rand_cfg, "residual_payload_first_moment", [0.0] * 3))
+            ):
                 raise ValueError(
-                    "randomization.payload_mass_range floor is too negative for "
-                    f"this robot: body {self.cfg.randomization.payload_body_name!r} "
-                    f"has mass {float(m_b[worst]):.4f} kg and a sampled payload of "
-                    f"{float(m_p[worst]):+.4f} kg leaves {float(m_new[worst]):.4f} kg. "
-                    "Keep the floor above -0.75 * the body mass printed here."
+                    "rigid_payload derives its Desk residual; do not also set "
+                    "residual_payload_mass or residual_payload_first_moment"
                 )
-            c_new = (m_b * c_b + m_p * p) / m_new
-            d_b = c_b - c_new
-            d_p = p - c_new
-            eye = torch.eye(3, device=mass_device).unsqueeze(0)
-            inertia_b = inertias[env_ids_cpu, body_idx].view(-1, 3, 3)
-            shift_b = m_b.unsqueeze(-1) * (
-                (d_b * d_b).sum(-1)[:, None, None] * eye - d_b.unsqueeze(-1) * d_b.unsqueeze(-2)
-            )
-            shift_p = m_p.unsqueeze(-1) * (
-                (d_p * d_p).sum(-1)[:, None, None] * eye - d_p.unsqueeze(-1) * d_p.unsqueeze(-2)
-            )
-            masses[env_ids_cpu, body_idx] = m_new.squeeze(-1)
-            coms[env_ids_cpu, body_idx, 0:3] = c_new
-            inertias[env_ids_cpu, body_idx] = (inertia_b + shift_b + shift_p).view(-1, 9)
-            # PhysX jacobians are referenced at the current (merged) CoM; record the link-frame offset
-            # back to the nominal CoM for the controller-side mass-matrix reconstruction.
-            self.nominal_com_offsets[env_ids, body_idx - 1] = (c_b - c_new).to(self.device)
-        else:
-            self.payload_mass[env_ids] = 0.0
-            self.payload_com[env_ids] = 0.0
-            self.nominal_com_offsets[env_ids, self.payload_body_idx - 1] = 0.0
-        # SysID residual wrench terms stay separate from payload domain
-        # randomization so a signed residual mass never reaches PhysX mass or
-        # inertia properties.
-        residual_mass = float(getattr(rand_cfg, "residual_payload_mass", 0.0))
-        if residual_mass:
             if rand_cfg.enable_payload:
-                raise ValueError(
-                    "residual_payload_mass cannot be combined with payload "
-                    "domain randomization"
+                mass_lo, mass_hi = rand_cfg.payload_mass_range
+                payload_mass = mass_lo + (mass_hi - mass_lo) * torch.rand(
+                    (len(env_ids), 1), device=self.device
                 )
-            self.payload_mass[env_ids] = residual_mass
-            self.payload_com[env_ids] = 0.0
-        self.payload_first_moment[env_ids] = torch.as_tensor(
-            getattr(rand_cfg, "residual_payload_first_moment", [0.0, 0.0, 0.0]),
-            device=self.device,
-            dtype=torch.float,
-        )
+                com_bounds = torch.as_tensor(
+                    rand_cfg.payload_com_range, device=self.device, dtype=torch.float
+                )
+                payload_com = com_bounds[:, 0] + (
+                    com_bounds[:, 1] - com_bounds[:, 0]
+                ) * torch.rand((len(env_ids), 3), device=self.device)
+                inertia_bounds = torch.as_tensor(
+                    rand_cfg.payload_inertia_shape_range,
+                    device=self.device,
+                    dtype=torch.float,
+                )
+                payload_inertia_shape = inertia_bounds[:, 0] + (
+                    inertia_bounds[:, 1] - inertia_bounds[:, 0]
+                ) * torch.rand((len(env_ids), 3), device=self.device)
+            else:
+                payload_mass = torch.full(
+                    (len(env_ids), 1),
+                    float(rand_cfg.rigid_payload_nominal_mass),
+                    device=self.device,
+                )
+                payload_com = torch.as_tensor(
+                    rand_cfg.rigid_payload_nominal_com,
+                    device=self.device,
+                    dtype=torch.float,
+                ).reshape(1, 3).expand(len(env_ids), 3)
+                payload_inertia_shape = inertia_shape_from_diag(
+                    torch.as_tensor(
+                        rand_cfg.rigid_payload_nominal_inertia_diag,
+                        device=self.device,
+                        dtype=torch.float,
+                    ).reshape(1, 3)
+                ).expand(len(env_ids), 3)
+            self._install_rigid_payload_in_arrays(
+                masses,
+                coms,
+                inertias,
+                env_ids_cpu,
+                payload_mass,
+                payload_mass * payload_com,
+                payload_inertia_shape,
+                nominal_scale=scales[:, self.payload_body_idx],
+            )
+        else:
+            # Historical point-mass randomization and gravity-only residual path.
+            # Keep this branch unchanged for old configs and checkpoints.
+            if rand_cfg.enable_payload:
+                payload_mass_lower, payload_mass_upper = rand_cfg.payload_mass_range
+                payload_mass = payload_mass_lower + (payload_mass_upper - payload_mass_lower) * torch.rand(
+                    (len(env_ids), 1), device=self.device
+                )
+                payload_com_ranges = torch.tensor(rand_cfg.payload_com_range, device=self.device)
+                payload_com = payload_com_ranges[:, 0] + (
+                    payload_com_ranges[:, 1] - payload_com_ranges[:, 0]
+                ) * torch.rand((len(env_ids), 3), device=self.device)
+                self.payload_mass[env_ids] = payload_mass
+                self.payload_com[env_ids] = payload_com
+
+                body_idx = self.payload_body_idx
+                m_p = payload_mass.to(mass_device)
+                p = payload_com.to(mass_device)
+                m_b = masses[env_ids_cpu, body_idx].unsqueeze(-1)
+                c_b = coms[env_ids_cpu, body_idx, 0:3]
+                m_new = m_b + m_p
+                if bool((m_new <= 0.25 * m_b).any()):
+                    worst = int(torch.argmin(m_new.squeeze(-1)))
+                    raise ValueError(
+                        "randomization.payload_mass_range floor is too negative for "
+                        f"this robot: body {self.cfg.randomization.payload_body_name!r} "
+                        f"has mass {float(m_b[worst]):.4f} kg and a sampled payload of "
+                        f"{float(m_p[worst]):+.4f} kg leaves {float(m_new[worst]):.4f} kg. "
+                        "Keep the floor above -0.75 * the body mass printed here."
+                    )
+                c_new = (m_b * c_b + m_p * p) / m_new
+                d_b = c_b - c_new
+                d_p = p - c_new
+                eye = torch.eye(3, device=mass_device).unsqueeze(0)
+                inertia_b = inertias[env_ids_cpu, body_idx].view(-1, 3, 3)
+                shift_b = m_b.unsqueeze(-1) * (
+                    (d_b * d_b).sum(-1)[:, None, None] * eye - d_b.unsqueeze(-1) * d_b.unsqueeze(-2)
+                )
+                shift_p = m_p.unsqueeze(-1) * (
+                    (d_p * d_p).sum(-1)[:, None, None] * eye - d_p.unsqueeze(-1) * d_p.unsqueeze(-2)
+                )
+                masses[env_ids_cpu, body_idx] = m_new.squeeze(-1)
+                coms[env_ids_cpu, body_idx, 0:3] = c_new
+                inertias[env_ids_cpu, body_idx] = (inertia_b + shift_b + shift_p).view(-1, 9)
+                self.nominal_com_offsets[env_ids, body_idx - 1] = (c_b - c_new).to(self.device)
+            else:
+                self.payload_mass[env_ids] = 0.0
+                self.payload_com[env_ids] = 0.0
+                self.nominal_com_offsets[env_ids, self.payload_body_idx - 1] = 0.0
+            residual_mass = float(getattr(rand_cfg, "residual_payload_mass", 0.0))
+            if residual_mass:
+                if rand_cfg.enable_payload:
+                    raise ValueError(
+                        "residual_payload_mass cannot be combined with payload "
+                        "domain randomization"
+                    )
+                self.payload_mass[env_ids] = residual_mass
+                self.payload_com[env_ids] = 0.0
+            self.payload_first_moment[env_ids] = torch.as_tensor(
+                getattr(rand_cfg, "residual_payload_first_moment", [0.0, 0.0, 0.0]),
+                device=self.device,
+                dtype=torch.float,
+            )
         self.joint_torque_bias[env_ids] = torch.as_tensor(
             getattr(rand_cfg, "joint_torque_bias", [0.0] * 7),
             device=self.device,
