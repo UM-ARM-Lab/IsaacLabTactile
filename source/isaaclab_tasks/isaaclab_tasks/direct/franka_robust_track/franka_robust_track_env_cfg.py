@@ -16,7 +16,10 @@ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMater
 from isaaclab.utils import configclass
 from omegaconf import OmegaConf
 
-from force_tool.policy.control_gain_actions import control_gain_action_dim
+from force_tool.policy.control_gain_actions import (
+    control_gain_action_dim,
+    impedance_gain_action_dim,
+)
 
 from isaaclab_tasks.direct.factory.factory_tasks_cfg import ASSET_DIR
 
@@ -41,6 +44,9 @@ class CtrlCfg:
     #                         resulting pose target throughout decimation
     # In both modes the policy still outputs the same normalized 6D delta action.
     delta_target_mode: str = "per_physics_step"
+    # Publish delayed policy targets directly or blend them over the remaining
+    # 200 Hz controller ticks with a quintic minimum-jerk time law.
+    target_interpolation_mode: str = "zoh"  # zoh, minimum_jerk
 
     # By default the OSC controller runs on the *nominal* mass matrix, rebuilt from
     # the default inertial parameters, so it stays blind to the payload and link-mass
@@ -74,6 +80,7 @@ class CtrlCfg:
 
     pos_action_threshold = [0.02, 0.02, 0.02]
     rot_action_threshold = [0.15, 0.15, 0.15]
+    joint_pos_threshold = [0.2] * 7
 
     reset_joints = [0.00871, -0.10368, -0.00794, -1.49139, -0.00083, 1.38774, 0.0]
     default_task_prop_gains = [300.0, 300.0, 300.0, 28.0, 28.0, 28.0]
@@ -108,6 +115,25 @@ class CtrlCfg:
     task_prop_gains_max = [600.0, 600.0, 600.0, 60.0, 60.0, 60.0]
     joint_pos_kp: float = 80.0
     joint_pos_kd: float = 8.0
+    impedance_gain_action_mode: str = "none"
+    impedance_gain_scale_range = [0.5, 1.5]
+    impedance_joint_gain_scale_range = None
+    impedance_cart_gain_scale_range = None
+    impedance_damping_ratio_scale_range = [0.5, 1.5]
+    default_joint_prop_gains = [80.0] * 7
+    default_joint_deriv_gains = [8.0] * 7
+    default_hybrid_joint_prop_gains = [
+        40.0,
+        30.0,
+        50.0,
+        25.0,
+        35.0,
+        25.0,
+        10.0,
+    ]
+    default_hybrid_joint_deriv_gains = [4.0, 6.0, 5.0, 5.0, 3.0, 2.0, 1.0]
+    default_cartesian_prop_gains = [800.0, 800.0, 800.0, 45.0, 45.0, 45.0]
+    default_cartesian_deriv_gains = [51.0, 51.0, 51.0, 3.5, 3.5, 3.5]
 
     default_dof_pos_tensor = [-1.3003, -0.4015, 1.1791, -2.1493, 0.4001, 1.9425, 0.4754]
     kp_null: float = 10.0
@@ -557,7 +583,16 @@ class RandomizationCfg:
     # these do not alter rigid-body mass or inertia.
     residual_payload_mass: float = 0.0
     residual_payload_first_moment = [0.0, 0.0, 0.0]
+    # Reset-time uncertainty around the fitted signed residual payload. Mass is
+    # scaled multiplicatively; the implied CoM (first_moment / mass) receives an
+    # independent symmetric per-axis displacement. The result remains a
+    # residual gravity wrench and is not merged into PhysX mass or inertia.
+    residual_payload_mass_randomization_fraction: float = 0.0
+    residual_payload_com_randomization_m: float = 0.0
     joint_torque_bias = [0.0] * 7
+    # Independent reset-time multiplicative uncertainty for each fitted joint
+    # torque offset. Samples remain fixed for the full episode.
+    joint_torque_bias_randomization_fraction: float = 0.0
 
     enable_joint_friction: bool = True
     # Per-joint static Coulomb friction bands, multiplied by one shared arm-wide
@@ -683,6 +718,9 @@ class RewardCfg:
     contact_normal_pose_weight: float = 0.2
     joint_vel_scale: float = -0.002
     joint_limit_scale: float = -0.05
+    # If positive, penalize positions inside this radian margin from each
+    # per-joint soft limit. Zero preserves the historical symmetric limit term.
+    joint_limit_margin: float = 0.0
     success_pos_threshold: float = 0.001
     success_rot_threshold: float = 0.05
 
@@ -960,6 +998,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "ema_factor",
             "action_rep",
             "delta_target_mode",
+            "target_interpolation_mode",
             "use_gt_mass_matrix",
             "nominal_model_urdf",
             "apply_libfranka_torque_shaping",
@@ -987,6 +1026,17 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "reset_joints",
             "joint_pos_kp",
             "joint_pos_kd",
+            "impedance_gain_action_mode",
+            "impedance_gain_scale_range",
+            "impedance_joint_gain_scale_range",
+            "impedance_cart_gain_scale_range",
+            "impedance_damping_ratio_scale_range",
+            "default_joint_prop_gains",
+            "default_joint_deriv_gains",
+            "default_hybrid_joint_prop_gains",
+            "default_hybrid_joint_deriv_gains",
+            "default_cartesian_prop_gains",
+            "default_cartesian_deriv_gains",
             "nullspace_posture",
         ]:
             if ctrl.get(key, None) is not None:
@@ -1145,7 +1195,10 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "rigid_payload_desk_com",
             "residual_payload_mass",
             "residual_payload_first_moment",
+            "residual_payload_mass_randomization_fraction",
+            "residual_payload_com_randomization_m",
             "joint_torque_bias",
+            "joint_torque_bias_randomization_fraction",
             "enable_joint_friction",
             "joint_friction_range",
             "joint_friction_nominal",
@@ -1196,6 +1249,7 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "gain_action_curvature_normalizer",
             "joint_vel_scale",
             "joint_limit_scale",
+            "joint_limit_margin",
             "gain_rate_scale",
             "force_error_scale",
             "force_error_temp",
@@ -1269,6 +1323,9 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             value = float(getattr(self.reward, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"reward.{name} must be positive and finite")
+        joint_limit_margin = float(self.reward.joint_limit_margin)
+        if not math.isfinite(joint_limit_margin) or joint_limit_margin < 0.0:
+            raise ValueError("reward.joint_limit_margin must be finite and non-negative")
         if self.debug_vis_force_style not in ("components", "vector", "both"):
             raise ValueError(
                 "debug_vis_force_style must be 'components', 'vector', or 'both'"
@@ -1562,8 +1619,17 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
         gain_action_dim = control_gain_action_dim(
             str(self.ctrl.control_gain_action_mode)
         )
-        # Action space: 6 Cartesian delta-pose dims plus optional gain scheduling.
-        action_dim = 6 + (gain_action_dim if self.ctrl.control_gains else 0)
+        impedance_gain_dim = impedance_gain_action_dim(
+            str(self.ctrl.impedance_gain_action_mode)
+        )
+        base_action_dim = 7 if str(self.ctrl.action_rep) == "delta_joint_pos" else 6
+        if impedance_gain_dim and str(self.ctrl.action_rep) != "delta_joint_pos":
+            raise ValueError(
+                "ctrl.impedance_gain_action_mode requires action_rep='delta_joint_pos'"
+            )
+        action_dim = base_action_dim + impedance_gain_dim + (
+            gain_action_dim if self.ctrl.control_gains else 0
+        )
         self.action_space = action_dim
 
         # Proprio obs: ee_pos(3)+ee_quat(4)+optional joint_pos(7)

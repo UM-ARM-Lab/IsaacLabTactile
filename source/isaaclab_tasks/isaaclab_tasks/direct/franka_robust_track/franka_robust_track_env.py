@@ -12,7 +12,10 @@ import gymnasium as gym
 import numpy as np
 import torch
 
-from force_tool.policy.control_gain_actions import expand_control_gain_actions
+from force_tool.policy.control_gain_actions import (
+    expand_control_gain_actions,
+    impedance_gain_action_dim,
+)
 from force_tool.utils.action_penalties import (
     action_alternation_penalty,
     action_curvature_huber_penalty,
@@ -126,6 +129,14 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             raise ValueError(
                 "ctrl.delta_target_mode must be 'per_physics_step' or 'per_control_step', "
                 f"got {self.delta_target_mode!r}."
+            )
+        self.target_interpolation_mode = str(
+            getattr(self.cfg.ctrl, "target_interpolation_mode", "zoh")
+        )
+        if self.target_interpolation_mode not in ("zoh", "minimum_jerk"):
+            raise ValueError(
+                "ctrl.target_interpolation_mode must be 'zoh' or "
+                f"'minimum_jerk', got {self.target_interpolation_mode!r}."
             )
         self._action_target_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self._action_target_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(
@@ -545,6 +556,64 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # ctrl.control_gains is enabled (normalized action [-1, 1] -> [min, max]).
         self.gain_min = torch.tensor(self.cfg.ctrl.task_prop_gains_min, device=self.device).repeat(self.num_envs, 1)
         self.gain_max = torch.tensor(self.cfg.ctrl.task_prop_gains_max, device=self.device).repeat(self.num_envs, 1)
+        self.default_joint_prop_gains = torch.tensor(
+            self.cfg.ctrl.default_joint_prop_gains,
+            device=self.device,
+            dtype=torch.float,
+        ).repeat(self.num_envs, 1)
+        self.default_joint_deriv_gains = torch.tensor(
+            self.cfg.ctrl.default_joint_deriv_gains,
+            device=self.device,
+            dtype=torch.float,
+        ).repeat(self.num_envs, 1)
+        self.default_hybrid_joint_prop_gains = torch.tensor(
+            self.cfg.ctrl.default_hybrid_joint_prop_gains,
+            device=self.device,
+            dtype=torch.float,
+        ).repeat(self.num_envs, 1)
+        self.default_hybrid_joint_deriv_gains = torch.tensor(
+            self.cfg.ctrl.default_hybrid_joint_deriv_gains,
+            device=self.device,
+            dtype=torch.float,
+        ).repeat(self.num_envs, 1)
+        self.default_cartesian_prop_gains = torch.tensor(
+            self.cfg.ctrl.default_cartesian_prop_gains,
+            device=self.device,
+            dtype=torch.float,
+        ).repeat(self.num_envs, 1)
+        self.default_cartesian_deriv_gains = torch.tensor(
+            self.cfg.ctrl.default_cartesian_deriv_gains,
+            device=self.device,
+            dtype=torch.float,
+        ).repeat(self.num_envs, 1)
+        self.impedance_gain_scale_range = torch.tensor(
+            self.cfg.ctrl.impedance_gain_scale_range,
+            device=self.device,
+            dtype=torch.float,
+        ).reshape(1, 2)
+        joint_gain_range = (
+            self.cfg.ctrl.impedance_joint_gain_scale_range
+            or self.cfg.ctrl.impedance_gain_scale_range
+        )
+        cart_gain_range = (
+            self.cfg.ctrl.impedance_cart_gain_scale_range
+            or self.cfg.ctrl.impedance_gain_scale_range
+        )
+        self.impedance_joint_gain_scale_range = torch.tensor(
+            joint_gain_range,
+            device=self.device,
+            dtype=torch.float,
+        ).reshape(1, 2)
+        self.impedance_cart_gain_scale_range = torch.tensor(
+            cart_gain_range,
+            device=self.device,
+            dtype=torch.float,
+        ).reshape(1, 2)
+        self.impedance_damping_ratio_scale_range = torch.tensor(
+            self.cfg.ctrl.impedance_damping_ratio_scale_range,
+            device=self.device,
+            dtype=torch.float,
+        ).reshape(1, 2)
 
         self.payload_mass = torch.zeros((self.num_envs, 1), device=self.device)
         self.payload_com = torch.zeros((self.num_envs, 3), device=self.device)
@@ -656,6 +725,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self._collect_ee_derivative_analytics = bool(
             self.cfg.collect_training_ee_derivative_analytics
         )
+        self._episode_joint_limit_diagnostics = {
+            "near_5pct_any_sum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "near_5pct_joint_fraction_sum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "min_normalized_margin_sum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "steps": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+        }
         self._skip_training_motion_regularization = bool(
             self.cfg.skip_training_motion_regularization
         )
@@ -1062,7 +1137,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.prev_prev_actions[:] = self.prev_actions
         self.prev_actions[:] = self.actions
         actions, action_rep, compliance = self._parse_action_packet(actions)
-        if action_rep not in ("rel_ee_pose", "abs_ee_pose", "delta_ee_pose"):
+        if action_rep not in ("rel_ee_pose", "abs_ee_pose", "delta_ee_pose", "delta_joint_pos"):
             raise ValueError(f"Unsupported FrankaRobustTrack action_rep={action_rep!r}")
         if action_rep == "rel_ee_pose":
             raise ValueError("FrankaRobustTrackEnv does not support action_rep='rel_ee_pose'.")
@@ -1158,20 +1233,44 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self._update_virtual_contact_sensor()
         self._apply_external_wrenches()
         self._physics_substep_in_policy += 1
+        if self.current_action_rep == "delta_joint_pos":
+            self._apply_delta_joint_pos_action()
+            return
+
         if self.current_action_rep == "abs_ee_pose" or (
             self.current_action_rep == "delta_ee_pose" and self.delta_target_mode == "per_control_step"
         ):
-            use_previous = self._physics_substep_in_policy <= self._target_update_delay_steps
-            target_pos = torch.where(
-                use_previous.unsqueeze(-1),
-                self._previous_action_target_pos,
-                self._action_target_pos,
-            )
-            target_quat = torch.where(
-                use_previous.unsqueeze(-1),
-                self._previous_action_target_quat,
-                self._action_target_quat,
-            )
+            if self.target_interpolation_mode == "minimum_jerk":
+                active_substeps = (
+                    int(self.cfg.decimation) - self._target_update_delay_steps
+                ).clamp_min(1)
+                phase = (
+                    self._physics_substep_in_policy - self._target_update_delay_steps
+                ).float() / active_substeps.float()
+                phase = phase.clamp(0.0, 1.0)
+                blend = phase**3 * (10.0 - 15.0 * phase + 6.0 * phase**2)
+                target_pos = torch.lerp(
+                    self._previous_action_target_pos,
+                    self._action_target_pos,
+                    blend.unsqueeze(-1),
+                )
+                target_quat = self._quat_slerp(
+                    self._previous_action_target_quat,
+                    self._action_target_quat,
+                    blend,
+                )
+            else:
+                use_previous = self._physics_substep_in_policy <= self._target_update_delay_steps
+                target_pos = torch.where(
+                    use_previous.unsqueeze(-1),
+                    self._previous_action_target_pos,
+                    self._action_target_pos,
+                )
+                target_quat = torch.where(
+                    use_previous.unsqueeze(-1),
+                    self._previous_action_target_quat,
+                    self._action_target_quat,
+                )
         else:
             target_pos, target_quat = self._get_action_target_pose()
 
@@ -1255,7 +1354,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         """
         if not self.cfg.ctrl.control_gains:
             return
-        gain_actions = self.actions[:, 6:].clamp(-1.0, 1.0)
+        base_action_dim = 7 if self.current_action_rep == "delta_joint_pos" else 6
+        gain_start = base_action_dim + self._impedance_gain_action_dim()
+        gain_actions = self.actions[:, gain_start:].clamp(-1.0, 1.0)
         gain_actions = expand_control_gain_actions(
             gain_actions, str(self.cfg.ctrl.control_gain_action_mode)
         )
@@ -1279,6 +1380,71 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         delta_quat = torch.where(angle.unsqueeze(-1) > 1.0e-6, delta_quat, identity_quat)
         target_quat = torch_utils.quat_mul(delta_quat, self.fingertip_midpoint_quat)
         return target_pos, target_quat
+
+    def _impedance_gain_action_dim(self) -> int:
+        mode = str(getattr(self.cfg.ctrl, "impedance_gain_action_mode", "none"))
+        return impedance_gain_action_dim(mode)
+
+    def _range_scale(
+        self, action: torch.Tensor, value_range: torch.Tensor
+    ) -> torch.Tensor:
+        normalized = 0.5 * (action.clamp(-1.0, 1.0) + 1.0)
+        return (
+            value_range[:, 0:1]
+            + (value_range[:, 1:2] - value_range[:, 0:1]) * normalized
+        )
+
+    def _impedance_gains_from_action(self):
+        mode = str(getattr(self.cfg.ctrl, "impedance_gain_action_mode", "none"))
+        if mode == "none":
+            return None, None, None, None
+        start = 7 if self.current_action_rep == "delta_joint_pos" else 6
+        actions = self.actions[:, start : start + self._impedance_gain_action_dim()]
+        idx = 0
+
+        def next_scale(value_range):
+            nonlocal idx
+            value = self._range_scale(actions[:, idx : idx + 1], value_range)
+            idx += 1
+            return value
+
+        joint_scale = next_scale(self.impedance_joint_gain_scale_range)
+        joint_zeta = (
+            next_scale(self.impedance_damping_ratio_scale_range)
+            if mode in ("joint_scalar_zeta", "hybrid_scalar_zeta")
+            else 1.0
+        )
+        joint_prop_base = (
+            self.default_hybrid_joint_prop_gains
+            if mode.startswith("hybrid")
+            else self.default_joint_prop_gains
+        )
+        joint_deriv_base = (
+            self.default_hybrid_joint_deriv_gains
+            if mode.startswith("hybrid")
+            else self.default_joint_deriv_gains
+        )
+        joint_prop = joint_prop_base * joint_scale
+        joint_deriv = (
+            joint_deriv_base
+            * torch.sqrt(joint_scale.clamp_min(1.0e-6))
+            * joint_zeta
+        )
+        if not mode.startswith("hybrid"):
+            return joint_prop, joint_deriv, None, None
+        cart_scale = next_scale(self.impedance_cart_gain_scale_range)
+        cart_zeta = (
+            next_scale(self.impedance_damping_ratio_scale_range)
+            if mode == "hybrid_scalar_zeta"
+            else 1.0
+        )
+        cart_prop = self.default_cartesian_prop_gains * cart_scale
+        cart_deriv = (
+            self.default_cartesian_deriv_gains
+            * torch.sqrt(cart_scale.clamp_min(1.0e-6))
+            * cart_zeta
+        )
+        return joint_prop, joint_deriv, cart_prop, cart_deriv
 
     def _apply_factory_control(self, target_pos: torch.Tensor, target_quat: torch.Tensor):
         nullspace_joint_target = self.nominal_start_joint_pos
@@ -1384,6 +1550,50 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         joint_error = self.ctrl_target_joint_pos[:, 0:7] - self.joint_pos[:, 0:7]
         joint_torque = self.cfg.ctrl.joint_pos_kp * joint_error - self.cfg.ctrl.joint_pos_kd * self.joint_vel[:, 0:7]
         self.joint_torque[:, 0:7] = torch.clamp(joint_torque, min=-100.0, max=100.0)
+        self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
+        self._robot.set_joint_effort_target(self.joint_torque)
+
+    def _apply_delta_joint_pos_action(self):
+        joint_actions = self.actions[:, 0:7]
+        threshold = torch.as_tensor(
+            self.cfg.ctrl.joint_pos_threshold,
+            device=self.device,
+            dtype=joint_actions.dtype,
+        ).view(1, 7)
+        self.ctrl_target_joint_pos[:] = self.joint_pos
+        self.ctrl_target_joint_pos[:, 0:7] = (
+            self.joint_pos[:, 0:7] + joint_actions * threshold
+        )
+        self.ctrl_target_joint_pos[:, 7:] = 0.04
+
+        joint_prop, joint_deriv, cart_prop, cart_deriv = (
+            self._impedance_gains_from_action()
+        )
+        if joint_prop is None:
+            joint_prop = self.cfg.ctrl.joint_pos_kp
+            joint_deriv = self.cfg.ctrl.joint_pos_kd
+
+        self.joint_torque.zero_()
+        joint_error = self.ctrl_target_joint_pos[:, 0:7] - self.joint_pos[:, 0:7]
+        if cart_prop is None:
+            joint_torque = (
+                joint_prop * joint_error - joint_deriv * self.joint_vel[:, 0:7]
+            )
+        else:
+            jacobian = self.fingertip_midpoint_jacobian
+            kp = torch.diag_embed(joint_prop) + (
+                jacobian.transpose(1, 2) @ torch.diag_embed(cart_prop) @ jacobian
+            )
+            kd = torch.diag_embed(joint_deriv) + (
+                jacobian.transpose(1, 2) @ torch.diag_embed(cart_deriv) @ jacobian
+            )
+            joint_torque = (
+                kp @ joint_error.unsqueeze(-1)
+                - kd @ self.joint_vel[:, 0:7].unsqueeze(-1)
+            ).squeeze(-1)
+        self.joint_torque[:, 0:7] = torch.clamp(
+            joint_torque, min=-100.0, max=100.0
+        )
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
         self._robot.set_joint_effort_target(self.joint_torque)
 
@@ -1762,10 +1972,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.prev_fingertip_midpoint_linaccel = current_linear_acceleration
         self.prev_fingertip_midpoint_angaccel = current_angular_acceleration
         self.ee_jerk_initialized.fill_(True)
-        # Cartesian delta-pose action rate uses only the first 6 dims so it is
-        # unaffected by the optional gain dims, which get their own penalty.
+        base_action_dim = 7 if self.current_action_rep == "delta_joint_pos" else 6
+        # Target-action rate excludes optional gain dims, which get their own
+        # penalty when enabled.
         action_rate = rate_normalization * torch.linalg.norm(
-            self.actions[:, 0:6] - self.prev_actions[:, 0:6], dim=-1
+            self.actions[:, :base_action_dim] - self.prev_actions[:, :base_action_dim],
+            dim=-1,
         )
         if (
             float(self.cfg.reward.action_alternation_scale) != 0.0
@@ -1783,14 +1995,14 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         )
         if collect_pose_curvature:
             pose_action_curvature = action_curvature_huber_penalty(
-                self.actions,
-                self.prev_actions,
-                self.prev_prev_actions,
-                start=0,
-                stop=6,
-                normalizer=(
-                    self.cfg.reward.pose_action_curvature_normalizer
-                    / rate_normalization**2
+                    self.actions,
+                    self.prev_actions,
+                    self.prev_prev_actions,
+                    start=0,
+                    stop=base_action_dim,
+                    normalizer=(
+                        self.cfg.reward.pose_action_curvature_normalizer
+                        / rate_normalization**2
                 ),
             )
             pose_action_curvature = torch.where(
@@ -1800,9 +2012,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             )
         else:
             pose_action_curvature = zero_motion_cost
-        if self.cfg.ctrl.control_gains:
+        has_gain_actions = self.actions.shape[1] > base_action_dim
+        if has_gain_actions:
             gain_rate = rate_normalization * torch.linalg.norm(
-                self.actions[:, 6:12] - self.prev_actions[:, 6:12], dim=-1
+                self.actions[:, base_action_dim:]
+                - self.prev_actions[:, base_action_dim:],
+                dim=-1,
             )
             collect_gain_curvature = (
                 float(self.cfg.reward.gain_action_curvature_scale) != 0.0
@@ -1810,11 +2025,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             )
             if collect_gain_curvature:
                 gain_action_curvature = action_curvature_huber_penalty(
-                    self.actions,
-                    self.prev_actions,
-                    self.prev_prev_actions,
-                    start=6,
-                    stop=None,
+                        self.actions,
+                        self.prev_actions,
+                        self.prev_prev_actions,
+                        start=base_action_dim,
+                        stop=None,
                     normalizer=(
                         self.cfg.reward.gain_action_curvature_normalizer
                         / rate_normalization**2
@@ -1837,6 +2052,25 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.extras["gain_action_curvature_cost_max"] = gain_action_curvature.max()
         joint_vel_norm = torch.linalg.norm(self.joint_vel[:, 0:7], dim=-1)
         joint_limit_penalty = self._joint_limit_penalty()
+        (
+            joint_limit_near_any,
+            joint_limit_joint_fraction,
+            joint_limit_min_normalized_margin,
+        ) = self._joint_limit_proximity_metrics()
+        self.extras["joint_limit_5pct_any"] = joint_limit_near_any.mean()
+        self.extras["joint_limit_5pct_joint_fraction"] = joint_limit_joint_fraction.mean()
+        self.extras["joint_limit_min_normalized_margin_mean"] = (
+            joint_limit_min_normalized_margin.mean()
+        )
+        joint_limit_diagnostics = self._episode_joint_limit_diagnostics
+        joint_limit_diagnostics["near_5pct_any_sum"] += joint_limit_near_any
+        joint_limit_diagnostics["near_5pct_joint_fraction_sum"] += (
+            joint_limit_joint_fraction
+        )
+        joint_limit_diagnostics["min_normalized_margin_sum"] += (
+            joint_limit_min_normalized_margin
+        )
+        joint_limit_diagnostics["steps"] += 1.0
 
         force_track = torch.zeros(self.num_envs, device=self.device)
         torque_track = torch.zeros_like(force_track)
@@ -2259,6 +2493,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.cfg.ctrl.task_deriv_gains_damping_ratio_range = [0.75, 0.75]
         self._collect_ee_derivative_analytics = True
         for value in self._episode_ee_derivative_diagnostics.values():
+            value.zero_()
+        for value in self._episode_joint_limit_diagnostics.values():
             value.zero_()
         try:
             yield
@@ -5224,24 +5460,57 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 self.payload_com[env_ids] = 0.0
                 self.nominal_com_offsets[env_ids, self.payload_body_idx - 1] = 0.0
             residual_mass = float(getattr(rand_cfg, "residual_payload_mass", 0.0))
+            residual_mass_fraction = float(
+                getattr(rand_cfg, "residual_payload_mass_randomization_fraction", 0.0)
+            )
+            residual_mass_scale = torch.ones((len(env_ids), 1), device=self.device)
+            if residual_mass_fraction:
+                residual_mass_scale += residual_mass_fraction * (
+                    2.0 * torch.rand((len(env_ids), 1), device=self.device) - 1.0
+                )
+            sampled_residual_mass = residual_mass * residual_mass_scale
             if residual_mass:
                 if rand_cfg.enable_payload:
                     raise ValueError(
-                        "residual_payload_mass cannot be combined with payload "
-                        "domain randomization"
+                        "residual_payload_mass cannot be combined with payload domain randomization"
                     )
-                self.payload_mass[env_ids] = residual_mass
+                self.payload_mass[env_ids] = sampled_residual_mass
                 self.payload_com[env_ids] = 0.0
-            self.payload_first_moment[env_ids] = torch.as_tensor(
+            residual_first_moment = torch.as_tensor(
                 getattr(rand_cfg, "residual_payload_first_moment", [0.0, 0.0, 0.0]),
                 device=self.device,
                 dtype=torch.float,
             )
-        self.joint_torque_bias[env_ids] = torch.as_tensor(
+            residual_com_randomization_m = float(
+                getattr(rand_cfg, "residual_payload_com_randomization_m", 0.0)
+            )
+            if residual_com_randomization_m:
+                if not residual_mass:
+                    raise ValueError(
+                        "residual payload CoM randomization requires a nonzero residual_payload_mass"
+                    )
+                residual_com = residual_first_moment / residual_mass
+                residual_com = residual_com.unsqueeze(0) + residual_com_randomization_m * (
+                    2.0 * torch.rand((len(env_ids), 3), device=self.device) - 1.0
+                )
+                sampled_first_moment = sampled_residual_mass * residual_com
+            else:
+                sampled_first_moment = residual_first_moment.unsqueeze(0) * residual_mass_scale
+            self.payload_first_moment[env_ids] = sampled_first_moment
+        torque_bias = torch.as_tensor(
             getattr(rand_cfg, "joint_torque_bias", [0.0] * 7),
             device=self.device,
             dtype=torch.float,
         )
+        torque_bias_fraction = float(
+            getattr(rand_cfg, "joint_torque_bias_randomization_fraction", 0.0)
+        )
+        torque_bias_scale = torch.ones((len(env_ids), 7), device=self.device)
+        if torque_bias_fraction:
+            torque_bias_scale += torque_bias_fraction * (
+                2.0 * torch.rand((len(env_ids), 7), device=self.device) - 1.0
+            )
+        self.joint_torque_bias[env_ids] = torque_bias.unsqueeze(0) * torque_bias_scale
 
         self._robot.root_physx_view.set_masses(masses, env_ids_cpu)
         self._robot.root_physx_view.set_inertias(inertias, env_ids_cpu)
@@ -6000,9 +6269,39 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         plt.close(fig)
 
     def _joint_limit_penalty(self):
+        margin = float(getattr(self.cfg.reward, "joint_limit_margin", 0.0))
+        if margin > 0.0:
+            lower_limit, upper_limit = self._arm_joint_position_limits()
+            width = (upper_limit - lower_limit).clamp_min(1.0e-6)
+            margin_tensor = torch.minimum(
+                torch.full_like(width, margin),
+                0.45 * width,
+            )
+            lower = lower_limit + margin_tensor
+            upper = upper_limit - margin_tensor
+            q = self.joint_pos[:, 0:7]
+            excess = torch.relu(lower - q) + torch.relu(q - upper)
+            return torch.sum(
+                (excess / margin_tensor.clamp_min(1.0e-6)).square(), dim=-1
+            )
         soft_limit = 0.95 * math.pi
         excess = torch.relu(torch.abs(self.joint_pos[:, 0:7]) - soft_limit)
         return torch.sum(excess, dim=-1)
+
+    def _arm_joint_position_limits(self):
+        limits = self._robot.data.soft_joint_pos_limits[:, 0:7]
+        return limits[..., 0], limits[..., 1]
+
+    def _joint_limit_proximity_metrics(self):
+        lower_limit, upper_limit = self._arm_joint_position_limits()
+        q = self.joint_pos[:, 0:7]
+        width = (upper_limit - lower_limit).clamp_min(1.0e-6)
+        normalized_margin = torch.minimum(q - lower_limit, upper_limit - q) / width
+        min_normalized_margin = normalized_margin.min(dim=-1).values
+        near_5pct = normalized_margin <= 0.05
+        near_any = near_5pct.any(dim=-1).float()
+        joint_fraction = near_5pct.float().mean(dim=-1)
+        return near_any, joint_fraction, min_normalized_margin
 
     def _log_reset_metrics(self, env_ids: torch.Tensor):
         self.extras["log"] = {}
@@ -6011,6 +6310,21 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         for key, episodic_sum in self._episode_sums.items():
             self.extras["log"][f"Episode_Reward/{key}"] = torch.mean(episodic_sum[env_ids]) / self.max_episode_length_s
             episodic_sum[env_ids] = 0.0
+        joint_limit_diagnostics = self._episode_joint_limit_diagnostics
+        joint_limit_steps = joint_limit_diagnostics["steps"][env_ids].clamp_min(1.0)
+        self.extras["log"]["JointLimit/near_5pct_any_fraction"] = (
+            joint_limit_diagnostics["near_5pct_any_sum"][env_ids] / joint_limit_steps
+        ).mean()
+        self.extras["log"]["JointLimit/near_5pct_joint_fraction"] = (
+            joint_limit_diagnostics["near_5pct_joint_fraction_sum"][env_ids]
+            / joint_limit_steps
+        ).mean()
+        self.extras["log"]["JointLimit/min_normalized_margin_mean"] = (
+            joint_limit_diagnostics["min_normalized_margin_sum"][env_ids]
+            / joint_limit_steps
+        ).mean()
+        for value in joint_limit_diagnostics.values():
+            value[env_ids] = 0.0
         if self._adaptive_phase_enabled:
             failure_rate = (
                 self._adaptive_phase_failure_counts
