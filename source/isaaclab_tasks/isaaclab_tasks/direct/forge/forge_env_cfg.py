@@ -37,6 +37,7 @@ class ForgeCtrlCfg(CtrlCfg):
 
     default_dead_zone = [5.0, 5.0, 5.0, 1.0, 1.0, 1.0]
     action_rep: str = "rel_ee_pose"
+    joint_pos_threshold = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
     # For action_rep="delta_ee_pose": either re-anchor current_pose + delta on
     # every decimation substep (legacy), or snapshot one absolute target at the
     # policy/control-step boundary and hold it throughout decimation.

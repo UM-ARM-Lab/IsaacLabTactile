@@ -295,7 +295,12 @@ class ForgeEnv(FactoryEnv):
             self._reset_buffers(env_ids)
 
         action, action_rep, compliance = self._parse_action_packet(action)
-        if action_rep not in ("rel_ee_pose", "abs_ee_pose", "delta_ee_pose"):
+        if action_rep not in (
+            "rel_ee_pose",
+            "abs_ee_pose",
+            "delta_ee_pose",
+            "delta_joint_pos",
+        ):
             raise ValueError(f"Unsupported Forge action_rep={action_rep!r}")
 
         self.current_action_rep = action_rep
@@ -399,6 +404,9 @@ class ForgeEnv(FactoryEnv):
             return
         if self.current_action_rep == "delta_ee_pose":
             self._apply_delta_ee_pose_action()
+            return
+        if self.current_action_rep == "delta_joint_pos":
+            self._apply_delta_joint_pos_action()
             return
 
         # Step (0): Scale actions to allowed range.
@@ -524,6 +532,20 @@ class ForgeEnv(FactoryEnv):
             ctrl_target_fingertip_midpoint_quat=target_quat,
             ctrl_target_gripper_dof_pos=self.cfg.ctrl.gripper_dof_pos,
         )
+
+    def _apply_delta_joint_pos_action(self):
+        """Apply a normalized joint delta as a direct arm joint target."""
+        joint_threshold = torch.tensor(
+            self.cfg.ctrl.joint_pos_threshold,
+            device=self.device,
+            dtype=self.joint_pos.dtype,
+        ).reshape(1, 7)
+        target = self.joint_pos[:, :7] + self.actions[:, :7] * joint_threshold
+        self.ctrl_target_joint_pos[:, :7] = target
+        self.ctrl_target_joint_pos[:, 7:9] = self.cfg.ctrl.gripper_dof_pos
+        self.joint_torque[:, :] = 0.0
+        self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
+        self._robot.set_joint_effort_target(self.joint_torque)
 
     def _apply_abs_ee_pose_action(self, target_pose: torch.Tensor, clip_pose_target: bool = True):
         """Drive the controller toward an absolute fingertip pose target.

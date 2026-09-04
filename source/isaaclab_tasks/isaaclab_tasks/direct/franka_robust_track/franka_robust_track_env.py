@@ -13,8 +13,10 @@ import numpy as np
 import torch
 
 from force_tool.policy.control_gain_actions import (
-    expand_control_gain_actions,
     impedance_gain_action_dim,
+    impedance_gains_from_actions,
+    scaled_impedance_gains,
+    task_gains_from_actions,
 )
 from force_tool.utils.action_penalties import (
     action_alternation_penalty,
@@ -178,6 +180,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.packet_stiffness_override = None
         self.packet_deriv_override = None
         self.ctrl_target_joint_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
+        self._action_target_joint_pos = torch.zeros(
+            (self.num_envs, 7), device=self.device
+        )
+        self._previous_action_target_joint_pos = torch.zeros_like(
+            self._action_target_joint_pos
+        )
 
         # Observation history: only the proprioceptive part is stacked over the last
         # `obs_history_length` frames (concatenated oldest->newest) so the network
@@ -528,6 +536,13 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.prev_fingertip_midpoint_linaccel = torch.zeros((self.num_envs, 3), device=self.device)
         self.prev_fingertip_midpoint_angaccel = torch.zeros((self.num_envs, 3), device=self.device)
         self.ee_jerk_initialized = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._high_rate_prev_linvel = torch.zeros((self.num_envs, 3), device=self.device)
+        self._high_rate_prev_angvel = torch.zeros((self.num_envs, 3), device=self.device)
+        self._high_rate_prev_linaccel = torch.zeros((self.num_envs, 3), device=self.device)
+        self._high_rate_prev_angaccel = torch.zeros((self.num_envs, 3), device=self.device)
+        self._high_rate_jerk_initialized = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
         self.fingertip_midpoint_jacobian = torch.zeros((self.num_envs, 6, 7), device=self.device)
         self.arm_mass_matrix = torch.eye(7, device=self.device).repeat(self.num_envs, 1, 1)
         self.joint_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
@@ -556,6 +571,24 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # ctrl.control_gains is enabled (normalized action [-1, 1] -> [min, max]).
         self.gain_min = torch.tensor(self.cfg.ctrl.task_prop_gains_min, device=self.device).repeat(self.num_envs, 1)
         self.gain_max = torch.tensor(self.cfg.ctrl.task_prop_gains_max, device=self.device).repeat(self.num_envs, 1)
+        self.control_gain_parameterization = str(
+            self.cfg.ctrl.control_gain_parameterization
+        )
+        self.control_gain_multiplier_range = torch.tensor(
+            self.cfg.ctrl.control_gain_multiplier_range,
+            device=self.device,
+            dtype=torch.float,
+        ).reshape(1, 2)
+        self.control_gain_base_prop_gains = torch.tensor(
+            self.cfg.ctrl.control_gain_base_prop_gains,
+            device=self.device,
+            dtype=torch.float,
+        ).repeat(self.num_envs, 1)
+        self.control_gain_base_deriv_gains = torch.tensor(
+            self.cfg.ctrl.control_gain_base_deriv_gains,
+            device=self.device,
+            dtype=torch.float,
+        ).repeat(self.num_envs, 1)
         self.default_joint_prop_gains = torch.tensor(
             self.cfg.ctrl.default_joint_prop_gains,
             device=self.device,
@@ -586,6 +619,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             device=self.device,
             dtype=torch.float,
         ).repeat(self.num_envs, 1)
+        self.hybrid_joint_prop_gains = self.default_hybrid_joint_prop_gains.clone()
+        self.hybrid_joint_deriv_gains = self.default_hybrid_joint_deriv_gains.clone()
+        self.hybrid_cartesian_prop_gains = self.default_cartesian_prop_gains.clone()
+        self.hybrid_cartesian_deriv_gains = self.default_cartesian_deriv_gains.clone()
         self.impedance_gain_scale_range = torch.tensor(
             self.cfg.ctrl.impedance_gain_scale_range,
             device=self.device,
@@ -686,6 +723,46 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 "joint_limit",
             ]
         }
+        self._reward_buf = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self._reward_prev_actions = torch.zeros_like(self.actions)
+        self._reward_prev_prev_actions = torch.zeros_like(self.actions)
+        self._reward_sample_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._episode_high_rate_diagnostics = {
+            "duration": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+        }
+        self._high_rate_fft_capacity = int(self.max_episode_length * int(self.cfg.decimation))
+        self._high_rate_tracking_pos_error_series = torch.zeros(
+            (self.num_envs, self._high_rate_fft_capacity),
+            dtype=torch.float,
+            device=self.device,
+        )
+        self._high_rate_tracking_pos_error_count = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        for prefix in (
+            "tracking_pos_error",
+            "tracking_rot_error",
+            "linear_accel",
+            "linear_jerk",
+            "angular_accel",
+            "angular_jerk",
+            "joint_limit_near_5pct_any",
+            "joint_limit_near_5pct_joint_fraction",
+            "joint_limit_min_normalized_margin",
+            "force_error",
+            "torque_error",
+            "force_measured",
+            "torque_measured",
+        ):
+            self._episode_high_rate_diagnostics[f"{prefix}_sum"] = torch.zeros(
+                self.num_envs, dtype=torch.float, device=self.device
+            )
+            self._episode_high_rate_diagnostics[f"{prefix}_sqsum"] = torch.zeros(
+                self.num_envs, dtype=torch.float, device=self.device
+            )
+            self._episode_high_rate_diagnostics[f"{prefix}_max"] = torch.zeros(
+                self.num_envs, dtype=torch.float, device=self.device
+            )
         # Unclipped physical Cartesian diagnostics. Keep these separate from
         # Episode_Reward: the reward terms may be hard-clipped or transformed
         # and mix linear motion with 0.1x angular motion. These accumulators
@@ -724,6 +801,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # training; common_eval_context enables them for deterministic eval.
         self._collect_ee_derivative_analytics = bool(
             self.cfg.collect_training_ee_derivative_analytics
+        )
+        self._reward_clock = str(getattr(self.cfg, "reward_clock", "policy_boundary"))
+        self._collect_high_rate_diagnostics = bool(
+            getattr(self.cfg, "collect_high_rate_diagnostics", False)
         )
         self._episode_joint_limit_diagnostics = {
             "near_5pct_any_sum": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
@@ -1125,6 +1206,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._physics_substep_in_policy = 0
+        self._reward_buf.zero_()
         if self.cfg.ctrl.nullspace_posture == "current_policy_hold":
             # Capture the joints before substep 1 and hold this target for the
             # full policy decimation interval (eight substeps at 200/25 Hz).
@@ -1167,6 +1249,18 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             target_pos, target_quat = self._get_action_target_pose()
             self._action_target_pos.copy_(target_pos)
             self._action_target_quat.copy_(target_quat)
+        elif action_rep == "delta_joint_pos":
+            threshold = torch.as_tensor(
+                self.cfg.ctrl.joint_pos_threshold,
+                device=self.device,
+                dtype=self.actions.dtype,
+            ).view(1, 7)
+            self._previous_action_target_joint_pos.copy_(
+                self._action_target_joint_pos
+            )
+            self._action_target_joint_pos.copy_(
+                self.joint_pos[:, :7] + self.actions[:, :7] * threshold
+            )
 
     def _apply_action_latency(self, actions: torch.Tensor) -> torch.Tensor:
         """Execute the action sampled number of control steps in the past."""
@@ -1200,6 +1294,17 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         )
 
     def _apply_action(self):
+        if self._physics_substep_in_policy > 0:
+            if self._reward_clock == "high_rate":
+                self._accumulate_reward_sample(
+                    completed_physics_substeps=self._physics_substep_in_policy,
+                    high_rate=True,
+                    log_metrics=False,
+                )
+            if self._collect_high_rate_diagnostics:
+                self._accumulate_high_rate_diagnostics(
+                    completed_physics_substeps=self._physics_substep_in_policy
+                )
         self._compute_intermediate_values()
         self._update_gains_from_action()
         if self.packet_stiffness_override is not None:
@@ -1348,23 +1453,24 @@ class FrankaRobustTrackEnv(DirectRLEnv):
     def _update_gains_from_action(self):
         """Map the gain action suffix to task PD gains when gain control is on.
 
-        Gain actions are clamped to [-1, 1] and affinely mapped onto
-        [gain_min, gain_max]; derivative gains use the per-environment damping
-        ratio sampled at reset. No-op when `ctrl.control_gains` is False.
+        Absolute actions map onto configured Kp bounds. Multiplier actions scale
+        configured six-axis Kp/Kd bases and preserve their relative shape.
+        No-op when `ctrl.control_gains` is False.
         """
         if not self.cfg.ctrl.control_gains:
             return
         base_action_dim = 7 if self.current_action_rep == "delta_joint_pos" else 6
         gain_start = base_action_dim + self._impedance_gain_action_dim()
-        gain_actions = self.actions[:, gain_start:].clamp(-1.0, 1.0)
-        gain_actions = expand_control_gain_actions(
-            gain_actions, str(self.cfg.ctrl.control_gain_action_mode)
-        )
-        normalized = 0.5 * (gain_actions + 1.0)
-        self.task_prop_gains = self.gain_min + (self.gain_max - self.gain_min) * normalized
-        self.task_deriv_gains = (
-            self.control_gain_damping_ratio
-            * factory_utils.get_deriv_gains(self.task_prop_gains)
+        self.task_prop_gains, self.task_deriv_gains = task_gains_from_actions(
+            self.actions[:, gain_start:],
+            str(self.cfg.ctrl.control_gain_action_mode),
+            parameterization=self.control_gain_parameterization,
+            gain_min=self.gain_min,
+            gain_max=self.gain_max,
+            damping_ratio=float(self.cfg.ctrl.control_gain_damping_ratio),
+            multiplier_range=self.control_gain_multiplier_range,
+            base_prop_gains=self.control_gain_base_prop_gains,
+            base_deriv_gains=self.control_gain_base_deriv_gains,
         )
 
     def _get_action_target_pose(self):
@@ -1385,66 +1491,70 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         mode = str(getattr(self.cfg.ctrl, "impedance_gain_action_mode", "none"))
         return impedance_gain_action_dim(mode)
 
-    def _range_scale(
-        self, action: torch.Tensor, value_range: torch.Tensor
-    ) -> torch.Tensor:
-        normalized = 0.5 * (action.clamp(-1.0, 1.0) + 1.0)
-        return (
-            value_range[:, 0:1]
-            + (value_range[:, 1:2] - value_range[:, 0:1]) * normalized
-        )
-
     def _impedance_gains_from_action(self):
         mode = str(getattr(self.cfg.ctrl, "impedance_gain_action_mode", "none"))
-        if mode == "none":
-            return None, None, None, None
         start = 7 if self.current_action_rep == "delta_joint_pos" else 6
-        actions = self.actions[:, start : start + self._impedance_gain_action_dim()]
-        idx = 0
+        policy_actions = self.actions
+        if self.current_action_rep == "delta_joint_pos":
+            use_previous = (
+                self._physics_substep_in_policy <= self._target_update_delay_steps
+            )
+            policy_actions = torch.where(
+                use_previous.unsqueeze(-1), self.prev_actions, self.actions
+            )
+        actions = policy_actions[
+            :, start : start + self._impedance_gain_action_dim()
+        ]
+        is_hybrid = mode.startswith("hybrid")
+        return impedance_gains_from_actions(
+            actions,
+            mode,
+            shared_gain_scale_range=self.impedance_gain_scale_range,
+            joint_gain_scale_range=self.impedance_joint_gain_scale_range,
+            cart_gain_scale_range=self.impedance_cart_gain_scale_range,
+            damping_ratio_scale_range=self.impedance_damping_ratio_scale_range,
+            joint_prop_base=(
+                self.hybrid_joint_prop_gains
+                if is_hybrid
+                else self.default_joint_prop_gains
+            ),
+            joint_deriv_base=(
+                self.hybrid_joint_deriv_gains
+                if is_hybrid
+                else self.default_joint_deriv_gains
+            ),
+            cart_prop_base=self.hybrid_cartesian_prop_gains,
+            cart_deriv_base=self.hybrid_cartesian_deriv_gains,
+        )
 
-        def next_scale(value_range):
-            nonlocal idx
-            value = self._range_scale(actions[:, idx : idx + 1], value_range)
-            idx += 1
-            return value
+    def _postprocess_arm_torque(self, arm_torque: torch.Tensor) -> torch.Tensor:
+        limits = torch.as_tensor(
+            self.cfg.ctrl.torque_command_limits,
+            device=self.device,
+            dtype=arm_torque.dtype,
+        )
+        self.joint_torque_commanded[:] = torch.clamp(arm_torque, -limits, limits)
+        if not self.cfg.ctrl.apply_libfranka_torque_shaping:
+            return self.joint_torque_commanded
 
-        joint_scale = next_scale(self.impedance_joint_gain_scale_range)
-        joint_zeta = (
-            next_scale(self.impedance_damping_ratio_scale_range)
-            if mode in ("joint_scalar_zeta", "hybrid_scalar_zeta")
-            else 1.0
+        hardware_hz = float(self.cfg.ctrl.actuator_hardware_hz)
+        ticks_float = self.physics_dt * hardware_hz
+        ticks = int(round(ticks_float))
+        if ticks < 1 or not math.isclose(ticks_float, ticks, abs_tol=1.0e-6):
+            raise ValueError(
+                "libfranka torque shaping requires physics_dt * "
+                f"actuator_hardware_hz to be an integer, got {ticks_float}"
+            )
+        interval_torque, final_desired = shape_torque_held_command(
+            self.joint_torque_commanded,
+            self.actuator_desired_torque,
+            ticks=ticks,
+            hardware_dt=1.0 / hardware_hz,
+            cutoff_hz=float(self.cfg.ctrl.actuator_filter_cutoff_hz),
+            max_rate=float(self.cfg.ctrl.actuator_torque_rate_limit),
         )
-        joint_prop_base = (
-            self.default_hybrid_joint_prop_gains
-            if mode.startswith("hybrid")
-            else self.default_joint_prop_gains
-        )
-        joint_deriv_base = (
-            self.default_hybrid_joint_deriv_gains
-            if mode.startswith("hybrid")
-            else self.default_joint_deriv_gains
-        )
-        joint_prop = joint_prop_base * joint_scale
-        joint_deriv = (
-            joint_deriv_base
-            * torch.sqrt(joint_scale.clamp_min(1.0e-6))
-            * joint_zeta
-        )
-        if not mode.startswith("hybrid"):
-            return joint_prop, joint_deriv, None, None
-        cart_scale = next_scale(self.impedance_cart_gain_scale_range)
-        cart_zeta = (
-            next_scale(self.impedance_damping_ratio_scale_range)
-            if mode == "hybrid_scalar_zeta"
-            else 1.0
-        )
-        cart_prop = self.default_cartesian_prop_gains * cart_scale
-        cart_deriv = (
-            self.default_cartesian_deriv_gains
-            * torch.sqrt(cart_scale.clamp_min(1.0e-6))
-            * cart_zeta
-        )
-        return joint_prop, joint_deriv, cart_prop, cart_deriv
+        self.actuator_desired_torque[:] = final_desired
+        return interval_torque
 
     def _apply_factory_control(self, target_pos: torch.Tensor, target_quat: torch.Tensor):
         nullspace_joint_target = self.nominal_start_joint_pos
@@ -1476,35 +1586,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # Model residual gravity-compensation torque after OSC, before PhysX
         # applies its effort limit.
         self.joint_torque[:, 0:7] += self.joint_torque_bias
-        limits = torch.as_tensor(
-            self.cfg.ctrl.torque_command_limits,
-            device=self.device,
-            dtype=self.joint_torque.dtype,
+        self.joint_torque[:, 0:7] = self._postprocess_arm_torque(
+            self.joint_torque[:, 0:7]
         )
-        self.joint_torque_commanded[:] = torch.clamp(
-            self.joint_torque[:, 0:7], -limits, limits
-        )
-        if self.cfg.ctrl.apply_libfranka_torque_shaping:
-            hardware_hz = float(self.cfg.ctrl.actuator_hardware_hz)
-            ticks_float = self.physics_dt * hardware_hz
-            ticks = int(round(ticks_float))
-            if ticks < 1 or not math.isclose(ticks_float, ticks, abs_tol=1.0e-6):
-                raise ValueError(
-                    "libfranka torque shaping requires physics_dt * "
-                    f"actuator_hardware_hz to be an integer, got {ticks_float}"
-                )
-            interval_torque, final_desired = shape_torque_held_command(
-                self.joint_torque_commanded,
-                self.actuator_desired_torque,
-                ticks=ticks,
-                hardware_dt=1.0 / hardware_hz,
-                cutoff_hz=float(self.cfg.ctrl.actuator_filter_cutoff_hz),
-                max_rate=float(self.cfg.ctrl.actuator_torque_rate_limit),
-            )
-            self.actuator_desired_torque[:] = final_desired
-            self.joint_torque[:, 0:7] = interval_torque
-        else:
-            self.joint_torque[:, 0:7] = self.joint_torque_commanded
         self.ctrl_target_joint_pos[:, 7:] = 0.04
         self.joint_torque[:, 7:] = 0.0
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
@@ -1549,20 +1633,17 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.joint_torque.zero_()
         joint_error = self.ctrl_target_joint_pos[:, 0:7] - self.joint_pos[:, 0:7]
         joint_torque = self.cfg.ctrl.joint_pos_kp * joint_error - self.cfg.ctrl.joint_pos_kd * self.joint_vel[:, 0:7]
-        self.joint_torque[:, 0:7] = torch.clamp(joint_torque, min=-100.0, max=100.0)
+        self.joint_torque[:, 0:7] = self._postprocess_arm_torque(joint_torque)
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
         self._robot.set_joint_effort_target(self.joint_torque)
 
     def _apply_delta_joint_pos_action(self):
-        joint_actions = self.actions[:, 0:7]
-        threshold = torch.as_tensor(
-            self.cfg.ctrl.joint_pos_threshold,
-            device=self.device,
-            dtype=joint_actions.dtype,
-        ).view(1, 7)
         self.ctrl_target_joint_pos[:] = self.joint_pos
-        self.ctrl_target_joint_pos[:, 0:7] = (
-            self.joint_pos[:, 0:7] + joint_actions * threshold
+        use_previous = self._physics_substep_in_policy <= self._target_update_delay_steps
+        self.ctrl_target_joint_pos[:, 0:7] = torch.where(
+            use_previous.unsqueeze(-1),
+            self._previous_action_target_joint_pos,
+            self._action_target_joint_pos,
         )
         self.ctrl_target_joint_pos[:, 7:] = 0.04
 
@@ -1575,6 +1656,12 @@ class FrankaRobustTrackEnv(DirectRLEnv):
 
         self.joint_torque.zero_()
         joint_error = self.ctrl_target_joint_pos[:, 0:7] - self.joint_pos[:, 0:7]
+        error_clip = self.cfg.ctrl.joint_pos_error_clip
+        if error_clip is not None:
+            error_clip = torch.as_tensor(
+                error_clip, device=self.device, dtype=joint_error.dtype
+            ).view(1, -1)
+            joint_error = torch.clamp(joint_error, -error_clip, error_clip)
         if cart_prop is None:
             joint_torque = (
                 joint_prop * joint_error - joint_deriv * self.joint_vel[:, 0:7]
@@ -1591,9 +1678,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 kp @ joint_error.unsqueeze(-1)
                 - kd @ self.joint_vel[:, 0:7].unsqueeze(-1)
             ).squeeze(-1)
-        self.joint_torque[:, 0:7] = torch.clamp(
-            joint_torque, min=-100.0, max=100.0
-        )
+        self.joint_torque[:, 0:7] = self._postprocess_arm_torque(joint_torque)
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
         self._robot.set_joint_effort_target(self.joint_torque)
 
@@ -1764,8 +1849,27 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         return {"policy": policy_obs, "critic": critic_obs}
 
     def _get_rewards(self) -> torch.Tensor:
+        high_rate = self._reward_clock == "high_rate"
+        reward = self._accumulate_reward_sample(
+            completed_physics_substeps=int(self.cfg.decimation),
+            high_rate=high_rate,
+            log_metrics=True,
+        )
+        if self._collect_high_rate_diagnostics:
+            self._accumulate_high_rate_diagnostics(
+                completed_physics_substeps=int(self.cfg.decimation)
+            )
+        return reward
+
+    def _accumulate_reward_sample(
+        self,
+        *,
+        completed_physics_substeps: int,
+        high_rate: bool,
+        log_metrics: bool,
+    ) -> torch.Tensor:
         self._compute_intermediate_values()
-        self._update_command()
+        self._update_command(completed_physics_substeps=completed_physics_substeps)
         pos_error, rot_error = self._command_errors()
         raw_pos_error_norm = torch.linalg.norm(pos_error, dim=-1)
         if self.virtual_contact_enabled:
@@ -1792,15 +1896,18 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         ee_vel_norm = torch.linalg.norm(self.fingertip_midpoint_linvel, dim=-1) + 0.1 * torch.linalg.norm(
             self.fingertip_midpoint_angvel, dim=-1
         )
-        # These finite differences shrink when the policy period is shortened.
-        # Normalize them back to the native-reference (15 Hz) interval so the
-        # action-rate coefficient retains its established meaning. EE motion
-        # derivatives use the physical policy timestep for new configurations.
-        rate_normalization = float(self.policy_steps_per_reference)
+        reward_dt = float(self.cfg.sim.dt) if high_rate else float(self.step_dt)
+        # High-rate samples run on the physics/reference interpolation clock.
+        # Policy-boundary samples preserve the historical policy-step scaling.
+        rate_normalization = (
+            float(self.reference_decimation)
+            if high_rate
+            else float(self.policy_steps_per_reference)
+        )
         derivative_mode = str(self.cfg.reward.ee_derivative_mode)
         derivative_penalty_mode = str(self.cfg.reward.ee_derivative_penalty_mode)
         difference_interval = (
-            float(self.step_dt)
+            reward_dt
             if derivative_mode == "physical"
             else 1.0 / rate_normalization
         )
@@ -1861,7 +1968,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         raw_linear_jerk_norm = zero_motion_cost
         raw_angular_accel_norm = zero_motion_cost
         raw_angular_jerk_norm = zero_motion_cost
-        if self._collect_ee_derivative_analytics:
+        if log_metrics and self._collect_ee_derivative_analytics:
             raw_linear_accel_norm, raw_linear_jerk_norm = (
                 raw_linear_acceleration_and_jerk_norms(
                     current_linear_acceleration,
@@ -1893,6 +2000,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             ) = self._reference_accelerations_at_policy_step(
                 self.episode_length_buf,
                 difference_interval,
+                completed_physics_substeps=completed_physics_substeps,
             )
             (
                 ee_accel_norm,
@@ -1925,7 +2033,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             )
         # Per-policy-step scalars consumed only by deterministic eval. Unlike
         # Episode_Reward, these remain physical and untransformed.
-        if self._collect_ee_derivative_analytics:
+        if log_metrics and self._collect_ee_derivative_analytics:
             self.extras["ee_linear_accel_mean"] = raw_linear_accel_norm.mean()
             self.extras["ee_linear_accel_sqmean"] = raw_linear_accel_norm.square().mean()
             self.extras["ee_linear_accel_max"] = raw_linear_accel_norm.max()
@@ -1943,7 +2051,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             self.extras["ee_residual_angular_accel_mean"] = residual_angular_accel_norm.mean()
             self.extras["ee_residual_angular_jerk_mean"] = residual_angular_jerk_norm.mean()
         if (
-            self._collect_ee_derivative_analytics
+            log_metrics
+            and self._collect_ee_derivative_analytics
             and derivative_penalty_mode == "residual_huber"
         ):
             quantiles = torch.tensor((0.5, 0.75, 0.9, 0.99), device=self.device)
@@ -1976,7 +2085,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # Target-action rate excludes optional gain dims, which get their own
         # penalty when enabled.
         action_rate = rate_normalization * torch.linalg.norm(
-            self.actions[:, :base_action_dim] - self.prev_actions[:, :base_action_dim],
+            self.actions[:, :base_action_dim] - self._reward_prev_actions[:, :base_action_dim],
             dim=-1,
         )
         if (
@@ -1984,11 +2093,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             or self._collect_ee_derivative_analytics
         ):
             action_alternation = action_alternation_penalty(
-                self.actions, self.prev_actions, self.prev_prev_actions
+                self.actions, self._reward_prev_actions, self._reward_prev_prev_actions
             )
         else:
             action_alternation = zero_motion_cost
-        curvature_ready = self.episode_length_buf >= 2
+        curvature_ready = self._reward_sample_count >= 2
         collect_pose_curvature = (
             float(self.cfg.reward.pose_action_curvature_scale) != 0.0
             or self._collect_ee_derivative_analytics
@@ -1996,8 +2105,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         if collect_pose_curvature:
             pose_action_curvature = action_curvature_huber_penalty(
                     self.actions,
-                    self.prev_actions,
-                    self.prev_prev_actions,
+                    self._reward_prev_actions,
+                    self._reward_prev_prev_actions,
                     start=0,
                     stop=base_action_dim,
                     normalizer=(
@@ -2016,7 +2125,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         if has_gain_actions:
             gain_rate = rate_normalization * torch.linalg.norm(
                 self.actions[:, base_action_dim:]
-                - self.prev_actions[:, base_action_dim:],
+                - self._reward_prev_actions[:, base_action_dim:],
                 dim=-1,
             )
             collect_gain_curvature = (
@@ -2026,8 +2135,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             if collect_gain_curvature:
                 gain_action_curvature = action_curvature_huber_penalty(
                         self.actions,
-                        self.prev_actions,
-                        self.prev_prev_actions,
+                        self._reward_prev_actions,
+                        self._reward_prev_prev_actions,
                         start=base_action_dim,
                         stop=None,
                     normalizer=(
@@ -2045,7 +2154,7 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         else:
             gain_rate = torch.zeros(self.num_envs, device=self.device)
             gain_action_curvature = torch.zeros(self.num_envs, device=self.device)
-        if self._collect_ee_derivative_analytics:
+        if log_metrics and self._collect_ee_derivative_analytics:
             self.extras["pose_action_curvature_cost_mean"] = pose_action_curvature.mean()
             self.extras["pose_action_curvature_cost_max"] = pose_action_curvature.max()
             self.extras["gain_action_curvature_cost_mean"] = gain_action_curvature.mean()
@@ -2057,20 +2166,21 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             joint_limit_joint_fraction,
             joint_limit_min_normalized_margin,
         ) = self._joint_limit_proximity_metrics()
-        self.extras["joint_limit_5pct_any"] = joint_limit_near_any.mean()
-        self.extras["joint_limit_5pct_joint_fraction"] = joint_limit_joint_fraction.mean()
-        self.extras["joint_limit_min_normalized_margin_mean"] = (
-            joint_limit_min_normalized_margin.mean()
-        )
-        joint_limit_diagnostics = self._episode_joint_limit_diagnostics
-        joint_limit_diagnostics["near_5pct_any_sum"] += joint_limit_near_any
-        joint_limit_diagnostics["near_5pct_joint_fraction_sum"] += (
-            joint_limit_joint_fraction
-        )
-        joint_limit_diagnostics["min_normalized_margin_sum"] += (
-            joint_limit_min_normalized_margin
-        )
-        joint_limit_diagnostics["steps"] += 1.0
+        if log_metrics:
+            self.extras["joint_limit_5pct_any"] = joint_limit_near_any.mean()
+            self.extras["joint_limit_5pct_joint_fraction"] = joint_limit_joint_fraction.mean()
+            self.extras["joint_limit_min_normalized_margin_mean"] = (
+                joint_limit_min_normalized_margin.mean()
+            )
+            joint_limit_diagnostics = self._episode_joint_limit_diagnostics
+            joint_limit_diagnostics["near_5pct_any_sum"] += joint_limit_near_any
+            joint_limit_diagnostics["near_5pct_joint_fraction_sum"] += (
+                joint_limit_joint_fraction
+            )
+            joint_limit_diagnostics["min_normalized_margin_sum"] += (
+                joint_limit_min_normalized_margin
+            )
+            joint_limit_diagnostics["steps"] += 1.0
 
         force_track = torch.zeros(self.num_envs, device=self.device)
         torque_track = torch.zeros_like(force_track)
@@ -2136,47 +2246,48 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                     normalized_gain_error.square() * self.cfg.reward.stiffness_preference_scale
                 )
 
-            self.extras["force_error"] = force_error.mean()
-            self.extras["force_goal_mean"] = goal_force_mag.mean()
-            self.extras["force_measured_mean"] = actual_force_mag.mean()
-            if self.wrench_dim == 6:
-                self.extras["torque_error"] = torque_error.mean()
-                self.extras["torque_goal_mean"] = goal_torque_mag.mean()
-                self.extras["torque_measured_mean"] = actual_torque_mag.mean()
-            self.extras["force_over_goal_fraction"] = (
-                actual_force_mag > goal_force_mag + float(self.cfg.reward.force_over_margin)
-            ).float().mean()
-            self.extras["normal_stiffness_mean"] = normal_gain.mean()
-            if bool(self.cfg.tracking.virtual_contact_randomize_parameters):
-                self.extras["contact_power_exponent_mean"] = (
-                    self.virtual_contact_power_exponent.mean()
-                )
-                self.extras["contact_reference_penetration_mean_mm"] = (
-                    1000.0 * self.virtual_contact_reference_penetration.mean()
-                )
-                self.extras["contact_dissipation_mean"] = (
-                    self.virtual_contact_dissipation.mean()
-                )
-                self.extras["contact_surface_offset_mean_mm"] = (
-                    1000.0 * self.virtual_contact_surface_offset.mean()
-                )
-                self.extras["contact_normal_tilt_mean_deg"] = (
-                    (180.0 / math.pi) * self.virtual_contact_normal_tilt.mean()
-                )
+            if log_metrics:
+                self.extras["force_error"] = force_error.mean()
+                self.extras["force_goal_mean"] = goal_force_mag.mean()
+                self.extras["force_measured_mean"] = actual_force_mag.mean()
                 if self.wrench_dim == 6:
-                    self.extras["contact_rotational_power_exponent_mean"] = (
-                        self.virtual_contact_rotational_power_exponent.mean()
+                    self.extras["torque_error"] = torque_error.mean()
+                    self.extras["torque_goal_mean"] = goal_torque_mag.mean()
+                    self.extras["torque_measured_mean"] = actual_torque_mag.mean()
+                self.extras["force_over_goal_fraction"] = (
+                    actual_force_mag > goal_force_mag + float(self.cfg.reward.force_over_margin)
+                ).float().mean()
+                self.extras["normal_stiffness_mean"] = normal_gain.mean()
+                if bool(self.cfg.tracking.virtual_contact_randomize_parameters):
+                    self.extras["contact_power_exponent_mean"] = (
+                        self.virtual_contact_power_exponent.mean()
                     )
-                    self.extras["contact_rotational_penetration_mean"] = (
-                        self.virtual_contact_rotational_reference_penetration.mean()
+                    self.extras["contact_reference_penetration_mean_mm"] = (
+                        1000.0 * self.virtual_contact_reference_penetration.mean()
                     )
-                    self.extras["contact_rotational_damping_mean"] = (
-                        self.virtual_contact_rotational_damping.mean()
+                    self.extras["contact_dissipation_mean"] = (
+                        self.virtual_contact_dissipation.mean()
                     )
-            elif bool(self.cfg.tracking.virtual_contact_randomize_surface_offset):
-                self.extras["contact_surface_offset_mean_mm"] = (
-                    1000.0 * self.virtual_contact_surface_offset.mean()
-                )
+                    self.extras["contact_surface_offset_mean_mm"] = (
+                        1000.0 * self.virtual_contact_surface_offset.mean()
+                    )
+                    self.extras["contact_normal_tilt_mean_deg"] = (
+                        (180.0 / math.pi) * self.virtual_contact_normal_tilt.mean()
+                    )
+                    if self.wrench_dim == 6:
+                        self.extras["contact_rotational_power_exponent_mean"] = (
+                            self.virtual_contact_rotational_power_exponent.mean()
+                        )
+                        self.extras["contact_rotational_penetration_mean"] = (
+                            self.virtual_contact_rotational_reference_penetration.mean()
+                        )
+                        self.extras["contact_rotational_damping_mean"] = (
+                            self.virtual_contact_rotational_damping.mean()
+                        )
+                elif bool(self.cfg.tracking.virtual_contact_randomize_surface_offset):
+                    self.extras["contact_surface_offset_mean_mm"] = (
+                        1000.0 * self.virtual_contact_surface_offset.mean()
+                    )
 
         startup_smoothness_multiplier = 1.0 + (
             self.cfg.reward.startup_smoothness_multiplier - 1.0
@@ -2235,39 +2346,41 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             "joint_vel": joint_vel_norm * self.cfg.reward.joint_vel_scale,
             "joint_limit": joint_limit_penalty * self.cfg.reward.joint_limit_scale,
         }
-        reward = torch.sum(torch.stack(list(rewards.values())), dim=0) * self.step_dt
+        reward = torch.sum(torch.stack(list(rewards.values())), dim=0) * reward_dt
+        if high_rate:
+            self._reward_buf += reward
         for key, value in rewards.items():
-            self._episode_sums[key] += value * self.step_dt
-        if self._collect_ee_derivative_analytics:
+            self._episode_sums[key] += value * reward_dt
+        if log_metrics and self._collect_ee_derivative_analytics:
             derivative_diagnostics = self._episode_ee_derivative_diagnostics
-            derivative_diagnostics["accel_sum"] += raw_linear_accel_norm * self.step_dt
+            derivative_diagnostics["accel_sum"] += raw_linear_accel_norm * reward_dt
             derivative_diagnostics["accel_sqsum"] += (
-                raw_linear_accel_norm.square() * self.step_dt
+                raw_linear_accel_norm.square() * reward_dt
             )
             derivative_diagnostics["accel_max"] = torch.maximum(
                 derivative_diagnostics["accel_max"], raw_linear_accel_norm
             )
-            derivative_diagnostics["jerk_sum"] += raw_linear_jerk_norm * self.step_dt
+            derivative_diagnostics["jerk_sum"] += raw_linear_jerk_norm * reward_dt
             derivative_diagnostics["jerk_sqsum"] += (
-                raw_linear_jerk_norm.square() * self.step_dt
+                raw_linear_jerk_norm.square() * reward_dt
             )
             derivative_diagnostics["jerk_max"] = torch.maximum(
                 derivative_diagnostics["jerk_max"], raw_linear_jerk_norm
             )
             derivative_diagnostics["angular_accel_sum"] += (
-                raw_angular_accel_norm * self.step_dt
+                raw_angular_accel_norm * reward_dt
             )
             derivative_diagnostics["angular_accel_sqsum"] += (
-                raw_angular_accel_norm.square() * self.step_dt
+                raw_angular_accel_norm.square() * reward_dt
             )
             derivative_diagnostics["angular_accel_max"] = torch.maximum(
                 derivative_diagnostics["angular_accel_max"], raw_angular_accel_norm
             )
             derivative_diagnostics["angular_jerk_sum"] += (
-                raw_angular_jerk_norm * self.step_dt
+                raw_angular_jerk_norm * reward_dt
             )
             derivative_diagnostics["angular_jerk_sqsum"] += (
-                raw_angular_jerk_norm.square() * self.step_dt
+                raw_angular_jerk_norm.square() * reward_dt
             )
             derivative_diagnostics["angular_jerk_max"] = torch.maximum(
                 derivative_diagnostics["angular_jerk_max"], raw_angular_jerk_norm
@@ -2278,9 +2391,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 ("residual_angular_accel", residual_angular_accel_norm),
                 ("residual_angular_jerk", residual_angular_jerk_norm),
             ):
-                derivative_diagnostics[f"{prefix}_sum"] += value * self.step_dt
+                derivative_diagnostics[f"{prefix}_sum"] += value * reward_dt
                 derivative_diagnostics[f"{prefix}_sqsum"] += (
-                    value.square() * self.step_dt
+                    value.square() * reward_dt
                 )
                 derivative_diagnostics[f"{prefix}_max"] = torch.maximum(
                     derivative_diagnostics[f"{prefix}_max"], value
@@ -2300,66 +2413,220 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                     successes,
                     torque_error < float(self.cfg.reward.torque_success_threshold),
                 )
-        native_metric_mask = is_reference_boundary(
-            self.episode_length_buf, self.policy_steps_per_reference
-        )
-        # Dataset-only asynchronous resets can put environments on different
-        # reference-clock phases. The scalar is therefore the fraction of envs at
-        # a native boundary; evaluation uses nonzero values to collect this step.
-        native_metric_sample = native_metric_mask.float().mean()
-        self.extras["native_reference_sample"] = native_metric_sample
-        if bool(native_metric_mask.any()):
-            native_pos_error = pos_error_norm[native_metric_mask]
-            native_rot_error = rot_error_norm[native_metric_mask]
-            native_successes = successes[native_metric_mask]
-            self._update_adaptive_phase_statistics(
-                successes.detach(), native_metric_mask
+        if log_metrics:
+            native_metric_mask = is_reference_boundary(
+                self.episode_length_buf, self.policy_steps_per_reference
             )
-            self.extras["curr_successes"] = native_successes.float().mean()
-            self.extras["curr_tracking_pos_error"] = native_pos_error.mean()
-            self.extras["curr_tracking_rot_error"] = native_rot_error.mean()
-            # Start a fresh window once the previous one filled a full native
-            # reference episode. Only native-boundary samples enter the window.
-            if self._track_err_count >= self._track_err_window:
-                self._track_err_pos_sum.zero_()
-                self._track_err_rot_sum.zero_()
-                self._track_err_count = 0
-                for buf in (
-                    self._track_free_pos_sum,
-                    self._track_free_rot_sum,
-                    self._track_free_succ_sum,
-                    self._track_free_count,
-                    self._track_contact_pos_sum,
-                    self._track_contact_rot_sum,
-                    self._track_contact_succ_sum,
-                    self._track_contact_count,
-                ):
-                    buf.zero_()
-            self._track_err_pos_sum += native_pos_error.mean()
-            self._track_err_rot_sum += native_rot_error.mean()
-            self._track_err_count += 1
-            self.extras["tracking_pos_error"] = (
-                self._track_err_pos_sum / self._track_err_count
-            )
-            self.extras["tracking_rot_error"] = (
-                self._track_err_rot_sum / self._track_err_count
-            )
-            if self.enable_force:
-                self._accumulate_contact_split_metrics(
-                    pos_error_norm,
-                    rot_error_norm,
-                    successes,
+            # Dataset-only asynchronous resets can put environments on different
+            # reference-clock phases. The scalar is therefore the fraction of envs at
+            # a native boundary; evaluation uses nonzero values to collect this step.
+            native_metric_sample = native_metric_mask.float().mean()
+            self.extras["native_reference_sample"] = native_metric_sample
+            if bool(native_metric_mask.any()):
+                native_pos_error = pos_error_norm[native_metric_mask]
+                native_rot_error = rot_error_norm[native_metric_mask]
+                native_successes = successes[native_metric_mask]
+                self._update_adaptive_phase_statistics(
+                    successes.detach(), native_metric_mask
+                )
+                self.extras["curr_successes"] = native_successes.float().mean()
+                self.extras["curr_tracking_pos_error"] = native_pos_error.mean()
+                self.extras["curr_tracking_rot_error"] = native_rot_error.mean()
+                # Start a fresh window once the previous one filled a full native
+                # reference episode. Only native-boundary samples enter the window.
+                if self._track_err_count >= self._track_err_window:
+                    self._track_err_pos_sum.zero_()
+                    self._track_err_rot_sum.zero_()
+                    self._track_err_count = 0
+                    for buf in (
+                        self._track_free_pos_sum,
+                        self._track_free_rot_sum,
+                        self._track_free_succ_sum,
+                        self._track_free_count,
+                        self._track_contact_pos_sum,
+                        self._track_contact_rot_sum,
+                        self._track_contact_succ_sum,
+                        self._track_contact_count,
+                    ):
+                        buf.zero_()
+                self._track_err_pos_sum += native_pos_error.mean()
+                self._track_err_rot_sum += native_rot_error.mean()
+                self._track_err_count += 1
+                self.extras["tracking_pos_error"] = (
+                    self._track_err_pos_sum / self._track_err_count
+                )
+                self.extras["tracking_rot_error"] = (
+                    self._track_err_rot_sum / self._track_err_count
+                )
+                if self.enable_force:
+                    self._accumulate_contact_split_metrics(
+                        pos_error_norm,
+                        rot_error_norm,
+                        successes,
+                        env_mask=native_metric_mask,
+                    )
+                self._accumulate_perstep_error(
+                    pos_error_norm.detach(),
+                    rot_error_norm.detach(),
                     env_mask=native_metric_mask,
                 )
-            self._accumulate_perstep_error(
-                pos_error_norm.detach(),
-                rot_error_norm.detach(),
-                env_mask=native_metric_mask,
+                self._accumulate_gain_stats(env_mask=native_metric_mask)
+            self._vis_pos_error_norm = pos_error_norm.detach()
+            self._vis_rot_error_norm = rot_error_norm.detach()
+
+        self._reward_prev_prev_actions[:] = self._reward_prev_actions
+        self._reward_prev_actions[:] = self.actions
+        self._reward_sample_count += 1
+        return self._reward_buf if high_rate and log_metrics else reward
+
+    def _accumulate_high_rate_diagnostics(
+        self, *, completed_physics_substeps: int
+    ) -> None:
+        self._compute_intermediate_values()
+        self._update_command(completed_physics_substeps=completed_physics_substeps)
+        pos_error, rot_error = self._command_errors()
+        pos_error_norm = torch.linalg.norm(pos_error, dim=-1)
+        rot_error_norm = torch.linalg.norm(rot_error, dim=-1)
+        dt = float(self.cfg.sim.dt)
+        current_linear_acceleration = (
+            self.fingertip_midpoint_linvel - self._high_rate_prev_linvel
+        ) / dt
+        current_angular_acceleration = (
+            self.fingertip_midpoint_angvel - self._high_rate_prev_angvel
+        ) / dt
+        linear_accel_norm, linear_jerk_norm = raw_linear_acceleration_and_jerk_norms(
+            current_linear_acceleration,
+            self._high_rate_prev_linaccel,
+            dt,
+            self._high_rate_jerk_initialized,
+        )
+        angular_accel_norm, angular_jerk_norm = raw_angular_acceleration_and_jerk_norms(
+            current_angular_acceleration,
+            self._high_rate_prev_angaccel,
+            dt,
+            self._high_rate_jerk_initialized,
+        )
+        (
+            joint_limit_near_any,
+            joint_limit_joint_fraction,
+            joint_limit_min_normalized_margin,
+        ) = self._joint_limit_proximity_metrics()
+        force_error = torch.zeros(self.num_envs, device=self.device)
+        torque_error = torch.zeros_like(force_error)
+        force_measured = torch.zeros_like(force_error)
+        torque_measured = torch.zeros_like(force_error)
+        if self.virtual_contact_enabled:
+            measured_wrench = descale_virtual_sensor_wrench(
+                self.force_sensor_smooth,
+                self.cfg.tracking.virtual_contact_force_scale,
+                self.cfg.tracking.virtual_contact_torque_scale,
             )
-            self._accumulate_gain_stats(env_mask=native_metric_mask)
-        self._vis_pos_error_norm = pos_error_norm.detach()
-        self._vis_rot_error_norm = rot_error_norm.detach()
-        return reward
+            measured_force = measured_wrench[:, :3]
+            measured_torque = measured_wrench[:, 3:]
+            force_error = torch.linalg.norm(
+                measured_force - self.target_wrench[:, :3], dim=-1
+            )
+            force_measured = torch.linalg.norm(self.virtual_contact_force, dim=-1)
+            if self.wrench_dim == 6:
+                torque_error = torch.linalg.norm(
+                    measured_torque - self.target_wrench[:, 3:], dim=-1
+                )
+                torque_measured = torch.linalg.norm(self.virtual_contact_torque, dim=-1)
+
+        diagnostics = self._episode_high_rate_diagnostics
+        diagnostics["duration"] += dt
+        sample_idx = self._high_rate_tracking_pos_error_count
+        valid_samples = sample_idx < self._high_rate_fft_capacity
+        if bool(torch.any(valid_samples)):
+            env_ids = self._env_arange[valid_samples]
+            self._high_rate_tracking_pos_error_series[
+                env_ids, sample_idx[valid_samples]
+            ] = pos_error_norm[valid_samples]
+            self._high_rate_tracking_pos_error_count[valid_samples] += 1
+        for prefix, value in (
+            ("tracking_pos_error", pos_error_norm),
+            ("tracking_rot_error", rot_error_norm),
+            ("linear_accel", linear_accel_norm),
+            ("linear_jerk", linear_jerk_norm),
+            ("angular_accel", angular_accel_norm),
+            ("angular_jerk", angular_jerk_norm),
+            ("joint_limit_near_5pct_any", joint_limit_near_any),
+            ("joint_limit_near_5pct_joint_fraction", joint_limit_joint_fraction),
+            ("joint_limit_min_normalized_margin", joint_limit_min_normalized_margin),
+            ("force_error", force_error),
+            ("torque_error", torque_error),
+            ("force_measured", force_measured),
+            ("torque_measured", torque_measured),
+        ):
+            diagnostics[f"{prefix}_sum"] += value * dt
+            diagnostics[f"{prefix}_sqsum"] += value.square() * dt
+            diagnostics[f"{prefix}_max"] = torch.maximum(
+                diagnostics[f"{prefix}_max"], value
+            )
+
+        self.extras["high_rate_tracking_pos_error_mean"] = pos_error_norm.mean()
+        self.extras["high_rate_tracking_pos_error_max"] = pos_error_norm.max()
+        self.extras["high_rate_tracking_rot_error_mean"] = rot_error_norm.mean()
+        self.extras["high_rate_tracking_rot_error_max"] = rot_error_norm.max()
+        self.extras["high_rate_linear_accel_mean"] = linear_accel_norm.mean()
+        self.extras["high_rate_linear_jerk_mean"] = linear_jerk_norm.mean()
+        self.extras["high_rate_angular_accel_mean"] = angular_accel_norm.mean()
+        self.extras["high_rate_angular_jerk_mean"] = angular_jerk_norm.mean()
+        if self.virtual_contact_enabled:
+            self.extras["high_rate_force_error_mean"] = force_error.mean()
+            self.extras["high_rate_force_error_max"] = force_error.max()
+            if self.wrench_dim == 6:
+                self.extras["high_rate_torque_error_mean"] = torque_error.mean()
+                self.extras["high_rate_torque_error_max"] = torque_error.max()
+
+        self._high_rate_prev_linvel[:] = self.fingertip_midpoint_linvel
+        self._high_rate_prev_angvel[:] = self.fingertip_midpoint_angvel
+        self._high_rate_prev_linaccel[:] = current_linear_acceleration
+        self._high_rate_prev_angaccel[:] = current_angular_acceleration
+        self._high_rate_jerk_initialized.fill_(True)
+
+    def _log_high_rate_tracking_fft(self, env_ids: torch.Tensor) -> None:
+        counts = self._high_rate_tracking_pos_error_count[env_ids]
+        active_mask = counts >= 16
+        if not bool(torch.any(active_mask)):
+            return
+        active_env_ids = env_ids[active_mask]
+        sample_count = int(counts[active_mask].min().item())
+        if sample_count < 16:
+            return
+
+        series = self._high_rate_tracking_pos_error_series[
+            active_env_ids, :sample_count
+        ]
+        series = series - series.mean(dim=1, keepdim=True)
+        power = torch.fft.rfft(series, dim=1).abs().square()
+        freqs = torch.fft.rfftfreq(
+            sample_count, d=float(self.cfg.sim.dt), device=self.device
+        )
+        non_dc = freqs > 0.0
+        total_energy = power[:, non_dc].sum(dim=1).clamp_min(1.0e-12)
+
+        def band_energy(lo_hz: float, hi_hz: float) -> torch.Tensor:
+            mask = (freqs >= lo_hz) & (freqs <= hi_hz)
+            if not bool(torch.any(mask)):
+                return torch.zeros_like(total_energy)
+            return power[:, mask].sum(dim=1)
+
+        energy_25_100 = band_energy(25.0, 100.0)
+        energy_50_100 = band_energy(50.0, 100.0)
+        peak_freqs = freqs[non_dc]
+        peak_freq = peak_freqs[power[:, non_dc].argmax(dim=1)]
+
+        log = self.extras["log"]
+        log["HighRateFFT/tracking_pos_error_25_100hz_energy"] = energy_25_100.mean()
+        log["HighRateFFT/tracking_pos_error_25_100hz_ratio"] = (
+            energy_25_100 / total_energy
+        ).mean()
+        log["HighRateFFT/tracking_pos_error_50_100hz_energy"] = energy_50_100.mean()
+        log["HighRateFFT/tracking_pos_error_50_100hz_ratio"] = (
+            energy_50_100 / total_energy
+        ).mean()
+        log["HighRateFFT/tracking_pos_error_peak_freq_hz"] = peak_freq.float().mean()
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
@@ -2585,6 +2852,9 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.actions[env_ids] = 0.0
         self.prev_actions[env_ids] = 0.0
         self.prev_prev_actions[env_ids] = 0.0
+        self._reward_prev_actions[env_ids] = 0.0
+        self._reward_prev_prev_actions[env_ids] = 0.0
+        self._reward_sample_count[env_ids] = 0
         self.reset_actuator_shaping(env_ids)
         # Seed prev velocity with the current (post-reset) velocity so the first
         # step after reset sees zero velocity change instead of a spurious spike.
@@ -2593,6 +2863,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.prev_fingertip_midpoint_linaccel[env_ids] = 0.0
         self.prev_fingertip_midpoint_angaccel[env_ids] = 0.0
         self.ee_jerk_initialized[env_ids] = False
+        self._high_rate_prev_linvel[env_ids] = self.fingertip_midpoint_linvel[env_ids]
+        self._high_rate_prev_angvel[env_ids] = self.fingertip_midpoint_angvel[env_ids]
+        self._high_rate_prev_linaccel[env_ids] = 0.0
+        self._high_rate_prev_angaccel[env_ids] = 0.0
+        self._high_rate_jerk_initialized[env_ids] = False
         self._randomize_dynamics(env_ids)
         self._resample_action_latency(env_ids)
         if self._target_update_delay_sampling_mode == "per_episode":
@@ -2607,6 +2882,11 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         # compare it against the unrelated generic reset posture.
         self.prev_fingertip_midpoint_linvel[env_ids] = self.fingertip_midpoint_linvel[env_ids]
         self.prev_fingertip_midpoint_angvel[env_ids] = self.fingertip_midpoint_angvel[env_ids]
+        self._high_rate_prev_linvel[env_ids] = self.fingertip_midpoint_linvel[env_ids]
+        self._high_rate_prev_angvel[env_ids] = self.fingertip_midpoint_angvel[env_ids]
+        self._high_rate_prev_linaccel[env_ids] = 0.0
+        self._high_rate_prev_angaccel[env_ids] = 0.0
+        self._high_rate_jerk_initialized[env_ids] = False
         if self.enable_force:
             self._sample_force_trajectory(env_ids)
             if self.virtual_contact_enabled:
@@ -2659,6 +2939,8 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             joint_pos[:, 7:] = 0.04
         joint_vel = torch.zeros_like(joint_pos)
         self.ctrl_target_joint_pos[env_ids] = joint_pos
+        self._action_target_joint_pos[env_ids] = joint_pos[:, :7]
+        self._previous_action_target_joint_pos[env_ids] = joint_pos[:, :7]
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
         self._robot.set_joint_position_target(self.ctrl_target_joint_pos[env_ids], env_ids=env_ids)
         self._robot.set_joint_effort_target(torch.zeros_like(joint_pos), env_ids=env_ids)
@@ -3330,6 +3612,10 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.joint_vel[env_ids] = 0.0
         self.joint_vel[env_ids, 0:7] = start_arm_vel
         self.ctrl_target_joint_pos[env_ids] = self.joint_pos[env_ids]
+        self._action_target_joint_pos[env_ids] = self.joint_pos[env_ids, :7]
+        self._previous_action_target_joint_pos[env_ids] = self.joint_pos[
+            env_ids, :7
+        ]
         self._robot.write_joint_state_to_sim(
             self.joint_pos[env_ids], self.joint_vel[env_ids], env_ids=env_ids
         )
@@ -5045,19 +5331,34 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self,
         policy_step: torch.Tensor,
         difference_interval: float,
+        completed_physics_substeps: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return current/previous Cartesian reference accelerations.
 
-        Reference poses are sampled on the same interpolated policy clock as the
-        active command. Clamping the first three historical indices to zero
+        Reference poses are sampled on the same interpolated physics clock as
+        the reward. Clamping the first three historical indices to zero
         reproduces the environment's zero derivative initialization at reset.
         """
 
         interval = float(difference_interval)
         if interval <= 0.0:
             raise ValueError("difference_interval must be positive")
+        decimation = int(self.cfg.decimation)
+        total_substep = policy_step * decimation + int(completed_physics_substeps)
+
+        def pose_at_substep(substep: torch.Tensor):
+            substep = substep.clamp(min=0)
+            sample_policy_step = torch.div(
+                substep, decimation, rounding_mode="floor"
+            )
+            completed = torch.remainder(substep, decimation)
+            return self._traj_pose_at_policy_step(
+                sample_policy_step,
+                completed_physics_substeps=completed,
+            )
+
         poses = [
-            self._traj_pose_at_policy_step((policy_step - offset).clamp(min=0))
+            pose_at_substep(total_substep - offset)
             for offset in range(4)
         ]
         positions = [pose[0] for pose in poses]
@@ -5089,15 +5390,19 @@ class FrankaRobustTrackEnv(DirectRLEnv):
             previous_angular_acceleration,
         )
 
-    def _update_command(self):
+    def _update_command(self, completed_physics_substeps: int = 0):
         """Set the active interpolated pose and mode-specific wrench target."""
         self.command_pos[:], self.command_quat[:] = (
-            self._traj_pose_at_policy_step(self.episode_length_buf)
+            self._traj_pose_at_policy_step(
+                self.episode_length_buf,
+                completed_physics_substeps=completed_physics_substeps,
+            )
         )
         if self.enable_force:
             if self.virtual_contact_enabled:
                 self._set_virtual_contact_surface_at_policy_step(
-                    self.episode_length_buf
+                    self.episode_length_buf,
+                    completed_physics_substeps=completed_physics_substeps,
                 )
             else:
                 idx = self._policy_step_to_reference_index(
@@ -5198,6 +5503,40 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         self.control_gain_damping_ratio[env_ids] = zeta
         deriv_gains = deriv_gains * zeta
         self.task_deriv_gains[env_ids] = deriv_gains
+        self._randomize_hybrid_gains(env_ids)
+
+    def _randomize_hybrid_gains(self, env_ids: torch.Tensor):
+        scale_range = self.cfg.ctrl.hybrid_gain_randomization_scale_range
+        if scale_range is None:
+            scale = torch.ones((env_ids.numel(), 1), device=self.device)
+        else:
+            if len(scale_range) != 2:
+                raise ValueError(
+                    "ctrl.hybrid_gain_randomization_scale_range must be [low, high]."
+                )
+            low, high = (float(value) for value in scale_range)
+            if not 0.0 < low <= 1.0 <= high:
+                raise ValueError(
+                    "ctrl.hybrid_gain_randomization_scale_range must satisfy "
+                    "0 < low <= 1 <= high."
+                )
+            scale = low + (high - low) * torch.rand(
+                (env_ids.numel(), 1), device=self.device
+            )
+        joint_prop, joint_deriv = scaled_impedance_gains(
+            self.default_hybrid_joint_prop_gains[env_ids],
+            self.default_hybrid_joint_deriv_gains[env_ids],
+            scale,
+        )
+        cart_prop, cart_deriv = scaled_impedance_gains(
+            self.default_cartesian_prop_gains[env_ids],
+            self.default_cartesian_deriv_gains[env_ids],
+            scale,
+        )
+        self.hybrid_joint_prop_gains[env_ids] = joint_prop
+        self.hybrid_joint_deriv_gains[env_ids] = joint_deriv
+        self.hybrid_cartesian_prop_gains[env_ids] = cart_prop
+        self.hybrid_cartesian_deriv_gains[env_ids] = cart_deriv
 
     def _sample_scaled_per_joint(
         self, num_samples: int, per_joint_range, scale_range, num_joints: int = 7
@@ -6420,6 +6759,46 @@ class FrankaRobustTrackEnv(DirectRLEnv):
                 ][env_ids].max()
             for value in diagnostics.values():
                 value[env_ids] = 0.0
+        if self._collect_high_rate_diagnostics:
+            diagnostics = self._episode_high_rate_diagnostics
+            if bool(torch.any(diagnostics["duration"][env_ids] > 0.0)):
+                duration = diagnostics["duration"][env_ids].clamp_min(
+                    float(self.cfg.sim.dt)
+                )
+                for log_name, prefix in (
+                    ("tracking_pos_error", "tracking_pos_error"),
+                    ("tracking_rot_error", "tracking_rot_error"),
+                    ("linear_accel", "linear_accel"),
+                    ("linear_jerk", "linear_jerk"),
+                    ("angular_accel", "angular_accel"),
+                    ("angular_jerk", "angular_jerk"),
+                    ("joint_limit_near_5pct_any", "joint_limit_near_5pct_any"),
+                    (
+                        "joint_limit_near_5pct_joint_fraction",
+                        "joint_limit_near_5pct_joint_fraction",
+                    ),
+                    (
+                        "joint_limit_min_normalized_margin",
+                        "joint_limit_min_normalized_margin",
+                    ),
+                    ("force_error", "force_error"),
+                    ("torque_error", "torque_error"),
+                    ("force_measured", "force_measured"),
+                    ("torque_measured", "torque_measured"),
+                ):
+                    mean = diagnostics[f"{prefix}_sum"][env_ids] / duration
+                    sqmean = diagnostics[f"{prefix}_sqsum"][env_ids] / duration
+                    self.extras["log"][f"HighRate/{log_name}_mean"] = mean.mean()
+                    self.extras["log"][f"HighRate/{log_name}_rms"] = torch.sqrt(
+                        sqmean.mean()
+                    )
+                    self.extras["log"][f"HighRate/{log_name}_max"] = diagnostics[
+                        f"{prefix}_max"
+                    ][env_ids].max()
+                self._log_high_rate_tracking_fft(env_ids)
+            for value in diagnostics.values():
+                value[env_ids] = 0.0
+            self._high_rate_tracking_pos_error_count[env_ids] = 0
         self.extras["log"]["Dynamics/payload_mass"] = self.payload_mass[env_ids].mean()
         self.extras["log"]["Dynamics/joint_friction"] = self.joint_friction[env_ids].mean()
         self.extras["log"]["Dynamics/joint_armature"] = self.joint_armature[env_ids].mean()

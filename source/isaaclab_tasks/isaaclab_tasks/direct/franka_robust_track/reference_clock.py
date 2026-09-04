@@ -521,7 +521,7 @@ def reference_coordinates(
     *,
     policy_decimation: int,
     reference_decimation: int,
-    completed_physics_substeps: int = 0,
+    completed_physics_substeps: int | torch.Tensor = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return native endpoints and phase at a policy/physics clock instant."""
     if policy_decimation < 1:
@@ -532,12 +532,19 @@ def reference_coordinates(
         raise ValueError(
             "reference_decimation must be divisible by policy_decimation"
         )
-    if not 0 <= completed_physics_substeps <= policy_decimation:
+    completed = completed_physics_substeps
+    if isinstance(completed, torch.Tensor):
+        invalid_completed = bool(
+            torch.any((completed < 0) | (completed > policy_decimation))
+        )
+    else:
+        invalid_completed = not 0 <= completed <= policy_decimation
+    if invalid_completed:
         raise ValueError(
             "completed_physics_substeps must be in [0, policy_decimation]"
         )
     total_physics_steps = (
-        policy_step * policy_decimation + completed_physics_substeps
+        policy_step * policy_decimation + completed
     )
     i0 = torch.div(
         total_physics_steps, reference_decimation, rounding_mode="floor"

@@ -100,17 +100,18 @@ class CtrlCfg:
     # match the uniform damping vector used by the hardware controller.
     task_deriv_gains_damping_ratio_range = None
 
-    # If True, the policy also outputs the 6 task-space proportional gains
-    # (3 translational, 3 rotational) as extra action dims, mapped from the
-    # normalized [-1, 1] range onto [task_prop_gains_min, task_prop_gains_max].
-    # The derivative gains are recomputed from the commanded proportional gains
-    # each step. If False, gains stay at `default_task_prop_gains` (plus optional
-    # reset-time noise).
+    # If True, the policy also schedules task-space gains. Absolute mode maps
+    # actions onto Kp bounds and derives Kd from one damping ratio. Multiplier
+    # mode scales configured six-axis Kp/Kd bases, preserving anisotropic gains.
     control_gains: bool = False
     # "per_axis" preserves the historical six gain actions; "scalar" uses one
     # shared action; "trans_rot" uses separate translation and rotation actions.
     control_gain_action_mode: str = "per_axis"
+    control_gain_parameterization: str = "absolute"
     control_gain_damping_ratio: float = 0.75
+    control_gain_multiplier_range = [0.7, 1.3]
+    control_gain_base_prop_gains = [1000.0, 1000.0, 1000.0, 100.0, 100.0, 100.0]
+    control_gain_base_deriv_gains = [63.25, 63.25, 63.25, 5.66, 5.66, 5.66]
     task_prop_gains_min = [100.0, 100.0, 100.0, 10.0, 10.0, 10.0]
     task_prop_gains_max = [600.0, 600.0, 600.0, 60.0, 60.0, 60.0]
     joint_pos_kp: float = 80.0
@@ -120,6 +121,9 @@ class CtrlCfg:
     impedance_joint_gain_scale_range = None
     impedance_cart_gain_scale_range = None
     impedance_damping_ratio_scale_range = [0.5, 1.5]
+    # Optional shared per-episode hybrid-gain multiplier. Kp uses k and Kd
+    # uses sqrt(k), preserving the nominal damping ratio approximation.
+    hybrid_gain_randomization_scale_range = None
     default_joint_prop_gains = [80.0] * 7
     default_joint_deriv_gains = [8.0] * 7
     default_hybrid_joint_prop_gains = [
@@ -134,6 +138,7 @@ class CtrlCfg:
     default_hybrid_joint_deriv_gains = [4.0, 6.0, 5.0, 5.0, 3.0, 2.0, 1.0]
     default_cartesian_prop_gains = [800.0, 800.0, 800.0, 45.0, 45.0, 45.0]
     default_cartesian_deriv_gains = [51.0, 51.0, 51.0, 3.5, 3.5, 3.5]
+    joint_pos_error_clip = [0.2] * 7
 
     default_dof_pos_tensor = [-1.3003, -0.4015, 1.1791, -2.1493, 0.4001, 1.9425, 0.4754]
     kp_null: float = 10.0
@@ -763,6 +768,11 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
     # be paired with zero derivative/action-shaping reward weights.
     collect_training_ee_derivative_analytics: bool = False
     skip_training_motion_regularization: bool = False
+    # Reward and diagnostic clocks are separate. The default preserves the
+    # historical policy-boundary objective. High-rate diagnostics can be enabled
+    # independently to detect substep tracking, force, and smoothness spikes.
+    reward_clock: str = "policy_boundary"  # policy_boundary, high_rate
+    collect_high_rate_diagnostics: bool = False
 
     # Debug visualization of the reference trajectory: current command frame,
     # lookahead targets, and the full episode path (sampled in time).
@@ -980,6 +990,12 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             self.skip_training_motion_regularization = bool(
                 env.skip_training_motion_regularization
             )
+        if env.get("reward_clock", None) is not None:
+            self.reward_clock = str(env.reward_clock)
+        if env.get("collect_high_rate_diagnostics", None) is not None:
+            self.collect_high_rate_diagnostics = bool(
+                env.collect_high_rate_diagnostics
+            )
         # Physics-step control: `decimation` sim substeps per control step and the
         # physics `sim.dt`. step_dt = decimation * sim.dt sets the control rate, so to
         # match the factory/forge peg-collection env exactly use dt=1/120 + decimation=8
@@ -1020,7 +1036,11 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "task_deriv_gains_damping_ratio_range",
             "control_gains",
             "control_gain_action_mode",
+            "control_gain_parameterization",
             "control_gain_damping_ratio",
+            "control_gain_multiplier_range",
+            "control_gain_base_prop_gains",
+            "control_gain_base_deriv_gains",
             "task_prop_gains_min",
             "task_prop_gains_max",
             "reset_joints",
@@ -1031,12 +1051,14 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             "impedance_joint_gain_scale_range",
             "impedance_cart_gain_scale_range",
             "impedance_damping_ratio_scale_range",
+            "hybrid_gain_randomization_scale_range",
             "default_joint_prop_gains",
             "default_joint_deriv_gains",
             "default_hybrid_joint_prop_gains",
             "default_hybrid_joint_deriv_gains",
             "default_cartesian_prop_gains",
             "default_cartesian_deriv_gains",
+            "joint_pos_error_clip",
             "nullspace_posture",
         ]:
             if ctrl.get(key, None) is not None:
@@ -1612,9 +1634,41 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
                 raise ValueError("tracking.torque_sensor_bias_range must be non-negative")
         if self.tracking.num_future_steps < 1:
             raise ValueError("tracking.num_future_steps must be at least 1")
+        self.reward_clock = str(self.reward_clock)
+        if self.reward_clock not in ("policy_boundary", "high_rate"):
+            raise ValueError(
+                "reward_clock must be 'policy_boundary' or 'high_rate', "
+                f"got {self.reward_clock!r}"
+            )
+        self.collect_high_rate_diagnostics = bool(
+            self.collect_high_rate_diagnostics
+        )
         self.tool_frame = str(self.tool_frame).strip() or "auto"
         self.robot.spawn.usd_path = f"{ASSET_DIR}/{self.robot_usd_path}"
         self.sim.render_interval = self.decimation
+
+        gain_parameterization = str(self.ctrl.control_gain_parameterization)
+        if gain_parameterization not in ("absolute", "multiplier"):
+            raise ValueError(
+                "ctrl.control_gain_parameterization must be 'absolute' or "
+                f"'multiplier', got {gain_parameterization!r}"
+            )
+        multiplier_range = self.ctrl.control_gain_multiplier_range
+        if (
+            len(multiplier_range) != 2
+            or float(multiplier_range[0]) <= 0.0
+            or float(multiplier_range[0]) > float(multiplier_range[1])
+        ):
+            raise ValueError(
+                "ctrl.control_gain_multiplier_range must satisfy 0 < low <= high"
+            )
+        for name in (
+            "control_gain_base_prop_gains",
+            "control_gain_base_deriv_gains",
+        ):
+            values = getattr(self.ctrl, name)
+            if len(values) != 6 or any(float(value) <= 0.0 for value in values):
+                raise ValueError(f"ctrl.{name} must contain six positive values")
 
         gain_action_dim = control_gain_action_dim(
             str(self.ctrl.control_gain_action_mode)
@@ -1623,7 +1677,10 @@ class FrankaRobustTrackEnvCfg(DirectRLEnvCfg):
             str(self.ctrl.impedance_gain_action_mode)
         )
         base_action_dim = 7 if str(self.ctrl.action_rep) == "delta_joint_pos" else 6
-        if impedance_gain_dim and str(self.ctrl.action_rep) != "delta_joint_pos":
+        if (
+            str(self.ctrl.impedance_gain_action_mode) != "none"
+            and str(self.ctrl.action_rep) != "delta_joint_pos"
+        ):
             raise ValueError(
                 "ctrl.impedance_gain_action_mode requires action_rep='delta_joint_pos'"
             )
