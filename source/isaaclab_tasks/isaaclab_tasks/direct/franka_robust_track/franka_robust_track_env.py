@@ -39,7 +39,7 @@ import isaacsim.core.utils.torch as torch_utils
 
 from isaaclab_tasks.direct.factory import factory_control, factory_utils
 
-from .actuator_shaping import shape_torque_held_command
+from .actuator_shaping import shape_torque_held_command, shape_torque_over_interval
 from .franka_robust_track_env_cfg import FrankaRobustTrackEnvCfg
 from .inertial_models import map_urdf_inertials
 from .motion_regularization import (
@@ -1541,10 +1541,17 @@ class FrankaRobustTrackEnv(DirectRLEnv):
         ticks_float = self.physics_dt * hardware_hz
         ticks = int(round(ticks_float))
         if ticks < 1 or not math.isclose(ticks_float, ticks, abs_tol=1.0e-6):
-            raise ValueError(
-                "libfranka torque shaping requires physics_dt * "
-                f"actuator_hardware_hz to be an integer, got {ticks_float}"
+            interval_torque, final_desired, phase = shape_torque_over_interval(
+                self.joint_torque_commanded, self.actuator_desired_torque,
+                interval_dt=self.physics_dt,
+                time_to_next_tick=getattr(self, "_actuator_time_to_next_tick", 0.0),
+                hardware_dt=1.0 / hardware_hz,
+                cutoff_hz=float(self.cfg.ctrl.actuator_filter_cutoff_hz),
+                max_rate=float(self.cfg.ctrl.actuator_torque_rate_limit),
             )
+            self._actuator_time_to_next_tick = phase
+            self.actuator_desired_torque[:] = final_desired
+            return interval_torque
         interval_torque, final_desired = shape_torque_held_command(
             self.joint_torque_commanded,
             self.actuator_desired_torque,
